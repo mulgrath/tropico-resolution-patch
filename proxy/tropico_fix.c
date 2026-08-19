@@ -1,0 +1,375 @@
+/*
+ * tropico_fix -- runtime patcher for PopTop Tropico (2001), shipped as a
+ * binkw32.dll proxy.  See ../FINDINGS.md for how every address here was derived.
+ *
+ * WHY A PROXY, AND WHY binkw32:
+ *   The obvious vehicle, a ddraw.dll proxy, does not work.  Tropico does not
+ *   import ddraw statically -- it LoadLibraryA("DDraw.dll")s it from 0x52dbd0,
+ *   which is called at 0x514e55, the LAST instruction of 0x514d60, the very
+ *   function containing the desktop-width gate.  0x514d60 has exactly one caller
+ *   and runs once, so a ddraw proxy is handed DllMain after the gate loop has
+ *   already finished.  binkw32.dll, by contrast, is a static import of both the
+ *   GOG and the Steam build (verified: identical 81-export sets), so it loads at
+ *   process init.
+ *
+ * WHY WE DO NOT PATCH IN DllMain:
+ *   The Steam build is SteamStub-wrapped: it carries a .bind section and its
+ *   .text has entropy 8.00 (vs 6.08 for GOG) -- fully encrypted on disk.  The
+ *   stub decrypts .text in the entry-point wrapper, which runs AFTER the DllMain
+ *   of every static import.  Scanning in DllMain would therefore read ciphertext.
+ *
+ *   Instead we IAT-hook GDI32!GetDeviceCaps in the main module and patch on the
+ *   first call.  That is not a guess about ordering: the gate at 0x514d9d reads
+ *   [0x60c118], which is written ONLY by 0x515160 from GetDeviceCaps.  Were it
+ *   still zero when the gate ran, `cmp [eax],ebx / jge` would skip every entry
+ *   but slot 0 and the game could only ever offer 640x480.  It plainly offers
+ *   more, so GetDeviceCaps necessarily precedes the gate.  The import table
+ *   lives in .idata and is left in the clear by the stub, so the hook installs
+ *   fine on both builds.
+ *
+ *   The hook stays installed until a scan actually succeeds, so if the very first
+ *   GetDeviceCaps call somehow precedes decryption we simply retry on the next.
+ */
+
+#include <windows.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include <math.h>
+
+/* ------------------------------------------------------------------ logging */
+
+static char g_logpath[MAX_PATH];
+static char g_dir[MAX_PATH];
+
+static void logf_(const char *fmt, ...)
+{
+    FILE *f = fopen(g_logpath, "a");
+    if (!f) return;
+    va_list ap; va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
+/* --------------------------------------------------------- module / sections */
+
+static BYTE *g_base;
+static BYTE *g_text; static SIZE_T g_textlen;
+static BYTE *g_data; static SIZE_T g_datalen;
+
+static int locate_sections(void)
+{
+    g_base = (BYTE *)GetModuleHandleA(NULL);
+    if (!g_base) return 0;
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)g_base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(g_base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+
+    IMAGE_SECTION_HEADER *s = IMAGE_FIRST_SECTION(nt);
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; i++, s++) {
+        if (!memcmp(s->Name, ".text", 5)) { g_text = g_base + s->VirtualAddress; g_textlen = s->Misc.VirtualSize; }
+        if (!memcmp(s->Name, ".data", 5)) { g_data = g_base + s->VirtualAddress; g_datalen = s->Misc.VirtualSize; }
+    }
+    return g_text && g_data;
+}
+
+/* ----------------------------------------------------------- pattern scanning
+ *
+ * Every scan REQUIRES a unique match.  Two matches means the signature is not
+ * specific enough and we would be guessing which one the game actually uses --
+ * refuse rather than patch the wrong site.
+ */
+static BYTE *find_unique(const BYTE *pat, SIZE_T len, BYTE *start, SIZE_T size, const char *what)
+{
+    BYTE *hit = NULL;
+    int n = 0;
+    if (size < len) return NULL;
+    for (SIZE_T i = 0; i + len <= size; i++) {
+        if (start[i] == pat[0] && !memcmp(start + i, pat, len)) {
+            if (++n > 1) { logf_("  [!] %s: %d+ matches, signature not unique -- refusing", what, n); return NULL; }
+            hit = start + i;
+        }
+    }
+    if (!n) return NULL;
+    return hit;
+}
+
+static int poke(void *dst, const void *src, SIZE_T len)
+{
+    DWORD old;
+    if (!VirtualProtect(dst, len, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    memcpy(dst, src, len);
+    VirtualProtect(dst, len, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), dst, len);
+    return 1;
+}
+
+/* ------------------------------------------------------------- the signatures */
+
+/* FINDINGS section 2: the desktop-width gate at 0x514d96.
+ *   cmp eax,0x5a0fa0 / je +8 / cmp [eax],ebx / jge 0x514e42
+ * The final jge is what skips any entry whose width >= GetDeviceCaps(HORZRES).
+ * It uses >=, not >, so a mode exactly as wide as the desktop -- the common case
+ * once we pick the display's own best mode -- would be rejected. */
+static const BYTE GATE_SIG[]  = {0x3d,0xa0,0x0f,0x5a,0x00, 0x74,0x08, 0x39,0x18,
+                                 0x0f,0x8d,0x9d,0x00,0x00,0x00};
+#define GATE_PATCH_OFF 9
+#define GATE_PATCH_LEN 6
+
+/* FINDINGS section 16: the Hardware 3D gate, an x87 SIGNED compare. */
+static const BYTE VRAM_SIG[]  = {0xdb,0x05,0xa0,0x8a,0x61,0x00,
+                                 0x89,0x1d,0x0c,0xc8,0x61,0x00,
+                                 0xdc,0x1d,0x88,0xe4,0x57,0x00,
+                                 0xdf,0xe0, 0xf6,0xc4,0x41, 0x75,0x20};
+static const BYTE VRAM_FIX[]  = {0xa1,0xa0,0x8a,0x61,0x00,
+                                 0x89,0x1d,0x0c,0xc8,0x61,0x00,
+                                 0x3d,0x00,0x00,0x88,0x00,
+                                 0x76,0x27,
+                                 0x90,0x90,0x90,0x90,0x90,0x90,0x90};
+
+/* FINDINGS section 16: the second signed test, a texture budget. jge -> jae. */
+static const BYTE BUDGET_SIG[] = {0x81,0x3d,0xa0,0x8a,0x61,0x00, 0x00,0x00,0xd0,0x00, 0x7d};
+#define BUDGET_PATCH_OFF 10
+
+/* FINDINGS section 8: the code compare-chain, slot 4's arm.
+ *   cmp ecx,0x640 / jne +0x16 / cmp edx,0x4b0 */
+static const BYTE CHAIN_SIG[] = {0x81,0xf9,0x40,0x06,0x00,0x00, 0x75,0x16,
+                                 0x81,0xfa,0xb0,0x04,0x00,0x00};
+#define CHAIN_W_OFF 2
+#define CHAIN_H_OFF 10
+
+/* FINDINGS section 1: the resolution table, 5 x {DWORD w; DWORD h}, in .data. */
+static const DWORD TABLE_SIG[10] = {640,480, 800,600, 1024,768, 1280,1024, 1600,1200};
+#define SLOT4_OFF 32
+
+/* ------------------------------------------------------- resolution selection
+ *
+ * Policy (owner's decision, 2026-08-19): leave slots 0-3 stock and choose only
+ * slot 4 at runtime.  Constraints, all from FINDINGS:
+ *   s11  the HUD/background art is drawn at the slot's STOCK width, so the target
+ *        width must not exceed it -- 1600 for slot 4.  This is the hard ceiling
+ *        on widescreen and the reason slot 4 is the only usable home.
+ *   s10  width % 4 == 0, else the row pitch is padded and the image shears.
+ *   s9   the compare-chain dispatches on width and rejects on a height mismatch
+ *        rather than falling through, so widths must be unique across slots.
+ *   s7   the mode must actually exist, or the game cannot set it.
+ */
+#define ART_WIDTH_CAP 1600
+
+typedef struct { DWORD w, h; } mode_t;
+
+static int collides_with_stock(DWORD w)
+{
+    return w == 640 || w == 800 || w == 1024 || w == 1280;
+}
+
+static int pick_mode(mode_t *out)
+{
+    DEVMODEA dm; memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+
+    /* Desktop aspect: what the panel actually is, so we can prefer a mode that
+     * fills it rather than one that merely happens to be large. */
+    double desk_aspect = 4.0 / 3.0;
+    if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmPelsHeight)
+        desk_aspect = (double)dm.dmPelsWidth / (double)dm.dmPelsHeight;
+    logf_("  desktop: %lux%lu (aspect %.4f)", dm.dmPelsWidth, dm.dmPelsHeight, desk_aspect);
+
+    mode_t best = {0, 0};
+    double best_err = 1e9;
+    int considered = 0;
+
+    for (DWORD i = 0; ; i++) {
+        memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+        if (!EnumDisplaySettingsA(NULL, i, &dm)) break;
+        DWORD w = dm.dmPelsWidth, h = dm.dmPelsHeight;
+        if (!w || !h) continue;
+        if (w % 4) continue;                       /* s10: pitch shear         */
+        if (w > ART_WIDTH_CAP) continue;           /* s11: art width ceiling   */
+        if (h > 1200) continue;                    /* stock slot-4 art height  */
+        if (w <= 640) continue;                    /* never worth slot 4       */
+        if (collides_with_stock(w)) continue;      /* s9: unique widths        */
+        considered++;
+
+        double err = fabs((double)w / (double)h - desk_aspect);
+        /* Aspect match first; among visually equivalent aspects, the larger. */
+        if (err < best_err - 0.02 || (fabs(err - best_err) <= 0.02 && w > best.w)) {
+            best.w = w; best.h = h; best_err = err;
+        }
+    }
+
+    logf_("  %d candidate modes passed the constraints", considered);
+    if (!best.w) return 0;
+    *out = best;
+    return 1;
+}
+
+/* Optional override so a user can force a mode without a rebuild. */
+static int ini_override(mode_t *m)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%s\\tropico-fix.ini", g_dir);
+    UINT w = GetPrivateProfileIntA("Resolution", "Width",  0, path);
+    UINT h = GetPrivateProfileIntA("Resolution", "Height", 0, path);
+    if (!w || !h) return 0;
+    if (w % 4) { logf_("  ini: width %u is not a multiple of 4 -- ignoring (would shear)", w); return 0; }
+    if (collides_with_stock(w)) { logf_("  ini: width %u collides with a stock slot -- ignoring (would be unreachable)", w); return 0; }
+    if (w > ART_WIDTH_CAP)
+        logf_("  ini: WARNING width %u exceeds the %d art cap; expect an unpainted strip (FINDINGS s11)", w, ART_WIDTH_CAP);
+    m->w = w; m->h = h;
+    logf_("  ini override: %ux%u", w, h);
+    return 1;
+}
+
+/* ----------------------------------------------------------------- the patcher */
+
+static LONG g_done = 0;
+
+static void apply_patches(void)
+{
+    if (InterlockedExchange(&g_done, 1)) return;   /* only ever run the body once */
+
+    if (!locate_sections()) { logf_("[x] could not locate .text/.data"); return; }
+    logf_("[*] module %p  .text %p+%u  .data %p+%u",
+          g_base, g_text, (unsigned)g_textlen, g_data, (unsigned)g_datalen);
+
+    int ok = 0, fail = 0;
+
+    /* --- 1. desktop-width gate --------------------------------------------- */
+    BYTE *p = find_unique(GATE_SIG, sizeof GATE_SIG, g_text, g_textlen, "gate");
+    if (p) {
+        BYTE nops[GATE_PATCH_LEN]; memset(nops, 0x90, sizeof nops);
+        if (poke(p + GATE_PATCH_OFF, nops, sizeof nops)) {
+            logf_("[+] gate NOPed at %p (entries no longer gated on desktop width)", p + GATE_PATCH_OFF); ok++;
+        } else { logf_("[x] gate: VirtualProtect failed"); fail++; }
+    } else { logf_("[-] gate: signature not found (already patched, or wrong build)"); fail++; }
+
+    /* --- 2. Hardware 3D signed VRAM compare -------------------------------- */
+    p = find_unique(VRAM_SIG, sizeof VRAM_SIG, g_text, g_textlen, "vram");
+    if (p) {
+        if (poke(p, VRAM_FIX, sizeof VRAM_FIX)) {
+            logf_("[+] VRAM compare made unsigned at %p (Hardware 3D needs no registry value)", p); ok++;
+        } else { logf_("[x] vram: VirtualProtect failed"); fail++; }
+    } else { logf_("[-] vram: signature not found"); fail++; }
+
+    /* --- 3. the second signed test ----------------------------------------- */
+    p = find_unique(BUDGET_SIG, sizeof BUDGET_SIG, g_text, g_textlen, "budget");
+    if (p) {
+        BYTE jae = 0x73;
+        if (poke(p + BUDGET_PATCH_OFF, &jae, 1)) { logf_("[+] texture budget jge -> jae at %p", p + BUDGET_PATCH_OFF); ok++; }
+        else { logf_("[x] budget: VirtualProtect failed"); fail++; }
+    } else { logf_("[-] budget: signature not found"); fail++; }
+
+    /* --- 4. slot 4, in BOTH tables ----------------------------------------- *
+     * FINDINGS s8: patching the data table alone is not enough.  A parallel
+     * mapping lives in code and silently drops any mode it does not recognise. */
+    mode_t m;
+    if (!ini_override(&m) && !pick_mode(&m)) {
+        logf_("[-] no mode satisfied the constraints; leaving slot 4 stock (1600x1200)");
+    } else {
+        BYTE *tbl   = find_unique((const BYTE *)TABLE_SIG, sizeof TABLE_SIG, g_data, g_datalen, "table");
+        BYTE *chain = find_unique(CHAIN_SIG, sizeof CHAIN_SIG, g_text, g_textlen, "chain");
+        if (tbl && chain) {
+            DWORD wh[2] = { m.w, m.h };
+            int a = poke(tbl + SLOT4_OFF, wh, sizeof wh);
+            int b = poke(chain + CHAIN_W_OFF, &m.w, 4) && poke(chain + CHAIN_H_OFF, &m.h, 4);
+            if (a && b) { logf_("[+] slot 4 -> %lux%lu  (data table %p, code chain %p)", m.w, m.h, tbl, chain); ok++; }
+            else { logf_("[x] slot 4: VirtualProtect failed"); fail++; }
+        } else {
+            logf_("[-] slot 4: %s%s not found -- NOT patching either, they must move together",
+                  tbl ? "" : "data table ", chain ? "" : "code chain");
+            fail++;
+        }
+    }
+
+    logf_("[*] done: %d applied, %d failed", ok, fail);
+}
+
+/* ------------------------------------------------------------- the IAT hook */
+
+typedef int (WINAPI *GetDeviceCaps_t)(HDC, int);
+static GetDeviceCaps_t g_real_gdc;
+static GetDeviceCaps_t *g_gdc_slot;
+
+static int WINAPI hook_GetDeviceCaps(HDC hdc, int index)
+{
+    /* Patch on the first call, and keep retrying until a scan succeeds -- on the
+     * Steam build .text is ciphertext until the stub's entry wrapper has run. */
+    if (!g_done) {
+        static LONG scanning = 0;
+        if (!InterlockedExchange(&scanning, 1)) {
+            BYTE *probe = NULL;
+            if (locate_sections())
+                probe = find_unique(GATE_SIG, sizeof GATE_SIG, g_text, g_textlen, "gate-probe");
+            if (probe) apply_patches();
+            InterlockedExchange(&scanning, 0);
+        }
+    }
+    return g_real_gdc(hdc, index);
+}
+
+static int install_iat_hook(void)
+{
+    BYTE *base = (BYTE *)GetModuleHandleA(NULL);
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
+    IMAGE_NT_HEADERS *nt  = (IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+    DWORD rva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (!rva) return 0;
+
+    for (IMAGE_IMPORT_DESCRIPTOR *imp = (IMAGE_IMPORT_DESCRIPTOR *)(base + rva); imp->Name; imp++) {
+        const char *dll = (const char *)(base + imp->Name);
+        if (_stricmp(dll, "GDI32.dll")) continue;
+
+        IMAGE_THUNK_DATA *oft = (IMAGE_THUNK_DATA *)(base + imp->OriginalFirstThunk);
+        IMAGE_THUNK_DATA *ft  = (IMAGE_THUNK_DATA *)(base + imp->FirstThunk);
+        for (; oft->u1.AddressOfData; oft++, ft++) {
+            if (oft->u1.Ordinal & IMAGE_ORDINAL_FLAG) continue;
+            IMAGE_IMPORT_BY_NAME *ibn = (IMAGE_IMPORT_BY_NAME *)(base + oft->u1.AddressOfData);
+            if (strcmp((const char *)ibn->Name, "GetDeviceCaps")) continue;
+
+            g_real_gdc = (GetDeviceCaps_t)ft->u1.Function;
+            g_gdc_slot = (GetDeviceCaps_t *)&ft->u1.Function;
+            GetDeviceCaps_t h = hook_GetDeviceCaps;
+            if (!poke(g_gdc_slot, &h, sizeof h)) return 0;
+            logf_("[*] hooked GDI32!GetDeviceCaps IAT slot %p (real %p)", g_gdc_slot, g_real_gdc);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------- DllMain */
+
+
+BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
+{
+    (void)reserved;
+    if (reason != DLL_PROCESS_ATTACH) return TRUE;
+    DisableThreadLibraryCalls(inst);
+
+    GetModuleFileNameA(inst, g_dir, sizeof g_dir);
+    char *slash = strrchr(g_dir, '\\');
+    if (slash) *slash = 0;
+    snprintf(g_logpath, sizeof g_logpath, "%s\\tropico-fix.log", g_dir);
+    DeleteFileA(g_logpath);
+    logf_("tropico_fix (binkw32 proxy) -- see FINDINGS.md for every address used here");
+
+    /* USER32 is initialised before us: the exe's import descriptors are ordered
+     * GDI32, USER32, binkw32, mss32, KERNEL32, and the loader walks them in that
+     * order, so EnumDisplaySettings is safe to call from here. */
+
+    /* GOG: .text is plaintext now, so patch immediately and skip the hook.
+     * Steam: it is still ciphertext, so the scan finds nothing and we fall back
+     * to patching on the first GetDeviceCaps, after the stub has decrypted. */
+    if (locate_sections() && find_unique(GATE_SIG, sizeof GATE_SIG, g_text, g_textlen, "gate-probe")) {
+        logf_("[*] .text is readable at load time (unwrapped build) -- patching now");
+        apply_patches();
+    } else {
+        logf_("[*] .text not readable at load time (DRM-wrapped?) -- deferring to GetDeviceCaps");
+        if (!install_iat_hook())
+            logf_("[x] could not hook GetDeviceCaps -- NOTHING WILL BE PATCHED");
+    }
+    return TRUE;
+}
