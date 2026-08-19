@@ -73,10 +73,15 @@ XWayland emulates rather than switches modes, so the game sits top-left with bla
 
 ## Priority 3 — the HUD mod (tier 3)
 
-**Verify §11 before building on it.** The conclusion that the width limit comes from
-per-resolution art is an *inference* from measurement, not a verified fact. The measurements
-are solid (clip lands on the slot's stock width, three for three); the explanation was never
-checked against the assets.
+**§11 is now VERIFIED — see §19.** Art really is per-resolution: 43 assets exist in all five
+variants, zero exist as `.imm`, and the loader picks the set by rewriting the extension from a
+five-pointer table at `0x5a12d8` indexed by the resolution slot. The name-hash function is
+solved and verified too (233/440 known names resolve). `tools/tropico-pk2.py` addresses
+archive entries by name.
+
+**The mod is cheaper than feared:** `0x5a12d8` holds *pointers*, so repointing slot 4 at a new
+suffix (e.g. `.i09`) adds a widescreen set without touching stock art — one pointer write from
+the proxy DLL.
 
 **PK2 format — decoded and validated:**
 
@@ -89,12 +94,15 @@ struct PK2Entry  { uint32 name_hash; uint32 size; uint32 offset; uint8 flag; }; 
 Validated on `data/px3.PK2`: 674/674 entries satisfy `size == next.offset - offset`.
 Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` (696).
 
-1. Dump all four indices; group by size/flag to find image blobs.
-2. Find the name-hash function in the exe so assets can be addressed by name.
-3. Identify the HUD art and confirm whether five per-resolution sets exist. **This confirms or
-   kills §11.**
-4. If HUD element positions turn out to come from a patchable table rather than baked art,
-   that is far cheaper than re-authoring and should be checked first.
+1. ~~Dump all four indices.~~ **Done.**
+2. ~~Find the name-hash function.~~ **Done and verified** — §19.
+3. ~~Confirm whether five per-resolution sets exist.~~ **Done — they do.** §11 stands.
+4. Positions vs art: §12 already shows corner-anchored widgets land correctly from the real
+   resolution while fixed art spans do not, so the gap is the **art**, not a position table.
+5. **NEXT, and the blocker:** decode the `.iNN` image format. The blobs carry no header or
+   magic (`defd_scr.i06` begins `7e 79 b1 79 22 00 41 e0`), so they are palettised and/or
+   compressed. Nothing can be authored until this is understood. Start from the smallest
+   assets (`defd_scr.i06`, 505 bytes) and from the loader that consumes them.
 
 ## Ground rules
 
