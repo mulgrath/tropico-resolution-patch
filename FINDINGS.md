@@ -677,3 +677,85 @@ Note this also removes the negative-y origin, since the primary is always at (0,
 **CONFIRMED 2026-08-19 by the project owner:** with `TROPICO_DISPLAY=DP-3`, every resolution
 renders correctly on the 2560x1440 monitor, including 1600x900. The only remaining defect
 there is the §12 HUD chrome, which is the known tier-3 art problem and not display-related.
+
+## 19. §11 CONFIRMED: art is per-resolution, selected by extension — VERIFIED
+
+§11 inferred from measurement that the HUD/background art comes in five per-resolution sets.
+That inference is now **confirmed by direct evidence**, and the exact mechanism is known.
+
+### The name-hash function — VERIFIED
+
+PK2 entries carry only a hash of the name. The hash is built in the loop at `0x4ef409`:
+
+```asm
+4ef402:  mov  esi,0x7                  ; h = 7
+4ef409:  call 0x4eb270                 ; al = toupper(c)
+4ef40e:  imul esi,esi,0x41c64e6e       ; h *= 0x41C64E6E
+4ef41a:  movsx eax,al
+4ef41d:  lea  esi,[eax+esi*1+0x3039]   ; h += toupper(c) + 12345
+```
+
+so `h = 7; for c in name: h = (h*0x41C64E6E + toupper(c) + 0x3039) mod 2**32`.
+
+`0x4eb270` is the game's own `toupper` — note it upcases bytes `>= 0xF0` as well as `a`-`z`.
+
+**Verified, not assumed:** 233 of the 440 filename-shaped strings in `Tropico.EXE` hash to
+entries that actually exist in the archives. The lowercase variant scores **0**.
+
+### The `.imm` template — VERIFIED
+
+Function `0x4ef300` walks the asset table at `[0x6136d0]` (count `[0x6136d4]`, stride `0x18`;
+name inline at `+0x07`, hash written back to `+0x02`). For every name that ends in `.imm`
+(compared against `0x5a1324` via `0x55b3d0`), it replaces the **final two characters** with a
+suffix taken from a table of five string pointers at `0x5a12d8`, indexed by
+`[0x612fec+0x18]` — the resolution slot:
+
+| slot | suffix | extension | art width |
+|---|---|---|---|
+| 0 | `"06"` | `.i06` | 640 |
+| 1 | `"08"` | `.i08` | 800 |
+| 2 | `"10"` | `.i10` | 1024 |
+| 3 | `"12"` | `.i12` | 1280 |
+| 4 | `"16"` | `.i16` | 1600 |
+
+So `minibuil.imm` is never loaded; at slot 4 the game loads `minibuil.i16`.
+
+### The evidence
+
+`tools/tropico-pk2.py --matrix` resolves all 51 `.imm` names against all four archives:
+
+```
+PRESENT              .i06      .i08      .i10      .i12      .i16      .imm
+                       47        43        43        43        43         0
+```
+
+**Zero `.imm` entries exist in any archive** — the extension is always rewritten. 43 assets
+exist in all five variants, with sizes scaling monotonically:
+
+```
+almanac      234597    362163    591219    978662   1421430
+minibuil     229571    350483    560399    924539   1368689
+```
+
+The four that are 640-only (`credloge`, `foldmis2`, `foldmisc`, `setupran`) are frontend and
+setup art, consistent with slot 0 being special-cased throughout.
+
+This settles §11 and explains §12 exactly: at slot 4 = 1600x900 the game loads `.i16` art,
+which is 1600 wide (so the horizontal is correct, as measured) and 1200 tall (so the vertical
+chrome is wrong, as measured).
+
+### Consequence: the mod is cheaper than re-authoring five sets
+
+`0x5a12d8` is an array of five **pointers to strings**, not baked characters. Repointing entry
+[4] at a different two-character suffix makes slot 4 load an entirely new asset set — e.g.
+`"09"` -> `.i09` — leaving all stock art untouched and the change trivially reversible. The
+proxy DLL can do this at runtime with a single pointer write.
+
+That also keeps distribution clean: rather than shipping PopTop's art, ship a tool that
+derives the `.i09` set from the user's own `.i16` files, the same pattern the patcher already
+uses for the exe.
+
+**Still unknown — the blocker for any art work:** the `.iNN` blob format. The payloads carry
+no recognisable header or magic (`defd_scr.i06` begins `7e 79 b1 79 22 00 41 e0`), so they are
+palettised and/or compressed. Decoding that is the next step, and nothing can be authored
+until it is done.
