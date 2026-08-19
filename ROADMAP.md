@@ -15,7 +15,7 @@ hand to another person.
 | area | state |
 |---|---|
 | Launch with no virtual desktop | **works** (§13) — the "DO NOT remove this" premise was wrong |
-| Hardware 3D | **restored** (§14) via `VideoMemorySize=256`; permanent patch still to do |
+| Hardware 3D | **restored** (§14); permanent patch written (§16), registry value no longer needed — pending in-game confirmation |
 | 640x480 / 1024x768 / 1280x1024 | correct |
 | 1600x1200 | correct, but needs a virtual desktop — modern panels have no such mode |
 | 1600x900 world render | correct, true 16:9, full screen, no shear |
@@ -30,9 +30,12 @@ art width matches exactly, pillarboxed on 16:9 — which the brief prefers over 
 
 The pieces exist but a user still has to run a script and set a registry value.
 
-1. **Patch the VRAM comparison signed -> unsigned** so Hardware 3D needs no registry change.
-   Site not located. Find it via `Tropico.lng` string id **1721** (`0x6b9`) as an immediate in
-   `.text`, then walk back to the compare — the same method that found string 586 in §3.
+1. ~~**Patch the VRAM comparison signed -> unsigned**~~ — **done, §16.** Not a `cmp` and not
+   findable by the planned method: id 1721 is a `.data` constant at `0x59897c`, and the
+   comparison is an x87 `fild`/`fcomp` against the double 8912896.0 (8.5 MB, not 16) at
+   `0x52df6f`, gating `IDirect3D7::EnumDevices`. Patched to an unsigned integer compare
+   (25 bytes) plus `jge`->`jae` at `0x4f92f8`. `probes/ddvidmem.c` confirms the input.
+   **Still needs the in-game confirmation** that F2 offers Hardware 3D with no registry value.
 2. **Decide the resolution strategy.** Hardcoding is wrong; the table should be populated from
    `EnumDisplayModes` at runtime, honouring the four constraints in §11 summary.
 3. **Build the proxy `ddraw.dll`.** Applies the gate NOP, both resolution tables, and the VRAM

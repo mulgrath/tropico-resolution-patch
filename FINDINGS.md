@@ -458,3 +458,118 @@ Options, none yet tested:
 **Best fully-correct experience available today without a virtual desktop: 1280x1024** — a
 real display mode, art width matches exactly, and the owner confirmed it renders correctly.
 Pillarboxed on a 16:9 panel, which the brief explicitly prefers over a stretched image.
+
+## 16. The Hardware 3D gate: an x87 signed compare on GetAvailableVidMem — VERIFIED
+
+§14 diagnosed the *symptom* (a signed VRAM overflow) but not the site. The site is not a
+`cmp` at all, which is why scanning for `0x1000000` (16 MB) immediates found nothing — the
+threshold is a **double**, and the comparison is done on the **x87 stack**.
+
+### How it was found
+
+String id **1721** does not appear as an immediate anywhere in `.text` — the §14 search plan
+could not have worked. It lives as a DWORD constant in `.data` at `0x59897c`, loaded with
+`mov ecx,[0x59897c]` at `0x4618c8` and `0x49044c`. (It sits immediately below the
+cause-of-death string table at `0x598980`, which is why a naive scan finds the array first.)
+
+Both sites have the same shape as the string-586 site in §3: they call `0x515450`, and emit
+1721 only when it returns 0.
+
+```
+0x49041d   edx=1, ecx=-1, three pushed -1   -> call 0x515450   ; "hardware" request
+0x490462   edx=0, ecx=-1, three pushed -1   -> call 0x515450   ; "software" request
+```
+
+`0x515450` forwards to `0x5151c0`, a best-match search over the descriptor array at
+`0x60c998` (the same array as §3). Its five dimensions, unit stride 64:
+
+```
+index = 120*d0 + 40*d1 + 10*d2 + 2*d3 + d4
+        d0 = DirectDraw device      (0 .. [0x5a0f9c]-1)
+        d1 = RENDERER               (0..2)   0 = software, 1 = hardware   <-- edx above
+        d2 = bit depth              (0..3)   0=8bpp 1=16bpp 2=24 3=32
+        d3 = resolution slot        (0..4)
+        d4 = 0 for modes registered from DirectDraw, 1 for the software enumerator
+```
+
+`-1` in any dimension means "any". So `edx=1` asks for *any* descriptor with `d1 == 1`, and
+1721 fires when no hardware descriptor exists.
+
+**Only one function ever writes a `d1 == 1` descriptor: `0x52d340`**, the
+`IDirect3D7::EnumDevices` callback. Verified by xref count, not by inspection:
+`0x60d398` (= `0x60c998 + 40*64`, the `d1==1` base) has **exactly two** xrefs, `0x52d3e3` and
+`0x52d40f`, both inside `0x52d340`; and `0x52d340` itself has **exactly one** xref, the
+`push` at `0x52df94`.
+
+### The gate
+
+`0x4f9200` calls `IDirectDraw7::GetAvailableVidMem` (vtable `+0x5c`) at `0x4f925a` with
+`DDSCAPS2.dwCaps = 0x10005000` (`DDSCAPS_TEXTURE|DDSCAPS_VIDEOMEMORY|DDSCAPS_LOCALVIDMEM`)
+and stores `dwTotal` at **`0x618aa0`**. It is called at `0x52df52`, immediately before:
+
+```asm
+52df6f:  db 05 a0 8a 61 00     fild   DWORD PTR ds:0x618aa0      ; SIGNED 32-bit load
+52df75:  89 1d 0c c8 61 00     mov    DWORD PTR ds:0x61c80c,ebx  ; interleaved, unrelated
+52df7b:  dc 1d 88 e4 57 00     fcomp  QWORD PTR ds:0x57e488      ; 8912896.0 = 8.5 MB
+52df81:  df e0                 fnstsw ax
+52df83:  f6 c4 41              test   ah,0x41                    ; C0|C3 -> less or equal
+52df86:  75 20                 jne    0x52dfa8                   ; <= 8.5MB: SKIP EnumDevices
+...
+52df93:  68 40 d3 52 00        push   0x52d340
+52df99:  ff 51 0c              call   DWORD PTR [ecx+0xc]        ; IDirect3D7::EnumDevices
+```
+
+`fild` is a **signed** load and x87 has no unsigned 32-bit form. Wine reports
+4,286,672,895 (`0xFF816FFF`), which loads as **-8,294,401**, so the branch is taken, the
+hardware descriptors are never written, and `0x5151c0` fails — exactly as §14 predicted, one
+level further down than §14 looked.
+
+Note the threshold is **8.5 MB**, not the 16 MB the message text claims.
+
+`0x618aa0` has one other reader, a second signed test:
+
+```asm
+4f92ee:  81 3d a0 8a 61 00 00 00 d0 00   cmp DWORD PTR ds:0x618aa0,0xd00000   ; 13 MB
+4f92f8:  7d 15                           jge 0x4f930f
+```
+
+This one clamps a texture/detail budget float and has the same defect.
+
+### Verified with a probe
+
+`probes/ddvidmem.c` replicates the game's call exactly — same interface, same
+`dwCaps = 0x10005000`, same 8912896.0 threshold — and prints both interpretations. With no
+`VideoMemorySize` value in the registry:
+
+```
+GetAvailableVidMem(0x10005000) -> 0x00000000
+  dwTotal unsigned = 4286672895  (4088.1 MB)
+  dwTotal   signed =    -8294401  <- what `fild` loads
+stock  exe (signed fild): SKIPS EnumDevices -> "Hardware 3D is not available" (string 1721)
+patched exe (unsigned  ): enumerates hardware devices -> Hardware 3D offered
+```
+
+### The patch
+
+25 bytes at `0x52df6f` (file `0x12df6f`), replacing the x87 compare with an unsigned integer
+one and preserving both the 8.5 MB threshold and the interleaved unrelated store:
+
+```asm
+a1 a0 8a 61 00        mov  eax,ds:0x618aa0
+89 1d 0c c8 61 00     mov  DWORD PTR ds:0x61c80c,ebx
+3d 00 00 88 00        cmp  eax,0x880000
+76 27                 jbe  0x52dfa8                 ; UNSIGNED
+90 x7                 nop
+```
+
+plus one byte at `0x4f92f8` (file `0x0f92f8`): `7d` (`jge`) -> `73` (`jae`).
+
+The FPU stack stays balanced: the original pushed with `fild` and popped with `fcomp`; the
+replacement touches x87 not at all.
+
+`tools/tropico-patch.py` applies both by default and reports their state in `--show`; pass
+`--no-vram-fix` to leave them alone.
+
+**Watch the displacement.** The first build used `76 23`, which lands *inside* the
+`call [edx+0x8]` at `0x52dfa3`. Always disassemble the patched exe and confirm the branch
+target is the intended instruction boundary — the tool cannot check this for you.

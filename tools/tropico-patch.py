@@ -42,6 +42,46 @@ CHAIN_VA = {
     0: (0x52d1d4, 0x52d1e0),
 }
 
+# ---------------------------------------------------------------------------
+# The Hardware 3D gate (FINDINGS section 16).
+#
+# 0x4f9200 calls IDirectDraw7::GetAvailableVidMem(&caps{0x10005000}, &total, &free)
+# and stores dwTotal at 0x618aa0.  Two later reads treat that DWORD as SIGNED:
+#
+#   0x52df6f  fild DWORD [0x618aa0] / fcomp QWORD [0x57e488] (8912896.0 = 8.5MB)
+#             fnstsw ax / test ah,0x41 / jne 0x52dfa8
+#             -> on "<= 8.5MB" it SKIPS IDirect3D7::EnumDevices(0x52d340).
+#             0x52d340 is the only writer of the hardware (d1==1) descriptors in
+#             the array at 0x60c998 -- verified, 0x60d398 has exactly two xrefs and
+#             both are inside it, and 0x52d340 has exactly one xref, at 0x52df94.
+#             With no such descriptor, the best-match search at 0x5151c0 returns 0
+#             and 0x49041d emits Tropico.lng string 1721, "Hardware 3D is not
+#             available on this computer".
+#   0x4f92ee  cmp [0x618aa0],0xd00000 / jge -- a signed texture-budget threshold.
+#
+# `fild` is a signed load, so Wine's 4,286,672,895 (0xFF816FFF) becomes
+# -8,294,401 and both tests take the "not enough memory" branch.  Replacing the
+# x87 compare with an unsigned integer one keeps the 8.5MB threshold and needs no
+# HKCU\Software\Wine\Direct3D\VideoMemorySize registry value.
+#
+#   fild  DWORD [0x618aa0]        -> mov eax,[0x618aa0]
+#   mov   [0x61c80c],ebx             mov [0x61c80c],ebx      (kept, was interleaved)
+#   fcomp QWORD [0x57e488]           cmp eax,0x880000
+#   fnstsw ax / test ah,0x41         jbe 0x52dfa8            (unsigned, rel8 0x27)
+#   jne   0x52dfa8                   nop x7
+VRAM_VA     = 0x52df6f
+VRAM_ORIG   = bytes.fromhex('db05a08a6100' '891d0cc86100' 'dc1d88e45700'
+                            'dfe0' 'f6c441' '7520')
+VRAM_FIXED  = bytes.fromhex('a1a08a6100' '891d0cc86100' '3d00008800'
+                            '7627') + b'\x90' * 7
+assert len(VRAM_ORIG) == len(VRAM_FIXED) == 25
+
+# The second, independent signed compare: `jge` -> `jae`.
+BUDGET_VA   = 0x4f92f8
+BUDGET_ORIG = bytes.fromhex('7d')
+BUDGET_FIXED= bytes.fromhex('73')
+
+
 def va2off(va): return va - IMAGE_BASE
 
 def read_chain(buf, slot):
@@ -69,6 +109,15 @@ def show(buf, label):
             'original jge (entries gated on desktop width)' if gate == GATE_ORIG else \
             'UNRECOGNISED'
     print(f'    gate @0x{va2off(GATE_VA):06x}: {gate.hex()}  -> {state}')
+    vram = bytes(buf[va2off(VRAM_VA):va2off(VRAM_VA)+len(VRAM_ORIG)])
+    vstate = 'unsigned (Hardware 3D needs no registry edit)' if vram == VRAM_FIXED else \
+             'signed fild (Hardware 3D refused on large-VRAM cards)' if vram == VRAM_ORIG else \
+             'UNRECOGNISED'
+    budget = bytes(buf[va2off(BUDGET_VA):va2off(BUDGET_VA)+1])
+    bstate = 'jae (unsigned)' if budget == BUDGET_FIXED else \
+             'jge (signed)' if budget == BUDGET_ORIG else 'UNRECOGNISED'
+    print(f'    vram @0x{va2off(VRAM_VA):06x}: -> {vstate}')
+    print(f'    budget @0x{va2off(BUDGET_VA):06x}: {budget.hex()} -> {bstate}')
 
 def main():
     p = argparse.ArgumentParser(description=__doc__,
@@ -79,6 +128,9 @@ def main():
                    help='replace a table slot, e.g. --set 1=1920x1080 (repeatable)')
     p.add_argument('--no-gate-patch', action='store_true',
                    help='leave the desktop-width gate intact')
+    p.add_argument('--no-vram-fix', action='store_true',
+                   help='leave the signed VRAM comparisons intact (Hardware 3D will then '
+                        'need HKCU\\Software\\Wine\\Direct3D\\VideoMemorySize=256)')
     p.add_argument('--show', action='store_true', help='print the table and exit')
     a = p.parse_args()
 
@@ -89,6 +141,15 @@ def main():
     if gate not in (GATE_ORIG, GATE_NOP):
         sys.exit(f'ERROR: byte pattern at the gate site is {gate.hex()}, expected '
                  f'{GATE_ORIG.hex()} or {GATE_NOP.hex()}. Wrong build? Refusing to patch.')
+
+    vram = bytes(buf[va2off(VRAM_VA):va2off(VRAM_VA)+len(VRAM_ORIG)])
+    if vram not in (VRAM_ORIG, VRAM_FIXED):
+        sys.exit(f'ERROR: byte pattern at the VRAM gate is {vram.hex()}, expected '
+                 f'{VRAM_ORIG.hex()} or {VRAM_FIXED.hex()}. Wrong build? Refusing to patch.')
+    budget = bytes(buf[va2off(BUDGET_VA):va2off(BUDGET_VA)+1])
+    if budget not in (BUDGET_ORIG, BUDGET_FIXED):
+        sys.exit(f'ERROR: byte at the texture-budget compare is {budget.hex()}, expected '
+                 f'{BUDGET_ORIG.hex()} or {BUDGET_FIXED.hex()}. Wrong build? Refusing to patch.')
 
     show(buf, 'before:')
     if a.show: return
@@ -112,6 +173,12 @@ def main():
     if not a.no_gate_patch:
         buf[va2off(GATE_VA):va2off(GATE_VA)+6] = GATE_NOP
         print(f'  gate NOPed at file 0x{va2off(GATE_VA):06x}')
+
+    if not a.no_vram_fix:
+        buf[va2off(VRAM_VA):va2off(VRAM_VA)+len(VRAM_FIXED)] = VRAM_FIXED
+        buf[va2off(BUDGET_VA)] = BUDGET_FIXED[0]
+        print(f'  VRAM compare made unsigned at file 0x{va2off(VRAM_VA):06x} '
+              f'(25 bytes) and 0x{va2off(BUDGET_VA):06x} (jge -> jae)')
 
     # The code chain at 0x52d15a dispatches on WIDTH first and rejects outright on a
     # height mismatch, so two slots sharing a width make the later one unreachable.

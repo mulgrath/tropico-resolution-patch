@@ -42,7 +42,16 @@ if [ -n "${TROPICO_RES:-}" ]; then
   # i.e. it stomps the live index from this preset on the way into a map. Setting
   # only 0x242 is silently overwritten -- this defeated four widescreen tests.
   printf "$B" | dd of="$CFG" bs=1 seek=626 conv=notrunc status=none
-  echo "== forced CFG resolution index + preset -> slot $TROPICO_RES =="
+  # 630 = 0x276 = settings+0x4c, the second preset slot: [0x61aeb8] selects which of
+  # the two is used and has only ever been observed as 0, so cover both.
+  printf "$B" | dd of="$CFG" bs=1 seek=630 conv=notrunc status=none
+  echo "== forced CFG resolution index + presets -> slot $TROPICO_RES =="
+  # Read it straight back. A test that did not run the slot you intended looks
+  # exactly like one that failed, so never trust the write -- verify it.
+  echo "== CFG readback: 0x242=$(dd if="$CFG" bs=1 skip=578 count=1 status=none | od -An -tu1 | tr -d ' ')" \
+       "0x272=$(dd if="$CFG" bs=1 skip=626 count=1 status=none | od -An -tu1 | tr -d ' ')" \
+       "0x276=$(dd if="$CFG" bs=1 skip=630 count=1 status=none | od -An -tu1 | tr -d ' ') =="
+
 fi
 
 echo "== virtual desktop: $DESK =="
