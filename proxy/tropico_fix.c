@@ -56,6 +56,7 @@ static void logf_(const char *fmt, ...)
 /* --------------------------------------------------------- module / sections */
 
 static BYTE *g_base;
+static HINSTANCE g_self;
 static BYTE *g_text; static SIZE_T g_textlen;
 static BYTE *g_data; static SIZE_T g_datalen;
 
@@ -537,7 +538,17 @@ static int install_iat_hook(void)
  *   Scope=image    'image' = the exe's own statics only (where a cached viewport
  *                  width would live). 'all' = every committed writable page.
  */
-static DWORD g_scan_delay, g_scan_find, g_scan_repl;
+static DWORD g_scan_delay, g_scan_find, g_scan_repl, g_scan_bits;
+static DWORD g_scan_lo, g_scan_hi, g_scan_repeat;
+/* Addresses recorded by the first sweep, then rewritten on a timer. Rescanning all
+ * of memory every tick would be absurd; rewriting the hits it found is cheap.
+ *
+ * This matters more than it looks. The one-shot sweep DID push the terrain out to
+ * 1920 -- and then the game recomputed the rect on the next camera move and put
+ * 1600 back, which read as "finnicky" rather than as "correct but not held". A
+ * derived value has to be held, not set. Same lesson as trap 2 in TESTING.md. */
+#define SCAN_MAX_HITS 256
+static DWORD *g_hit[SCAN_MAX_HITS]; static int g_hits;
 static char  g_scan_scope[16];
 
 static void scan_report(BYTE *base, SIZE_T len, const char *what, int *n32, int *n16)
@@ -545,11 +556,19 @@ static void scan_report(BYTE *base, SIZE_T len, const char *what, int *n32, int 
     for (SIZE_T i = 0; i + 4 <= len; i += 4) {
         DWORD v; memcpy(&v, base + i, 4);
         if (v == g_scan_find) {
-            if (*n32 < 40) logf_("    u32 %s+0x%06x  (VA %p)", what, (unsigned)i, base + i);
+            BYTE *at = base + i;
+            DWORD va = (DWORD)(SIZE_T)at;
+            if (g_scan_lo && va < g_scan_lo) continue;
+            if (g_scan_hi && va >= g_scan_hi) continue;
+            if (*n32 < 40) logf_("    u32 %s+0x%06x  (VA %p)  [hit %d]", what, (unsigned)i, at, *n32);
             (*n32)++;
-            if (g_scan_repl) { DWORD r = g_scan_repl; memcpy(base + i, &r, 4); }
+            if (g_scan_repl) {
+                DWORD r = g_scan_repl; memcpy(at, &r, 4);
+                if (g_hits < SCAN_MAX_HITS) g_hit[g_hits++] = (DWORD *)at;
+            }
         }
     }
+    if (g_scan_bits == 32) return;   /* u16 hits are far noisier; skip when asked */
     for (SIZE_T i = 0; i + 2 <= len; i += 2) {
         WORD v; memcpy(&v, base + i, 2);
         if (v == (WORD)g_scan_find) {
@@ -629,7 +648,8 @@ static DWORD WINAPI scan_thread(LPVOID unused)
         BYTE *p = NULL;
         while (VirtualQuery(p, &mbi, sizeof mbi) == sizeof mbi) {
             DWORD prot = mbi.Protect & 0xff;
-            if (mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_GUARD)
+            if (mbi.AllocationBase == (void *)g_self) { /* never rewrite our own image */ }
+            else if (mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_GUARD)
                 && (prot == PAGE_READWRITE || prot == PAGE_WRITECOPY
                     || prot == PAGE_EXECUTE_READWRITE)) {
                 scan_report((BYTE *)mbi.BaseAddress, mbi.RegionSize, "mem", &n32, &n16);
@@ -649,6 +669,15 @@ static DWORD WINAPI scan_thread(LPVOID unused)
     logf_("  %d u32 hit(s), %d u16 hit(s)%s", n32, n16,
           g_scan_repl ? " -- ALL OVERWRITTEN" : "");
     logf_("--- scan done ---");
+    if (g_scan_repeat && g_hits) {
+        logf_("--- holding %d scan hit(s) at %u, rewriting every 200ms ---",
+              g_hits, (unsigned)g_scan_repl);
+        for (;;) {
+            Sleep(200);
+            for (int i = 0; i < g_hits; i++) *g_hit[i] = g_scan_repl;
+            if (g_poke_n) poke_apply(0);
+        }
+    }
     if (g_poke_n) {
         logf_("--- applying %d poke(s) ---", g_poke_n);
         poke_apply(1);
@@ -668,6 +697,10 @@ static void maybe_start_scan(void)
     if (!GetPrivateProfileIntA("Scan", "Delay", 0, path)) g_scan_find = 0;  /* poke-only run */
     g_scan_find = GetPrivateProfileIntA("Scan", "Find", 1600, path);
     g_scan_repl = GetPrivateProfileIntA("Scan", "Replace", 0, path);
+    g_scan_bits = GetPrivateProfileIntA("Scan", "Bits", 0, path);
+    g_scan_repeat = GetPrivateProfileIntA("Scan", "Repeat", 0, path);
+    g_scan_lo = (DWORD)GetPrivateProfileIntA("Scan", "Lo", 0, path);
+    g_scan_hi = (DWORD)GetPrivateProfileIntA("Scan", "Hi", 0, path);
     GetPrivateProfileStringA("Scan", "Scope", "image", g_scan_scope, sizeof g_scan_scope, path);
     logf_("[*] live scan armed: find %u, replace %u, scope %s, fires %us after load",
           (unsigned)g_scan_find, (unsigned)g_scan_repl, g_scan_scope, (unsigned)g_scan_delay);
@@ -682,6 +715,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     (void)reserved;
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(inst);
+    g_self = inst;
 
     GetModuleFileNameA(inst, g_dir, sizeof g_dir);
     char *slash = strrchr(g_dir, '\\');

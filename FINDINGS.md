@@ -1479,3 +1479,56 @@ undone and a correct hypothesis looks like a failed one. That is trap 2 in `TEST
 wearing a different hat.
 
 Test both at once first; if the terrain extends, bisect to whichever one matters.
+
+
+## 33. BREAKTHROUGH: the terrain DOES render at 1920 — the bound is a stored value
+
+`[Scan] Find=1600 Replace=1920 Scope=all Bits=32`, fired 45s in, `SM_CXSCREEN 1920x1080`,
+CFG `0x242` = 4. **23 hits, all overwritten.** Owner's report:
+
+* Software renderer: no change.
+* Hardware 3D, "reduce graphical shifting" **off**: the dead strip shows an imprint of the
+  smear rather than black — i.e. the same as software.
+* Hardware 3D, "reduce graphical shifting" **on**: **the terrain rendered at the full 1920.**
+* Panning or zooming so the view crosses the map void brings the smear back.
+
+So the §29 conclusion is now fully overturned. The bound is not a renderer limit, not an
+allocation, and not uncrossable: it is **a value in memory**, and writing 1920 into it makes
+the engine draw the full width.
+
+### The flakiness has a mundane cause, and it is trap 2 again
+
+The sweep was **one-shot**. The rect is derived, so the next camera move recomputes it and
+writes 1600 straight back. That reads as "finnicky" when it is really "correct but not
+held". Exactly why the targeted `[Poke]` was built to repeat -- the same mistake, made again,
+one layer down.
+
+Fix: record the hit addresses during the sweep and rewrite them every 200ms (`[Scan]
+Repeat=1`). Rescanning all memory on a timer would be absurd; rewriting 23 known addresses
+is free.
+
+### The 23 hits, and where to bisect
+
+```
+00614418  00 61abc0                  exe .data -- PROVEN INNOCENT (§32, repeat-poked, no effect)
+018e121c  018e144c  018e167c         heap, stride 0x230 -- an array of structs
+018f7d88  018f7fa4  018f8014
+018f8018  018f8230                   heap, adjacent pair at 8014/8018
+03d26fac  03df5e8c  03e77444
+03ef8530  03f797d0  03ffacd0
+040f378c  041749f4  046cd8c0         scattered in the large asset heap -- likely coincidence
+30043b74..30043b80                   four consecutive dwords, probably a coefficient array
+```
+
+`[Scan] Lo=`/`Hi=` bound which hits are touched, so bisection can be done by address range
+rather than by absolute address -- heap addresses are not guaranteed stable between runs,
+so a range is the robust unit.
+
+The `0x018e`/`0x018f` group is the prime suspect: allocated early, and `018e121c/144c/167c`
+are evenly spaced, which is what an array of view or layer descriptors looks like.
+
+### Still unexplained
+
+Why the fix only takes in Hardware 3D with "reduce graphical shifting" on. That option is
+described in-game as affecting Hardware 3D only. It may select a different draw path that
+reads the patched value, while the others read a second copy we have not found.
