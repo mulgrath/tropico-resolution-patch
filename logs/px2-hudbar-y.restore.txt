@@ -1,0 +1,3 @@
+px.PK2 offset 333392557 : original b702 (y=695) -> patched 8b01 (y=395)
+restore with:
+  printf "\xb7\x02" | dd of="/mnt/Windows/GOG Games/Tropico/app/data/px.PK2" bs=1 seek=333392557 conv=notrunc status=none

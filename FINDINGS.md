@@ -1252,3 +1252,74 @@ rewrite, and generalises to the other nine families. (b) is the shippable one.
 
 **Untested:** that y=395 actually repairs the bar in-game. Everything above is measurement of
 the files; the placement claim is a prediction until it is run.
+
+
+## 28. Row framing solved — vertical rescaling needs NO pixel decoding — VERIFIED
+
+The sprite payload is a sequence of `h` self-contained, length-delimited row records,
+followed by a single `0xC0` end-of-sprite byte.
+
+```
+row_length:  b = buf[q]
+             b <  0x80  ->  length = b,                       header 1 byte
+             b >= 0x80  ->  length = ((b & 0x7F) << 8) | buf[q+1],  header 2 bytes
+             the length counts the header bytes themselves
+```
+
+**5494 of 5494 sprites** across all 268 archived `.i16` assets frame exactly — `h` rows
+consuming the payload and landing on the trailing `0xC0`, with zero exceptions. 267 of the
+268 assets are clean end to end; the one that is not is the entry that was never a sprite
+container.
+
+The earlier 322/572 result was this rule without the `0x80` escape, which silently mis-frames
+any row 128 bytes or longer — i.e. every wide sprite.
+
+### Why this matters more than the packet opcodes
+
+Rows are addressable without being understood. Producing a vertically rescaled art set is
+therefore **row selection plus integer edits**, not a codec:
+
+* to go from 1200-tall art to 900-tall, keep 3 rows in 4 and **copy their bytes verbatim**;
+* rewrite `h`, `y`, and the block's `packed_size`, plus the 15-byte table entry and the
+  `region_start`/`region_end` arrays.
+
+No palette, no packet decoding, no re-encoder, and no risk of emitting a byte stream the game
+has never seen — every byte we write is a byte PopTop wrote.
+
+This only works because the horizontal scale is 1:1. At 1600x900 the width is unchanged from
+`.i16`, so nothing inside a row is ever touched. Any target that changes the *width* does
+require the packet encoding, which is still unsolved.
+
+**Assumed, not proven:** that rows carry no state across row boundaries. 100% framing is
+strong evidence for independent records but is not a proof; the test is to build a set and
+look at it.
+
+**Known quality cost:** dropping one row in four is nearest-neighbour vertical resampling.
+Fine horizontal detail will alias — the font assets (`comi*`, `copp*`, `cour*`, `time*`,
+`sten10`, `scri25`) are small glyphs and will suffer most, and may need excluding or handling
+separately.
+
+**Still open — delivery.** Loose `data/` overrides are found by name, and most assets have no
+recoverable name (§27). Since the rescaled blobs are strictly *smaller* than the `.i16`
+originals, the practical route is to write them over the `.i16` entries in place and shorten
+each entry's `size` in the PK2 index, leaving gaps. That needs no names and no suffix
+repointing, and it is reversible from a backup of the changed regions only.
+
+
+## 29. Above 1600 the world renderer breaks — MEASURED, and the reason to stop there
+
+Forced to 1920x1080 via `tropico-fix.ini` (the ini override warns about the art cap but does
+not enforce it). Owner's report: the right edge is corrupted, terrain tiles stop being drawn,
+and the area beyond repeats earlier content — a smear/mirror consistent with reading past the
+end of a fixed-width internal buffer, not with missing art.
+
+This is NOT the §11 art-width cap. That predicts an *unpainted* strip where no art reaches;
+what appears is *wrong* content, which means the world renderer itself has a width limit
+around 1600. Fixing it would mean relocating or resizing an internal renderer structure --
+categorically different from every patch in this project so far, all of which have been a
+comparison, a jump, a table value or a coordinate.
+
+**Recommendation: do not.** 1600x900 is already true 16:9. Rendering at 1600x900 and letting
+the compositor upscale to 1920x1080 is a uniform 1.2x of a correctly-proportioned image --
+full screen, no pillarboxing, no distortion -- and §22 shows Proton does that for free. The
+engine never has to draw a pixel past 1600.
