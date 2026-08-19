@@ -1323,3 +1323,59 @@ comparison, a jump, a table value or a coordinate.
 the compositor upscale to 1920x1080 is a uniform 1.2x of a correctly-proportioned image --
 full screen, no pillarboxing, no distortion -- and §22 shows Proton does that for free. The
 engine never has to draw a pixel past 1600.
+
+
+## 30. The world clips at EXACTLY 1600, and it is not an allocation — MEASURED
+
+Follow-up to §29, run at 1680x1050. Proxy log confirms both known width sources were
+patched: `slot 4 -> 1680x1050 (data table 005a0fa0, code chain 0052d15a)`, `4 applied,
+0 failed`.
+
+### The number is exactly 1600
+
+Column statistics across the owner's software-renderer screenshot (1684x1052 including a
+2px window border):
+
+```
+ x     mean  frac_dark
+1596    79.6   0.14     <- normal image
+1600    21.6   0.81     <- collapses to black + uninitialised noise
+```
+
+Not 1664, not 2048, not a power of two — **1600**, the stock slot-4 width. A hardware or
+allocation limit would land on a round number. A content number means a stale value.
+
+### It is not a fixed buffer, and the owner's observation is what proves it
+
+Owner, unprompted: in **Hardware** mode trees and buildings render *past* the cutoff, into
+the void; in **Software** mode the same area is flat black with noise.
+
+That is decisive. If the render target were allocated 1600 wide, nothing would draw past
+1600 in either renderer — there would be no memory to draw into. Objects appearing out
+there means the surface is genuinely 1680 wide and **the terrain pass alone is bounded at
+1600**. Two draw paths, two different width sources, one of them stale.
+
+This contradicts the pessimistic reading in §29. The tractable case is the live one.
+
+### Where the 1600 is not
+
+Scanning the whole image for the five stock widths as a consecutive array finds **exactly
+one** resolution table — `0x005a0fa0`, the known one (§1). There is no second data table.
+Standalone 1600 constants in the data range are only `0x597c6e`, `0x5a0fc0` (slot 4 inside
+the known table), `0x5b02d4`, `0x5b0724`, and neither of the last two is referenced by any
+instruction in `.text`.
+
+In code there are just three width-specific branches in the entire 1.4 MB binary
+(`cmp ax,0x640` at `0x46e75d`, plus `0x500` and `0x320` sites) — the engine is otherwise
+fully generic, reading the width global at `0x60c18c` in 63 places and computing from it.
+
+So the terrain's 1600 is neither a second table nor an obvious constant. Static analysis
+has run out.
+
+### Next step, and it is dynamic not static
+
+Instrument the proxy to log `IDirectDraw7::CreateSurface` descriptors and `Blt`/`BltFast`
+rectangles. Whatever is still 1600 will name itself in one run. That is a bounded change to
+code we already own and control.
+
+**Do not** conclude from §29 that this needs an allocation moved. It needs a value found.
