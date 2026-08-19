@@ -52,16 +52,29 @@ def name_hash(name):
 
 
 def read_index(path):
+    """Entry offsets are RELATIVE to the start of the data region, not absolute.
+
+    data_start = 8 + count*13, and the smallest entry offset is 0 -- confirmed on
+    every archive, and confirmed again by the arithmetic: for px.PK2,
+    max(offset+size) is 372,377,373 against a 372,402,107-byte file, and the
+    difference is exactly data_start (24,734).
+
+    Reading them as absolute shifts every blob by data_start, which yields
+    plausible-looking garbage rather than an obvious error -- it briefly convinced
+    me the archives were compressed or encrypted. They are not.
+    """
     with open(path, 'rb') as f:
         head = f.read(8)
         magic, count = struct.unpack('<II', head)
         if magic != 1000:
             raise ValueError('%s: magic is %d, expected 1000' % (path, magic))
         raw = f.read(13 * count)
+    data_start = 8 + 13 * count
     out = []
     for i in range(count):
         h, size, off = struct.unpack_from('<III', raw, 13 * i)
-        out.append(dict(hash=h, size=size, offset=off, flag=raw[13 * i + 12]))
+        out.append(dict(hash=h, size=size, offset=data_start + off,
+                        rel_offset=off, flag=raw[13 * i + 12]))
     return out
 
 

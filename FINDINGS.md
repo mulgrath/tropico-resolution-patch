@@ -963,7 +963,22 @@ almost certainly how patch 1.07 shipped updated art without rewriting a 372 MB a
 archive rewriting, and it is trivially reversible — delete the files. Combined with §19's
 suffix repointing, a mod is two small moving parts.
 
-### But the archived copies are NOT stored the way loose files are
+### CORRECTION: the archived copies are NOT encoded — I had an extraction bug
+
+**Everything in the subsection below was wrong.** PK2 entry offsets are **relative to the
+start of the data region**, not absolute. `data_start = 8 + count*13`, the smallest entry
+offset is 0, and for `px.PK2` `max(offset+size)` is 372,377,373 against a 372,402,107-byte
+file — a difference of exactly `data_start` (24,734).
+
+Reading them as absolute shifted every extracted blob by `data_start`. That does not fail
+loudly; it yields plausible-looking garbage, which briefly convinced me the archives were
+compressed or encrypted. They are not. The tell was that the "encoded" blobs still compressed
+to 0.48–0.74 with zlib — genuinely compressed or encrypted data would not.
+
+With offsets fixed, the archived `6265fc08.pal` header is byte-identical to the loose file's,
+and archived `.imb` matches the loose structure exactly. See §25.
+
+### (WRONG, kept for the record) The archived copies are NOT stored the way loose files are
 
 Comparing the loose and archived copies of the same names:
 
@@ -995,3 +1010,49 @@ skip/literal runs, and palettes of 256 RGB555 entries. Tropico is three years la
 and the format evidently evolved.
 
 No Tropico-specific tool or format documentation appears to exist publicly.
+
+
+## 25. The asset format: `.imb` and `.iNN` are the same container — DECODED SO FAR
+
+With the §24 offset bug fixed, the archives read cleanly and the picture is much better than
+§24 suggested.
+
+### `.imb` and `.iNN` are one format
+
+Every asset — loose building sprites and archived UI art alike — opens with the same 16-bit
+magic **`0x27d8`**:
+
+```
+loose    bl1cabaE.imb   d8 27 01 00 ...
+archived bl1cabaE.imb   d8 27 01 00 ...     (same structure; loose is the 1.07 revision)
+archived almanac.i16    d8 27 0a 00 ...
+```
+
+So the Railroad Tycoon II `.imb` documentation (§24) applies to the **UI art** too, not just
+to building sprites. That is the prior art we thought did not transfer.
+
+### Header
+
+| offset | size | meaning |
+|---|---|---|
+| 0x00 | 2 | magic `0x27d8`, constant in every file checked |
+| 0x02 | 2 | sprite count |
+
+The count is **identical between resolution variants of the same asset** — `defd_scr` is 6 in
+both `.i06` and `.i16`, `bldgicon` is 7 in both, `almanac` is 10 in both. So a resolution
+variant is the same set of sprites at different sizes, which is exactly what a repositioning
+or rescaling mod would want.
+
+Bytes `0x04..0x1f` are also **identical between variants** of the same asset, diverging only
+around 0x20. Whatever lives there is resolution-independent.
+
+### Why this matters for the widescreen HUD
+
+Nothing here is compressed or encrypted, the container is shared with a documented format, and
+per-sprite metadata is separate from pixel data. If sprite position and size live in that
+metadata, **repositioning HUD elements needs only integer edits — no image decoding, no
+re-encoding, and no new art.** That is a far smaller job than re-authoring five art sets, and
+it is the approach the project owner proposed.
+
+Not yet established: where per-sprite width/height/position live, and the RLE scheme for the
+pixel data. The RT2 notes give the shape to look for.
