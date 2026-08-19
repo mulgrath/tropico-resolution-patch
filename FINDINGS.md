@@ -759,3 +759,49 @@ uses for the exe.
 no recognisable header or magic (`defd_scr.i06` begins `7e 79 b1 79 22 00 41 e0`), so they are
 palettised and/or compressed. Decoding that is the next step, and nothing can be authored
 until it is done.
+
+
+## 20. The gate needed `jg`, not a NOP; and the picker must fit the desktop — CORRECTED
+
+Prompted by the owner noting the Steam build was already running under Proton with
+`protontricks 33520 vd=1024x768`. Two defects, both introduced by this project.
+
+### The gate: NOPing removed protection that was doing real work
+
+Tiers 1–2 NOPed all six bytes of the gate's `jge` at `0x514d9f` (§2). That was heavier than
+the defect warranted. The gate skips any entry whose width is **>=** the desktop width, so the
+bug is an **off-by-one**: a mode exactly as wide as the desktop is rejected — and that is the
+*normal* case once the table holds the display's own best mode. NOPing also discarded the
+filter that hides modes *wider* than the desktop, which was genuinely useful.
+
+`jge` (`0f 8d`) -> `jg` (`0f 8f`), one byte, fixes the off-by-one and keeps the filter.
+Verified against every scenario, including both equal-width cases:
+
+| desktop | slot 4 chosen | gate keeps it |
+|---|---|---|
+| 1920x1080 (real display) | 1600x900 | yes |
+| 1600x900 virtual desktop | 1600x900 (**== desktop width**) | yes — this is what `jge` broke |
+| 1600x1200 virtual desktop | 1600x1200 (**== desktop width**) | yes — the original tier-2 case |
+| 1024x768 virtual desktop | left stock | wider modes correctly hidden again |
+
+### The picker: nothing stopped it exceeding the desktop
+
+The runtime picker capped width at 1600 (§11 art) and height at 1200, but never checked the
+mode **fits the desktop**. The stock gate had been providing that check implicitly — and the
+NOP removed it. Measured under `vd=1024x768`, the picker chose **1400x1050**, larger than the
+desktop in both dimensions.
+
+Two constraints added:
+
+* `w <= desktop width && h <= desktop height` — `<=`, not `<`, because a mode exactly as wide
+  as the desktop is the ideal case. This is why the gate needs `jg` rather than `jge`.
+* `w > 1280` — slot 4 is the *largest* slot; if nothing beats slot 3's stock 1280 there is
+  nothing to offer, so leave slot 4 alone rather than shrink it. Under `vd=1024x768` this
+  correctly yields zero candidates and slot 4 stays 1600x1200.
+
+### Note for the Proton/Steam setup
+
+`vd=1024x768` predates this project, from when a virtual desktop was believed mandatory — a
+premise §13 disproved. Under it the patcher is safe but can offer no widescreen at all, since
+nothing wider than 1280 fits. To get widescreen on Steam the virtual desktop needs to go
+(`protontricks 33520 vd=off`) or be sized to the target mode.

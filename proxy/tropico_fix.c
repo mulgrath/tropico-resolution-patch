@@ -116,8 +116,19 @@ static int poke(void *dst, const void *src, SIZE_T len)
  * once we pick the display's own best mode -- would be rejected. */
 static const BYTE GATE_SIG[]  = {0x3d,0xa0,0x0f,0x5a,0x00, 0x74,0x08, 0x39,0x18,
                                  0x0f,0x8d,0x9d,0x00,0x00,0x00};
-#define GATE_PATCH_OFF 9
-#define GATE_PATCH_LEN 6
+/* Patch `jge` (0f 8d) -> `jg` (0f 8f): ONE byte.
+ *
+ * Earlier revisions NOPed all six bytes, which killed the test outright. That was
+ * wrong in both directions. The defect is only an off-by-one -- the gate skips a
+ * mode whose width is >= the desktop width, so a mode exactly as wide as the
+ * desktop (the common case once we pick the display's own best mode) is rejected.
+ * `jg` fixes exactly that while KEEPING the filter that hides modes wider than the
+ * desktop. NOPing removed that protection, and under a small virtual desktop --
+ * e.g. Proton launched with vd=1024x768 -- it left the game offering modes it
+ * could not possibly set. */
+#define GATE_PATCH_OFF 10
+#define GATE_PATCH_LEN 1
+#define GATE_PATCH_BYTE 0x8f
 
 /* FINDINGS section 16: the Hardware 3D gate, an x87 SIGNED compare. */
 static const BYTE VRAM_SIG[]  = {0xdb,0x05,0xa0,0x8a,0x61,0x00,
@@ -229,6 +240,14 @@ static int pick_mode(mode_t *out)
     int considered = 0;
     mode_t seen[128]; int nseen = 0;
 
+    /* The mode must FIT THE DESKTOP. Without this the picker will happily choose a
+     * mode larger than a Wine/Proton virtual desktop -- measured: vd=1024x768 gave
+     * slot 4 = 1400x1050. The stock gate used to prevent that, and NOPing it (as
+     * earlier revisions did) removed the protection. `<=`, not `<`: a mode exactly
+     * as wide as the desktop is the ideal case, which is why the gate needs `jg`. */
+    DWORD deskw = (DWORD)GetSystemMetrics(SM_CXSCREEN);
+    DWORD deskh = (DWORD)GetSystemMetrics(SM_CYSCREEN);
+
     for (DWORD i = 0; ; i++) {
         memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
         if (!EnumDisplaySettingsA(NULL, i, &dm)) break;
@@ -237,7 +256,10 @@ static int pick_mode(mode_t *out)
         if (w % 4) continue;                       /* s10: pitch shear         */
         if (w > ART_WIDTH_CAP) continue;           /* s11: art width ceiling   */
         if (h > 1200) continue;                    /* stock slot-4 art height  */
-        if (w <= 640) continue;                    /* never worth slot 4       */
+        if (w > deskw || h > deskh) continue;      /* must fit the desktop     */
+        /* Slot 4 is the LARGEST slot. If we cannot beat slot 3's stock 1280, we have
+         * nothing to offer and should leave slot 4 alone rather than shrink it. */
+        if (w <= 1280) continue;
         if (collides_with_stock(w)) continue;      /* s9: unique widths        */
 
         /* Wine lists every mode once per bit depth; only log each geometry once. */
@@ -254,8 +276,12 @@ static int pick_mode(mode_t *out)
         if (win) { best.w = w; best.h = h; best_err = err; }
     }
 
-    logf_("  %d candidate modes passed the constraints", considered);
-    if (!best.w) return 0;
+    logf_("  %d candidate modes passed the constraints (fit within %lux%lu, wider than 1280)",
+          considered, deskw, deskh);
+    if (!best.w) {
+        logf_("  -> nothing beats slot 3's stock 1280; leaving slot 4 at its stock 1600x1200");
+        return 0;
+    }
     *out = best;
     return 1;
 }
@@ -294,9 +320,10 @@ static void apply_patches(void)
     /* --- 1. desktop-width gate --------------------------------------------- */
     BYTE *p = find_unique(GATE_SIG, sizeof GATE_SIG, g_text, g_textlen, "gate");
     if (p) {
-        BYTE nops[GATE_PATCH_LEN]; memset(nops, 0x90, sizeof nops);
-        if (poke(p + GATE_PATCH_OFF, nops, sizeof nops)) {
-            logf_("[+] gate NOPed at %p (entries no longer gated on desktop width)", p + GATE_PATCH_OFF); ok++;
+        BYTE jg = GATE_PATCH_BYTE;
+        if (poke(p + GATE_PATCH_OFF, &jg, 1)) {
+            logf_("[+] gate jge -> jg at %p (a mode exactly as wide as the desktop is now kept;"
+                  " wider ones are still filtered out)", p + GATE_PATCH_OFF); ok++;
         } else { logf_("[x] gate: VirtualProtect failed"); fail++; }
     } else { logf_("[-] gate: signature not found (already patched, or wrong build)"); fail++; }
 

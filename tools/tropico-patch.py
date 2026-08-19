@@ -23,7 +23,16 @@ TABLE_VA    = 0x5a0fa0
 TABLE_LEN   = 5
 GATE_VA     = 0x514d9f
 GATE_ORIG   = bytes.fromhex('0f8d9d000000')   # jge 0x514e42
-GATE_NOP    = b'\x90' * 6
+GATE_JG     = bytes.fromhex('0f8f9d000000')   # jg  0x514e42  <- the fix
+GATE_NOP    = b'\x90' * 6                     # legacy: what earlier builds wrote
+# The gate's defect is an OFF-BY-ONE, not the test itself: it skips any entry whose
+# width is >= the desktop width, so a mode exactly as wide as the desktop -- the
+# normal case once the table holds the display's own best mode -- is rejected.
+# `jge` -> `jg` fixes precisely that and KEEPS the filter that hides modes wider
+# than the desktop. Earlier builds NOPed all six bytes, which also removed the
+# protection; under a small virtual desktop (Proton `vd=1024x768`) that left the
+# game offering modes it could not possibly set. NOPed builds are still recognised
+# so they can be re-patched, but nothing writes NOPs any more.
 # Longer anchor for runtime pattern-scanning the DRM-wrapped Steam build:
 GATE_ANCHOR = bytes.fromhex('3da00f5a007408' '3918' '0f8d9d000000')
 
@@ -105,8 +114,9 @@ def show(buf, label):
         g = '  (menu/frontend resolution - do not replace)' if i == 0 else ''
         print(f'    [{i}]  {w:5d} x {h:<5d}  file 0x{va2off(TABLE_VA)+8*i:06x}  [{sync}]{g}')
     gate = bytes(buf[va2off(GATE_VA):va2off(GATE_VA)+6])
-    state = 'NOPed (all entries always offered)' if gate == GATE_NOP else \
-            'original jge (entries gated on desktop width)' if gate == GATE_ORIG else \
+    state = 'jg (mode == desktop width kept; wider still filtered)' if gate == GATE_JG else \
+            'NOPed - LEGACY, offers modes the desktop cannot set' if gate == GATE_NOP else \
+            'original jge (off-by-one: mode == desktop width rejected)' if gate == GATE_ORIG else \
             'UNRECOGNISED'
     print(f'    gate @0x{va2off(GATE_VA):06x}: {gate.hex()}  -> {state}')
     vram = bytes(buf[va2off(VRAM_VA):va2off(VRAM_VA)+len(VRAM_ORIG)])
@@ -138,9 +148,10 @@ def main():
     print(f'input : {a.exe}  ({len(buf)} bytes, md5 {hashlib.md5(buf).hexdigest()})')
 
     gate = bytes(buf[va2off(GATE_VA):va2off(GATE_VA)+6])
-    if gate not in (GATE_ORIG, GATE_NOP):
-        sys.exit(f'ERROR: byte pattern at the gate site is {gate.hex()}, expected '
-                 f'{GATE_ORIG.hex()} or {GATE_NOP.hex()}. Wrong build? Refusing to patch.')
+    if gate not in (GATE_ORIG, GATE_NOP, GATE_JG):
+        sys.exit(f'ERROR: byte pattern at the gate site is {gate.hex()}, expected one of '
+                 f'{GATE_ORIG.hex()} / {GATE_JG.hex()} / {GATE_NOP.hex()}. '
+                 f'Wrong build? Refusing to patch.')
 
     vram = bytes(buf[va2off(VRAM_VA):va2off(VRAM_VA)+len(VRAM_ORIG)])
     if vram not in (VRAM_ORIG, VRAM_FIXED):
@@ -171,8 +182,9 @@ def main():
         print(f'  set slot {slot} -> {w}x{h}  (data table + code compare-chain)')
 
     if not a.no_gate_patch:
-        buf[va2off(GATE_VA):va2off(GATE_VA)+6] = GATE_NOP
-        print(f'  gate NOPed at file 0x{va2off(GATE_VA):06x}')
+        buf[va2off(GATE_VA):va2off(GATE_VA)+6] = GATE_JG
+        print(f'  gate jge -> jg at file 0x{va2off(GATE_VA):06x} '
+              f'(keeps a mode exactly as wide as the desktop; still hides wider ones)')
 
     if not a.no_vram_fix:
         buf[va2off(VRAM_VA):va2off(VRAM_VA)+len(VRAM_FIXED)] = VRAM_FIXED
