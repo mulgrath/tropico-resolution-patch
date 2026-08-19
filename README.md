@@ -9,10 +9,10 @@ You supply your own install; the tools operate on it in place.
 
 | tier | goal | state |
 |------|------|-------|
-| 1 | Reliable launch on Linux without manual prefix surgery | not started |
+| 1 | Reliable launch, no manual prefix surgery | **largely solved** — runs with no virtual desktop; centring/upscaling outstanding |
 | 2 | **1600x1200** — sharp, correct, 4:3 | **DONE, reproduced** |
 | 3 | True widescreen with a sane HUD | **capped at 1600 wide** — 1600x900 is the candidate; 1920 is not reachable |
-| 4 | Upscaling / HUD re-anchoring | not started |
+| 4 | Upscaling / HUD re-anchoring | not started — gamescope is the likely vehicle |
 
 ### Tier 2 — done
 
@@ -37,6 +37,12 @@ target wider than its slot's stock width leaves an unpainted strip.
 Practical rule: put the widescreen mode in **slot 4** (stock width 1600) and keep the
 target width at or below 1600. **1600x900 is the candidate configuration.** 1920x1080
 cannot be made clean — no art set is 1920 wide.
+
+### Hardware 3D — restored
+
+Refused because Wine reports ~4GB VRAM, which overflows the game's signed `>= 16MB` check to
+a negative number (FINDINGS §14). Set `HKCU\Software\Wine\Direct3D\VideoMemorySize` to
+`256` and it works. Confirmed. A permanent signed->unsigned patch is still to do.
 
 ## Quick start
 

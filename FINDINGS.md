@@ -420,15 +420,21 @@ Confirmed by capping what Wine reports (`probes/ddcaps.c`):
 | 256 | 260,141,056 | 260,141,056 | yes |
 | 512 | 528,576,512 | 528,576,512 | yes |
 
-**Zero-patch workaround:** set `VideoMemorySize` to 256. Already applied to
-`~/.wine-tropico-gog`.
+**CONFIRMED 2026-08-19.** With `VideoMemorySize=256` the game accepts Hardware 3D and runs.
+The diagnosis is settled: it was never a missing DirectX 7 driver, only the signed overflow.
 
-Not yet verified that the game then accepts Hardware 3D — that needs a run. And note the
-brief's warning that the hardware renderer has its own pitch/stride bug on modern GPUs, so
-it may render badly even once accepted. Software 3D remains the known-good path.
+**Zero-patch workaround:** set `HKCU\Software\Wine\Direct3D\VideoMemorySize` to 256.
+Applied to `~/.wine-tropico-gog`.
 
-A permanent fix would patch the comparison from signed to unsigned (`jl` -> `jb`) so no
-registry change is needed. The compare site has not been located yet.
+**Permanent fix, not yet done:** patch the comparison from signed to unsigned (`jl` -> `jb`,
+or `jge` -> `jae`) so no registry change is needed. The compare site has not been located.
+Search approach: find the xref to `Tropico.lng` string **1721** the same way string 586 was
+found in §3 — locate the id `0x6b9` (1721) as an immediate in `.text`, then walk back to the
+comparison feeding it.
+
+Note the owner prefers the software renderer's visuals; hardware 3D is about restoring the
+option, not about making it the default. The brief's warning that the hardware path has its
+own pitch/stride bug on modern GPUs still stands and is untested.
 
 ## 15. No virtual desktop means no mode switching — content sits top-left
 
