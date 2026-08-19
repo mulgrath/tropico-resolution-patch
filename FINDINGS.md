@@ -878,3 +878,52 @@ Pop!_OS 24.04 and has been blocking that tier. Proton delivers it without any ex
 **Consequence:** Proton is not merely a way to run the Steam build; it may be the better
 runtime for the GOG build too, solving the top-left placement of §15 and probably the
 multi-monitor problem of §18 as well. Worth testing before investing in gamescope.
+
+## 23. Hardware 3D smears — NOT a surface pitch problem — OPEN
+
+With the §16 patch applied, Hardware 3D is now selectable on the Steam build and the owner
+reports it renders "the odd smear effect that looks like the pixels are being wrapped
+incorrectly" — the same visual signature §10 recorded for the pitch/stride bug, and the
+problem §14 predicted but never tested.
+
+**The obvious explanation is ruled out.** `probes/ddpitchvid.c` measures pitch for the three
+surface classes the hardware path can use — system memory, video memory and texture — at every
+width of interest, and at the real slot-4 geometries:
+
+```
+  width   hgt   want*2 |   sysmem  delta |   vidmem  delta |  texture  delta
+   1600   900    3200 |    3200    +0    3200    +0    3200    +0
+   1600  1200    3200 |    3200    +0    3200    +0    3200    +0
+   1280  1024    2560 |    2560    +0    2560    +0    2560    +0
+   1024   768    2048 |    2048    +0    2048    +0    2048    +0
+```
+
+**Zero padding everywhere.** At 16bpp, `pitch == width*2` holds for all three classes, so the
+§10 mechanism (row spacing drifting because the surface is padded) cannot be the cause here.
+§10's rule `width % 4 == 0` remains correct and remains satisfied by 1600.
+
+### Leading hypothesis — NOT yet tested
+
+A "rows wrapped incorrectly" smear also results from a **bytes-per-pixel mismatch**: if the
+hardware path puts the display or its render target at 32bpp while the game's own blitting
+still assumes 2 bytes per pixel, every row is written at half the correct stride and the image
+shears exactly as described. §6 recorded that the *software* path sets 16bpp
+(`SetDisplayMode ... bpp 16`); what the hardware path does was never traced.
+
+Note the descriptor array carries a bit-depth dimension (`d2`, §16) with four values —
+8/16/24/32 — so the engine does model depths above 16.
+
+### The discriminating test, not yet run
+
+Does the smear depend on the resolution, or on the renderer?
+
+* Hardware 3D at **stock 1024x768** (a slot this project never touches):
+  * smears too -> the hardware path is broken independently of anything we changed, and this
+    is §14's predicted problem. Nothing in the patch is implicated.
+  * renders fine -> something about the chosen slot-4 mode interacts with the hardware path.
+
+A `WINEDEBUG=+ddraw` trace of a smearing session would settle the bpp question outright; that
+is the method that cracked §6, twice.
+
+**Note the owner prefers the software renderer's visuals** (§14), so this affects the
+*availability* of an option rather than the default experience. It should not block shipping.
