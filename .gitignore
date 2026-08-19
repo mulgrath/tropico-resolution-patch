@@ -1,0 +1,8 @@
+# NEVER commit game binaries or user config - ship only original code.
+*.EXE
+*.exe
+*.CFG
+*.cfg
+*.PK2
+*.xdt
+*.lng
