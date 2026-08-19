@@ -11,7 +11,7 @@ You supply your own install; the tools operate on it in place.
 |------|------|-------|
 | 1 | Reliable launch on Linux without manual prefix surgery | not started |
 | 2 | **1600x1200** — sharp, correct, 4:3 | **DONE, reproduced** |
-| 3 | True widescreen (1080p/1440p) with a sane HUD | **untested** — see below |
+| 3 | True widescreen with a sane HUD | **capped at 1600 wide** — 1600x900 is the candidate; 1920 is not reachable |
 | 4 | Upscaling / HUD re-anchoring | not started |
 
 ### Tier 2 — done
@@ -27,11 +27,16 @@ Confirmed working twice, including a clean from-scratch reproduction after a reg
 scare. Known cosmetic issue: the Wine virtual-desktop title bar (39px top, 13px sides)
 clips the bottom of the UI when the desktop equals the game resolution.
 
-### Tier 3 — genuinely untested
+### Tier 3 — widescreen works, but width is capped at 1600
 
-Every widescreen experiment so far was invalidated by the preset stomp (FINDINGS §5) and
-by mis-sized virtual desktops. **No valid widescreen test has run yet.** Do not treat
-earlier "widescreen fails" observations as evidence.
+The engine renders 16:9 correctly. Three separate bugs had to be fixed to get there
+(FINDINGS §8, §9, §10), and a fourth is an asset limit that cannot be patched (§11):
+the HUD/background art is drawn at the *stock* width of whichever slot is used, so a
+target wider than its slot's stock width leaves an unpainted strip.
+
+Practical rule: put the widescreen mode in **slot 4** (stock width 1600) and keep the
+target width at or below 1600. **1600x900 is the candidate configuration.** 1920x1080
+cannot be made clean — no art set is 1920 wide.
 
 ## Quick start
 

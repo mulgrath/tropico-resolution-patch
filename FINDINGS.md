@@ -288,3 +288,39 @@ It previously only printed a warning, which was easy to miss.
 4. Do not replace slot 0 — it is the menu/frontend resolution and is special-cased in the
    enumerator as always-accepted.
 5. Both the data table and the code compare-chain must be updated together (§8).
+
+
+## 11. The HUD/background is drawn at the slot's STOCK width — MEASURED
+
+Patching all three known locations still leaves the frame clipped. Measurement across three
+slots shows the clip lands on the **stock width of whichever slot is used**, regardless of
+the resolution actually set:
+
+| slot | stock width | patched to | measured clip |
+|---|---|---|---|
+| 1 | 800 | 1440x900 | **800** |
+| 2 | 1024 | 1920x1080 | **1024** |
+| 3 | 1280 | 1440x900 | **1280** |
+
+Two systems disagree about the screen width. The HUD/background art is drawn at the slot's
+stock width, anchored left, while widgets (money, date, Tropico logo, tabs) are positioned
+from the *real* resolution and land correctly at the right edge. The stone HUD bar is cut
+cleanly at the stock width rather than tiled — consistent with a fixed-width bitmap.
+
+No fourth copy of the stock dimensions exists in the binary (searched as DWORD arrays, WORD
+arrays, interleaved pairs, and as immediates), so this is almost certainly **per-resolution
+art assets** in the PK2 archives, selected by slot index. There are exactly five sets and no
+way to synthesise a sixth by patching code.
+
+### The practical consequence
+
+Choose a slot whose **stock width is greater than or equal to the target width**. The art is
+then at least as wide as the screen and no unpainted strip remains. This makes slot 4
+(stock 1600x1200) the only useful home for a widescreen mode, and caps the usable width at
+**1600**.
+
+Best candidate: **slot 4 = 1600x900** — art width 1600 exactly equals target width 1600, and
+16:9 exactly. 1920x1080 can never be made clean this way; no art set is 1920 wide.
+
+Vertical does not appear to be affected: in the slot-3 test the art was 1024 tall against a
+900-tall screen and the HUD bar still sat correctly at the bottom.
