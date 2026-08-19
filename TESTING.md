@@ -47,6 +47,24 @@ known-good setup starts failing, suspect the harness before the subject.
 **Rule:** keep one untouched known-good path. Re-run it whenever results stop making
 sense, *before* forming new hypotheses.
 
+## Trap 5 — the map-load catch-22
+
+The video settings need F2 **in the game world**, but loading a map applies the *stored*
+resolution index first. If that stored mode cannot be satisfied, the error fires during
+map load and F2 is never reachable — so you cannot select the mode you wanted to test.
+
+This is self-perpetuating: a successful run at slot N leaves the index at N, which then
+dictates what the *next* launch attempts, regardless of which exe or desktop you chose.
+
+**Symptom:** the CFG index after a failed run is not the slot you meant to test.
+**Always read `0x242` back before interpreting any result.**
+
+**Fix:** launch with the virtual desktop matching whatever the CFG index currently
+resolves to, so map load succeeds; only then use F2 to switch to the mode under test.
+Check `0x242` before launching to know what that is.
+
+Forcing the index instead is tempting but is Trap 4 — it broke a working configuration.
+
 ## Constraints that shape any valid test
 
 - The mode must be in Wine's enumerated list = standard modes **+ the current virtual
