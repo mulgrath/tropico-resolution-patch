@@ -1167,3 +1167,88 @@ that is not, and which dominates has to be measured in-game rather than argued. 
 **Not established:** the packet control byte; whether the engine honours these coordinates
 for every widget or recomputes some itself (§12 saw corner-anchored widgets land correctly
 from the live resolution, which suggests both paths exist).
+
+
+## 27. The 1600x900 HUD fault is ONE sprite, misplaced by ONE integer — MEASURED
+
+Owner ran 1600x900 (proxy log: `ini override: 1600x900`, `slot 4 -> 1600x900`, `4 applied,
+0 failed`) and 1280x1024 as the control. Screenshots: the 1280 HUD is a single continuous
+stone wall across the bottom; the 1600x900 HUD is that same wall broken into floating
+fragments with the world showing through the gaps.
+
+### The whole bottom bar is a single 1600x505 sprite
+
+None of the 43 `.imm` assets from §19 contains it — the widest sprite among all of them is
+809px. Scanning every archive entry for the `0x27D8` container and walking its block chain
+found exactly one entry holding a 1600-wide sprite: hash **`0x6017ebbb`** in `px.PK2`,
+879,671 bytes, 33 sprites. Sprite 0 is the bar; sprites 1-32 are its buttons.
+
+| set | screen | sprite 0 | y+h | h / screen_h |
+|---|---|---|---|---|
+| `.i06` | 640x480   | x=0 y=278 640x202  | **480**  | 0.4208 |
+| `.i08` | 800x600   | x=0 y=347 800x253  | **600**  | 0.4217 |
+| `.i10` | 1024x768  | x=0 y=445 1024x323 | **768**  | 0.4206 |
+| `.i12` | 1280x1024 | x=0 y=593 1280x431 | **1024** | 0.4209 |
+| `.i16` | 1600x1200 | x=0 y=695 1600x505 | **1200** | 0.4208 |
+
+`y == screen_height - h` in all five. The bar is bottom-aligned **by its stored coordinate**,
+not by a runtime anchor — nothing recomputes it.
+
+### So the fault is arithmetic, not art
+
+At 1600x900 the game loads `.i16`. The bar is 505 tall and stored at y=695, so it spans
+695..1200 and **300 of its 505 rows fall off a 900-tall screen**. That is precisely the
+screenshot: the surviving 205 rows are the wall fragments, and the missing 300 are the gaps.
+
+The correct value is `900 - 505 = 395`. One `int16`, at blob offset **+1422** (x is at +1420),
+which for the stock GOG `px.PK2` is file offset **333,392,557**. Current bytes `b7 02`,
+corrected `8b 01`.
+
+### Sibling hashes are derivable, so unnamed assets can still be addressed
+
+The §19 hash is `h = 7; for c: h = h*K + toupper(c) + C`, `K = 0x41C64E6E`. Because the five
+variants differ only in the last two characters, their hashes differ by constants:
+
+```
+h(.i12) = h(.i16) - 4        h(.i10) = h(.i16) - 6
+h(.i06) = h(.i16) - K        h(.i08) = h(.i16) - K + 2
+```
+
+Verified exactly on the bar: `0x6017ebbb - 0x1e519d4d = 0x41C64E6E`. This finds resolution
+families **without knowing their names**, which matters because most assets have none we can
+recover (below).
+
+### The job is 10 families, not 43 assets, and not five art sets
+
+Applying that rule to all four archives finds **268** five-variant per-resolution families —
+§19's 43 was an undercount limited to `.imm` strings visible in the exe. Of those 268, at
+1600x900:
+
+* **257 already fit** entirely inside a 900-tall screen. Nothing to do.
+* **10 have sprites falling past y=900.** Only one of them, `0x6017ebbb`, is the main HUD bar.
+* 1 does not parse as a sprite container.
+
+### Verdict: wrong place, not wrong size — with one honest caveat
+
+Moving the bar to y=395 puts it fully on screen, bottom-aligned, nothing clipped, with no
+pixel work. **But** it is 505 tall art on a 900-tall screen — 56.1% of the height, where the
+design is 42.1%. It will be correct and whole, and noticeably chunkier than intended.
+
+Getting it to 42.1% means resampling 1600x505 down to 1600x379, which needs the RLE packet
+encoding (§26) finished. That is **one bitmap**, derived from the user's own file — not an
+art-authoring job.
+
+### The delivery blocker: this asset has no recoverable name
+
+`.imb` overrides in `data/` are matched by name hash (§24), so a loose override needs the
+name. Hashing all 778,036 filename-shaped tokens in `Tropico.EXE` and every file in `data2/`
+against `0x6017ebbb` and its `.i16`/`.imb` forms yields **no match** — the name is composed at
+runtime or lives inside an archive entry.
+
+So the loose-file route from §24 is not available for the asset that matters. The remaining
+routes are (a) patch the two bytes inside `px.PK2` in place, reversible and testable today, or
+(b) have the proxy fix the coordinate in memory after load, which needs no name, no archive
+rewrite, and generalises to the other nine families. (b) is the shippable one.
+
+**Untested:** that y=395 actually repairs the bar in-game. Everything above is measurement of
+the files; the placement claim is a prediction until it is run.
