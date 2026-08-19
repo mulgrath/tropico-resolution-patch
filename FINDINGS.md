@@ -943,3 +943,55 @@ system wine, which is the primary target. On Steam/Proton it is selectable but v
 so software rendering is the right choice there. The owner prefers the software renderer's
 visuals anyway (§14), so this costs an option rather than the experience, and does not block
 shipping.
+
+## 24. Loose files override the archives — and archive blobs are encoded
+
+### Loose files win — a mod need not repack 372 MB
+
+Every loose file in `data/` — 16 `.imb` building sprites and one `.pal` — **also exists inside
+the archives**, checked by hashing each filename with the §19 function:
+
+```
+6265fc08.pal   in-archive: True
+bl1cabaE.imb   in-archive: True      ... 17/17 True
+```
+
+Shipping an asset both loose and archived only makes sense if the loose copy wins. This is
+almost certainly how patch 1.07 shipped updated art without rewriting a 372 MB archive.
+
+**Consequence for the HUD mod:** new art can ship as loose files in `data/`. No repacking, no
+archive rewriting, and it is trivially reversible — delete the files. Combined with §19's
+suffix repointing, a mod is two small moving parts.
+
+### But the archived copies are NOT stored the way loose files are
+
+Comparing the loose and archived copies of the same names:
+
+| file | loose | archived | |
+|---|---|---|---|
+| `bl1cabaE.imb` | 447,691 | 447,227 | differ |
+| `6265fc08.pal` | 18,209 | **18,209** | differ, same size |
+
+The loose `.imb` opens with `d8 27 01 00` (= 75,736, a plausible offset into a 447 KB file);
+the archived copy opens `a8 c4 06 a6`, which is not a plausible anything. The archived
+`.i16` blobs look the same way. So the archive stores blobs **encoded** — compressed or
+obfuscated — while loose files are plain.
+
+That is good news, not bad: the format we must be able to *write* is the plain loose one, and
+we never have to produce a valid archive blob at all.
+
+### Prior art: Railroad Tycoon II, same studio — PARTIAL transfer only
+
+RT2 uses `.imb` + `.pal` too and its formats are documented on ZenHAX. Tested against
+Tropico's files, the details do **not** transfer:
+
+* RT2 `.pal`: 4-byte count then 512 bytes per palette. Tropico: count 104, but
+  `(len-4)/104 = 175.05` bytes per entry, not 512.
+* RT2 `.imb`: dword0 is the sprite count. Tropico's dword0 is 75,736 — an offset, not a count.
+
+What does transfer is the **family shape**, which is worth having: a count, per-sprite headers
+carrying width/height/packed-size, line-oriented RLE with control bytes distinguishing
+skip/literal runs, and palettes of 256 RGB555 entries. Tropico is three years later than RT2
+and the format evidently evolved.
+
+No Tropico-specific tool or format documentation appears to exist publicly.
