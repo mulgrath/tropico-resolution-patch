@@ -512,6 +512,109 @@ static int install_iat_hook(void)
     return 0;
 }
 
+/* ------------------------------------------------------- the live-memory scan
+ *
+ * FINDINGS section 31: the terrain clips at exactly 1600 on both a 1680- and a
+ * 1920-wide screen, so it is a fixed constant -- but it is not a DirectDraw
+ * geometry, not a second resolution table, not a derived array, not a float, not
+ * a buffer size, and every 0x640 immediate in the binary is accounted for and
+ * none of them is a terrain clip. It is computed at runtime from values that are
+ * not 1600 in the file.
+ *
+ * So stop reading and go and look. At 1920x1080 nearly every legitimate width in
+ * memory is 1920; anything still holding 1600 is a suspect. Scan, report, and
+ * optionally overwrite -- the classic memory-scanner approach, run from inside the
+ * process we are already inside.
+ *
+ *   [Scan]
+ *   Delay=30       seconds to wait before scanning -- you must be IN THE MAP at
+ *                  the target resolution when it fires, so allow for map load
+ *                  plus the F2 climb (FINDINGS: the mode ladder must be climbed)
+ *   Find=1600      the value to hunt
+ *   Replace=0      0 = report only. Non-zero = overwrite every hit, then look at
+ *                  the terrain. Crashing is an acceptable outcome here; it is
+ *                  still information, and everything in this project is reversible.
+ *   Scope=image    'image' = the exe's own statics only (where a cached viewport
+ *                  width would live). 'all' = every committed writable page.
+ */
+static DWORD g_scan_delay, g_scan_find, g_scan_repl;
+static char  g_scan_scope[16];
+
+static void scan_report(BYTE *base, SIZE_T len, const char *what, int *n32, int *n16)
+{
+    for (SIZE_T i = 0; i + 4 <= len; i += 4) {
+        DWORD v; memcpy(&v, base + i, 4);
+        if (v == g_scan_find) {
+            if (*n32 < 40) logf_("    u32 %s+0x%06x  (VA %p)", what, (unsigned)i, base + i);
+            (*n32)++;
+            if (g_scan_repl) { DWORD r = g_scan_repl; memcpy(base + i, &r, 4); }
+        }
+    }
+    for (SIZE_T i = 0; i + 2 <= len; i += 2) {
+        WORD v; memcpy(&v, base + i, 2);
+        if (v == (WORD)g_scan_find) {
+            DWORD d; memcpy(&d, base + (i & ~(SIZE_T)3), 4);
+            if (d == g_scan_find) continue;          /* already counted as a u32 */
+            if (*n16 < 40) logf_("    u16 %s+0x%06x  (VA %p)", what, (unsigned)i, base + i);
+            (*n16)++;
+            if (g_scan_repl) { WORD r = (WORD)g_scan_repl; memcpy(base + i, &r, 2); }
+        }
+    }
+}
+
+static DWORD WINAPI scan_thread(LPVOID unused)
+{
+    (void)unused;
+    Sleep(g_scan_delay * 1000);
+    logf_("--- live scan: find %u, replace %u, scope %s, after %us ---",
+          (unsigned)g_scan_find, (unsigned)g_scan_repl, g_scan_scope, (unsigned)g_scan_delay);
+    /* what the game currently believes the screen is -- if this is not the mode you
+     * selected, the scan fired at the wrong time and its output means nothing. */
+    logf_("  SM_CXSCREEN now %d x %d", GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+
+    int n32 = 0, n16 = 0;
+    if (!strcmp(g_scan_scope, "all")) {
+        MEMORY_BASIC_INFORMATION mbi;
+        BYTE *p = NULL;
+        while (VirtualQuery(p, &mbi, sizeof mbi) == sizeof mbi) {
+            DWORD prot = mbi.Protect & 0xff;
+            if (mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_GUARD)
+                && (prot == PAGE_READWRITE || prot == PAGE_WRITECOPY
+                    || prot == PAGE_EXECUTE_READWRITE)) {
+                scan_report((BYTE *)mbi.BaseAddress, mbi.RegionSize, "mem", &n32, &n16);
+            }
+            BYTE *next = (BYTE *)mbi.BaseAddress + mbi.RegionSize;
+            if (next <= p) break;
+            p = next;
+        }
+    } else {
+        IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)g_base;
+        IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(g_base + dos->e_lfanew);
+        SIZE_T img = nt->OptionalHeader.SizeOfImage;
+        DWORD old;
+        VirtualProtect(g_base, img, PAGE_EXECUTE_READWRITE, &old);
+        scan_report(g_base, img, "exe", &n32, &n16);
+    }
+    logf_("  %d u32 hit(s), %d u16 hit(s)%s", n32, n16,
+          g_scan_repl ? " -- ALL OVERWRITTEN" : "");
+    logf_("--- scan done ---");
+    return 0;
+}
+
+static void maybe_start_scan(void)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%s\\tropico-fix.ini", g_dir);
+    g_scan_delay = GetPrivateProfileIntA("Scan", "Delay", 0, path);
+    if (!g_scan_delay) return;
+    g_scan_find = GetPrivateProfileIntA("Scan", "Find", 1600, path);
+    g_scan_repl = GetPrivateProfileIntA("Scan", "Replace", 0, path);
+    GetPrivateProfileStringA("Scan", "Scope", "image", g_scan_scope, sizeof g_scan_scope, path);
+    logf_("[*] live scan armed: find %u, replace %u, scope %s, fires %us after load",
+          (unsigned)g_scan_find, (unsigned)g_scan_repl, g_scan_scope, (unsigned)g_scan_delay);
+    CloseHandle(CreateThread(NULL, 0, scan_thread, NULL, 0, NULL));
+}
+
 /* ------------------------------------------------------------------- DllMain */
 
 
@@ -564,5 +667,6 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         if (!install_iat_hook())
             logf_("[x] could not hook GetDeviceCaps -- NOTHING WILL BE PATCHED");
     }
+    maybe_start_scan();
     return TRUE;
 }
