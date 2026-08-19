@@ -97,6 +97,34 @@ static BYTE *find_unique(const BYTE *pat, SIZE_T len, BYTE *start, SIZE_T size, 
     return hit;
 }
 
+/* Masked variant: mask[i]==0 means "any byte here".
+ *
+ * REQUIRED, not a nicety. The Steam build is a DIFFERENT BUILD, not a wrapped copy
+ * of the GOG one: only 13% of bytes match and the resolution table sits 736 bytes
+ * earlier, so every absolute address differs. Signatures that embed absolute
+ * addresses -- as the first version's did, e.g. `cmp eax,0x5a0fa0` -- can never
+ * match it, decrypted or not. So wildcard every absolute operand and read the real
+ * addresses back out of whatever matched. */
+static BYTE *find_unique_masked(const BYTE *pat, const BYTE *mask, SIZE_T len,
+                                BYTE *start, SIZE_T size, const char *what)
+{
+    BYTE *hit = NULL;
+    int n = 0;
+    if (size < len) return NULL;
+    for (SIZE_T i = 0; i + len <= size; i++) {
+        SIZE_T j = 0;
+        for (; j < len; j++)
+            if (mask[j] && start[i + j] != pat[j]) break;
+        if (j != len) continue;
+        if (++n > 1) { logf_("  [!] %s: %d+ matches, signature not unique -- refusing", what, n); return NULL; }
+        hit = start + i;
+    }
+    if (!n) return NULL;
+    return hit;
+}
+
+static DWORD rd32(const BYTE *p) { DWORD v; memcpy(&v, p, 4); return v; }
+
 static int poke(void *dst, const void *src, SIZE_T len)
 {
     DWORD old;
@@ -109,44 +137,39 @@ static int poke(void *dst, const void *src, SIZE_T len)
 
 /* ------------------------------------------------------------- the signatures */
 
-/* FINDINGS section 2: the desktop-width gate at 0x514d96.
- *   cmp eax,0x5a0fa0 / je +8 / cmp [eax],ebx / jge 0x514e42
- * The final jge is what skips any entry whose width >= GetDeviceCaps(HORZRES).
- * It uses >=, not >, so a mode exactly as wide as the desktop -- the common case
- * once we pick the display's own best mode -- would be rejected. */
-static const BYTE GATE_SIG[]  = {0x3d,0xa0,0x0f,0x5a,0x00, 0x74,0x08, 0x39,0x18,
-                                 0x0f,0x8d,0x9d,0x00,0x00,0x00};
-/* Patch `jge` (0f 8d) -> `jg` (0f 8f): ONE byte.
- *
- * Earlier revisions NOPed all six bytes, which killed the test outright. That was
- * wrong in both directions. The defect is only an off-by-one -- the gate skips a
- * mode whose width is >= the desktop width, so a mode exactly as wide as the
- * desktop (the common case once we pick the display's own best mode) is rejected.
- * `jg` fixes exactly that while KEEPING the filter that hides modes wider than the
- * desktop. NOPing removed that protection, and under a small virtual desktop --
- * e.g. Proton launched with vd=1024x768 -- it left the game offering modes it
- * could not possibly set. */
+/* All signatures below wildcard their absolute operands (mask byte 0) so they match
+ * ANY build of the game, and the real addresses are read back from the match. */
+
+/* FINDINGS section 2: the desktop-width gate.
+ *   cmp eax,<resolution table VA> / je +8 / cmp [eax],ebx / jge <end of loop>
+ * The table VA is discovered first, from the data table itself, then spliced in --
+ * which also proves the two finds agree about the same build. */
+static BYTE GATE_SIG[]        = {0x3d,0,0,0,0, 0x74,0x08, 0x39,0x18, 0x0f,0x8d,0,0,0,0};
+static const BYTE GATE_MASK[] = {   1,1,1,1,1,    1,   1,    1,   1,    1,   1,0,0,0,0};
 #define GATE_PATCH_OFF 10
 #define GATE_PATCH_LEN 1
 #define GATE_PATCH_BYTE 0x8f
 
-/* FINDINGS section 16: the Hardware 3D gate, an x87 SIGNED compare. */
-static const BYTE VRAM_SIG[]  = {0xdb,0x05,0xa0,0x8a,0x61,0x00,
-                                 0x89,0x1d,0x0c,0xc8,0x61,0x00,
-                                 0xdc,0x1d,0x88,0xe4,0x57,0x00,
-                                 0xdf,0xe0, 0xf6,0xc4,0x41, 0x75,0x20};
-static const BYTE VRAM_FIX[]  = {0xa1,0xa0,0x8a,0x61,0x00,
-                                 0x89,0x1d,0x0c,0xc8,0x61,0x00,
-                                 0x3d,0x00,0x00,0x88,0x00,
-                                 0x76,0x27,
-                                 0x90,0x90,0x90,0x90,0x90,0x90,0x90};
+/* FINDINGS section 16: the Hardware 3D gate, an x87 SIGNED compare.
+ *   fild dword [vidmem] / mov [x],ebx / fcomp qword [thresh] / fnstsw / test ah,41 / jne
+ * Exactly 25 bytes in any build; only the three operands move. */
+static const BYTE VRAM_SIG[]  = {0xdb,0x05,0,0,0,0,
+                                 0x89,0x1d,0,0,0,0,
+                                 0xdc,0x1d,0,0,0,0,
+                                 0xdf,0xe0, 0xf6,0xc4,0x41, 0x75,0};
+static const BYTE VRAM_MASK[] = {   1,   1,0,0,0,0,
+                                    1,   1,0,0,0,0,
+                                    1,   1,0,0,0,0,
+                                    1,   1,    1,   1,   1,    1,0};
 
-/* FINDINGS section 16: the second signed test, a texture budget. jge -> jae. */
-static const BYTE BUDGET_SIG[] = {0x81,0x3d,0xa0,0x8a,0x61,0x00, 0x00,0x00,0xd0,0x00, 0x7d};
+/* FINDINGS section 16: the second signed test, a texture budget. jge -> jae.
+ *   cmp dword [vidmem],0xd00000 / jge
+ * Its operand must be the SAME global the fild used -- a free cross-check. */
+static const BYTE BUDGET_SIG[]  = {0x81,0x3d,0,0,0,0, 0x00,0x00,0xd0,0x00, 0x7d};
+static const BYTE BUDGET_MASK[] = {   1,   1,0,0,0,0,    1,   1,   1,   1,    1};
 #define BUDGET_PATCH_OFF 10
 
-/* FINDINGS section 8: the code compare-chain, slot 4's arm.
- *   cmp ecx,0x640 / jne +0x16 / cmp edx,0x4b0 */
+/* FINDINGS section 8: the code compare-chain, slot 4's arm. No absolute operands. */
 static const BYTE CHAIN_SIG[] = {0x81,0xf9,0x40,0x06,0x00,0x00, 0x75,0x16,
                                  0x81,0xfa,0xb0,0x04,0x00,0x00};
 #define CHAIN_W_OFF 2
@@ -317,55 +340,114 @@ static void apply_patches(void)
 
     int ok = 0, fail = 0;
 
+    /* --- 0. the resolution table, which also tells us this build's addresses ----
+     * Found by VALUE, in unencrypted .data, so it works on any build. Its address
+     * is then spliced into the gate signature. */
+    BYTE *tbl = find_unique((const BYTE *)TABLE_SIG, sizeof TABLE_SIG, g_data, g_datalen, "table");
+    if (!tbl) {
+        logf_("[x] resolution table not found in .data -- wrong game, or not this engine");
+        return;
+    }
+    DWORD table_va = (DWORD)(ULONG_PTR)tbl;
+    logf_("[*] resolution table at 0x%08lx  (GOG build has 0x005a0fa0; a different value here"
+          " just means a different build, which is fine)", table_va);
+    memcpy(GATE_SIG + 1, &table_va, 4);
+
     /* --- 1. desktop-width gate --------------------------------------------- */
-    BYTE *p = find_unique(GATE_SIG, sizeof GATE_SIG, g_text, g_textlen, "gate");
+    BYTE *p = find_unique_masked(GATE_SIG, GATE_MASK, sizeof GATE_SIG, g_text, g_textlen, "gate");
     if (p) {
         BYTE jg = GATE_PATCH_BYTE;
         if (poke(p + GATE_PATCH_OFF, &jg, 1)) {
             logf_("[+] gate jge -> jg at %p (a mode exactly as wide as the desktop is now kept;"
                   " wider ones are still filtered out)", p + GATE_PATCH_OFF); ok++;
         } else { logf_("[x] gate: VirtualProtect failed"); fail++; }
-    } else { logf_("[-] gate: signature not found (already patched, or wrong build)"); fail++; }
+    } else { logf_("[-] gate: signature not found"); fail++; }
 
-    /* --- 2. Hardware 3D signed VRAM compare -------------------------------- */
-    p = find_unique(VRAM_SIG, sizeof VRAM_SIG, g_text, g_textlen, "vram");
+    /* --- 2. Hardware 3D signed VRAM compare --------------------------------
+     * Rebuild the replacement using THIS build's operands, and compute the branch
+     * displacement from the original rather than hardcoding it -- an earlier build
+     * hardcoded 0x23 and landed inside a call instruction. */
+    DWORD vidmem = 0;
+    p = find_unique_masked(VRAM_SIG, VRAM_MASK, sizeof VRAM_SIG, g_text, g_textlen, "vram");
     if (p) {
-        if (poke(p, VRAM_FIX, sizeof VRAM_FIX)) {
-            logf_("[+] VRAM compare made unsigned at %p (Hardware 3D needs no registry value)", p); ok++;
-        } else { logf_("[x] vram: VirtualProtect failed"); fail++; }
+        vidmem       = rd32(p + 2);      /* fild  dword [vidmem]  */
+        DWORD store  = rd32(p + 8);      /* mov   [store],ebx     */
+        BYTE  orig_rel = p[24];          /* jne   rel8            */
+        /* Original: 25 bytes, branch taken from the end of the sequence.
+         * New layout is 18 bytes, so shift the displacement by the difference. */
+        BYTE *target = p + 25 + (signed char)orig_rel;
+        int   newrel = (int)(target - (p + 18));
+
+        if (newrel < -128 || newrel > 127) {
+            logf_("[x] vram: branch displacement %d does not fit in rel8 -- refusing", newrel);
+            fail++;
+        } else {
+            BYTE fix[25];
+            int k = 0;
+            fix[k++] = 0xa1; memcpy(fix + k, &vidmem, 4); k += 4;          /* mov eax,[vidmem]   */
+            fix[k++] = 0x89; fix[k++] = 0x1d; memcpy(fix + k, &store, 4); k += 4; /* mov [store],ebx */
+            fix[k++] = 0x3d; { DWORD t = 0x880000; memcpy(fix + k, &t, 4); } k += 4; /* cmp eax,8.5MB */
+            fix[k++] = 0x76; fix[k++] = (BYTE)newrel;                       /* jbe (UNSIGNED)     */
+            while (k < 25) fix[k++] = 0x90;
+            if (poke(p, fix, sizeof fix)) {
+                logf_("[+] VRAM compare made unsigned at %p (vidmem global 0x%08lx, jbe rel8 %d)",
+                      p, vidmem, newrel); ok++;
+            } else { logf_("[x] vram: VirtualProtect failed"); fail++; }
+        }
     } else { logf_("[-] vram: signature not found"); fail++; }
 
     /* --- 3. the second signed test ----------------------------------------- */
-    p = find_unique(BUDGET_SIG, sizeof BUDGET_SIG, g_text, g_textlen, "budget");
+    p = find_unique_masked(BUDGET_SIG, BUDGET_MASK, sizeof BUDGET_SIG, g_text, g_textlen, "budget");
     if (p) {
-        BYTE jae = 0x73;
-        if (poke(p + BUDGET_PATCH_OFF, &jae, 1)) { logf_("[+] texture budget jge -> jae at %p", p + BUDGET_PATCH_OFF); ok++; }
-        else { logf_("[x] budget: VirtualProtect failed"); fail++; }
+        DWORD op = rd32(p + 2);
+        if (vidmem && op != vidmem) {
+            /* Cross-check: this compare must read the same global the fild read.
+             * If it does not, one of the two matches is the wrong site. */
+            logf_("[x] budget: operand 0x%08lx != vidmem 0x%08lx -- mismatched site, refusing", op, vidmem);
+            fail++;
+        } else {
+            BYTE jae = 0x73;
+            if (poke(p + BUDGET_PATCH_OFF, &jae, 1)) { logf_("[+] texture budget jge -> jae at %p", p + BUDGET_PATCH_OFF); ok++; }
+            else { logf_("[x] budget: VirtualProtect failed"); fail++; }
+        }
     } else { logf_("[-] budget: signature not found"); fail++; }
 
     /* --- 4. slot 4, in BOTH tables ----------------------------------------- *
-     * FINDINGS s8: patching the data table alone is not enough.  A parallel
+     * FINDINGS s8: patching the data table alone is not enough. A parallel
      * mapping lives in code and silently drops any mode it does not recognise. */
     mode_t m;
     if (!ini_override(&m) && !pick_mode(&m)) {
         logf_("[-] no mode satisfied the constraints; leaving slot 4 stock (1600x1200)");
     } else {
-        BYTE *tbl   = find_unique((const BYTE *)TABLE_SIG, sizeof TABLE_SIG, g_data, g_datalen, "table");
         BYTE *chain = find_unique(CHAIN_SIG, sizeof CHAIN_SIG, g_text, g_textlen, "chain");
-        if (tbl && chain) {
+        if (chain) {
             DWORD wh[2] = { m.w, m.h };
             int a = poke(tbl + SLOT4_OFF, wh, sizeof wh);
             int b = poke(chain + CHAIN_W_OFF, &m.w, 4) && poke(chain + CHAIN_H_OFF, &m.h, 4);
             if (a && b) { logf_("[+] slot 4 -> %lux%lu  (data table %p, code chain %p)", m.w, m.h, tbl, chain); ok++; }
             else { logf_("[x] slot 4: VirtualProtect failed"); fail++; }
         } else {
-            logf_("[-] slot 4: %s%s not found -- NOT patching either, they must move together",
-                  tbl ? "" : "data table ", chain ? "" : "code chain");
+            logf_("[-] slot 4: code compare-chain not found -- NOT patching the data table"
+                  " either, they must move together (FINDINGS s8)");
             fail++;
         }
     }
 
     logf_("[*] done: %d applied, %d failed", ok, fail);
+    if (fail) {
+        /* Make a failure diagnosable from the log alone -- the user may be the only
+         * person who can run this build. */
+        logf_("--- diagnostics for the failures above ---");
+        int printable = 0;
+        for (int i = 0; i < 4096 && (SIZE_T)i < g_textlen; i++)
+            if (g_text[i] == 0x90 || g_text[i] == 0x8b || g_text[i] == 0xe8) printable++;
+        logf_("  .text[0..15] = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+              g_text[0],g_text[1],g_text[2],g_text[3],g_text[4],g_text[5],
+              g_text[6],g_text[7],g_text[8],g_text[9],g_text[10],g_text[11]);
+        logf_("  common-opcode density in first 4KB: %d/4096 (%s)", printable,
+              printable > 100 ? "looks like real code" : "looks like ciphertext or data");
+        logf_("-----------------------------------------");
+    }
 }
 
 /* ------------------------------------------------------------- the IAT hook */
@@ -379,12 +461,21 @@ static int WINAPI hook_GetDeviceCaps(HDC hdc, int index)
     /* Patch on the first call, and keep retrying until a scan succeeds -- on the
      * Steam build .text is ciphertext until the stub's entry wrapper has run. */
     if (!g_done) {
-        static LONG scanning = 0;
+        static LONG scanning = 0, attempts = 0;
         if (!InterlockedExchange(&scanning, 1)) {
+            LONG n = InterlockedIncrement(&attempts);
+            /* Log the first few attempts and then every 500th, so "the hook never
+             * fired" and "the hook fired but .text was not ready" are distinguishable
+             * from the log alone. The first Steam run could not tell them apart. */
+            if (n <= 3 || (n % 500) == 0)
+                logf_("[*] GetDeviceCaps hook: attempt %ld, probing for decrypted .text", n);
+            /* Probe with the compare-chain: it is the only .text signature with no
+              * absolute operands, so it is the same bytes in every build. */
             BYTE *probe = NULL;
             if (locate_sections())
-                probe = find_unique(GATE_SIG, sizeof GATE_SIG, g_text, g_textlen, "gate-probe");
+                probe = find_unique(CHAIN_SIG, sizeof CHAIN_SIG, g_text, g_textlen, "chain-probe");
             if (probe) apply_patches();
+            else if (n <= 3) logf_("    ... .text not ready yet (compare-chain not found)");
             InterlockedExchange(&scanning, 0);
         }
     }
@@ -465,7 +556,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     if (force_defer) logf_("[*] TROPICO_FIX_DEFER=1 -- forcing the deferred path");
 
     if (!force_defer && locate_sections()
-        && find_unique(GATE_SIG, sizeof GATE_SIG, g_text, g_textlen, "gate-probe")) {
+        && find_unique(CHAIN_SIG, sizeof CHAIN_SIG, g_text, g_textlen, "chain-probe")) {
         logf_("[*] .text is readable at load time (unwrapped build) -- patching now");
         apply_patches();
     } else {

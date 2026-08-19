@@ -805,3 +805,76 @@ Two constraints added:
 premise §13 disproved. Under it the patcher is safe but can offer no widescreen at all, since
 nothing wider than 1280 fits. To get widescreen on Steam the virtual desktop needs to go
 (`protontricks 33520 vd=off`) or be sized to the target mode.
+
+## 21. The Steam release is a DIFFERENT BUILD, not a wrapped GOG — VERIFIED
+
+The first Steam run installed the hook and then silently did nothing:
+
+```
+[*] .text not readable at load time (DRM-wrapped?) -- deferring to GetDeviceCaps
+[*] hooked GDI32!GetDeviceCaps IAT slot 0061f504 (real 7bb63870)
+```
+
+and the owner observed the two symptoms that follow from an unpatched exe: 1600 not
+selectable (the graceful string-586 dialog) and Hardware 3D not selectable.
+
+**The cause was not the DRM.** Comparing the two executables directly:
+
+| | GOG | Steam |
+|---|---|---|
+| file size | 1,916,928 | 2,269,184 |
+| `.text` VirtualSize | 0x17a768 | 0x17a73b |
+| resolution table, file offset | **0x1a0fa0** | **0x1a0cc0** |
+| bytes identical at the same offset | — | **13%** |
+
+The resolution table is 736 bytes earlier, so **every absolute address differs**. The original
+signatures embedded absolute operands — `GATE_SIG` literally began
+`3d a0 0f 5a 00` (`cmp eax,0x5a0fa0`) — and could never match the Steam build whether or not
+`.text` was decrypted. The encryption was a red herring; the signatures were simply wrong for
+that build.
+
+Note `.data` is *not* encrypted in the Steam build: the resolution table is findable by value
+on disk. Only `.text` is.
+
+### The fix: derive, do not hardcode
+
+`proxy/tropico_fix.c` now wildcards every absolute operand and reads the real addresses back
+out of whatever matched:
+
+1. Find the resolution table **by value** in `.data` — build-independent, and it yields this
+   build's table VA.
+2. Splice that VA into the gate signature. The two finds then have to agree about the same
+   build, which is a free consistency check.
+3. Match the VRAM sequence with its three operands wildcarded; read the vidmem global and the
+   interleaved store target out of the match; **compute** the replacement branch displacement
+   from the original rather than hardcoding it — an earlier build hardcoded `0x23` and landed
+   inside a `call`.
+4. Cross-check: the texture-budget compare must read the *same* vidmem global as the `fild`.
+   If it does not, one of the two matches is the wrong site and the patch is refused.
+
+Verified on GOG, both paths, after the rewrite: the vidmem global is now *discovered*
+(`0x00618aa0`) and the displacement *computed* (39 = 0x27), matching the hand-derived values
+in §16 exactly.
+
+### Instrumentation lesson
+
+The first Steam log could not distinguish "the hook never fired" from "the hook fired but
+`.text` was not ready" — the hook only logged on success. It now logs every probe attempt, and
+on any failure dumps the first bytes of `.text` plus an opcode-density estimate, so a run by
+someone else is diagnosable from the log alone.
+
+Also worth recording: the probe signature must itself be build-independent. It is now the
+compare-chain of §8, the only `.text` signature with no absolute operands.
+
+## 22. Proton gives centring and upscaling for free — tier 4, unexpectedly
+
+Running the Steam build under Proton, the owner reports the intro movie and menu are
+**centred and scaled to fill the screen** rather than sitting 640x480 in the top-left, and
+in-game resolutions are centred and upscaled with pillarbox bars.
+
+That is exactly the outcome §15 and Priority 2 wanted from gamescope — which is unpackaged on
+Pop!_OS 24.04 and has been blocking that tier. Proton delivers it without any extra component.
+
+**Consequence:** Proton is not merely a way to run the Steam build; it may be the better
+runtime for the GOG build too, solving the top-left placement of §15 and probably the
+multi-monitor problem of §18 as well. Worth testing before investing in gamescope.
