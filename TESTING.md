@@ -38,11 +38,30 @@ Settings are **F2, in the game world only** (`readme.txt` lines 84/163/172). A l
 errors before a map loads never lets you choose anything, so it silently uses the stored
 index. Unattended launching cannot exercise the slider at all.
 
-## Trap 4 — forcing config behind the game's back
+## Trap 4 — starting a map at a high resolution index (CORRECTED)
 
-Writing `0x242`/`0x272` directly puts the settings object in a state the game never
-reaches on its own, and **broke a previously working tier-2 configuration**. When a
-known-good setup starts failing, suspect the harness before the subject.
+Originally recorded as "forcing config behind the game's back breaks things". That was
+the wrong lesson. The real rule:
+
+**Map load cannot start at a high resolution index. It must climb.**
+
+The only configuration that has ever worked follows this ladder, visible in
+`logs/successful-tier2-1600x1200.log.gz`:
+
+```
+SetDisplayMode  640x480      <- map load, from CFG index 0
+SetDisplayMode 1024x768
+SetDisplayMode 1600x1200     <- selected in the F2 dialog
+```
+
+Every failure began with a high index already stored in CFG `0x242`. Forcing the index to
+4 failed; restoring a pristine CFG "fixed" it only because pristine held index **0**.
+
+Note this is self-perpetuating with Trap 5: a successful run at 1600x1200 leaves index 4
+behind, which then breaks the *next* launch on map load.
+
+**Procedure:** set CFG `0x242` (and the presets at `0x272`/`0x276`) to **0** before any
+run, so the map loads at 640x480. Then use F2 to climb to the mode under test.
 
 **Rule:** keep one untouched known-good path. Re-run it whenever results stop making
 sense, *before* forming new hypotheses.
