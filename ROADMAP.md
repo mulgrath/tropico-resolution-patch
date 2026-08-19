@@ -18,7 +18,7 @@ hand to another person.
 | Hardware 3D | **restored and permanently patched** (§16) — confirmed in-game with no registry value at all |
 | 640x480 / 1024x768 / 1280x1024 | correct |
 | 1600x1200 | correct, but needs a virtual desktop — modern panels have no such mode |
-| 1600x900 world render | correct, true 16:9, full screen, no shear |
+| 1600x900 world render | correct, true 16:9, full screen, no shear — confirmed on both a 1080p and a 1440p panel |
 | 1600x900 HUD chrome | broken — art authored for a 1200-tall screen |
 | 1920x1080 | not reachable by patching; no art set is that wide |
 | Centring / upscaling | **not started** — game paints top-left, rest black (§15) |
@@ -58,7 +58,7 @@ Wine measures only the primary monitor while the compositor places the window wh
 launching terminal is, so running on a secondary throws `DDERR_INVALIDRECT` (#150). Verified
 not to be a patch bug — the control fails identically. Use
 `TROPICO_DISPLAY=<xrandr output>`, which makes that monitor primary for the run and restores
-it afterwards. This is the same root cause family as §15 and is another argument for
+it afterwards. **Confirmed working** — all resolutions correct on the 1440p panel. This is the same root cause family as §15 and is another argument for
 gamescope, which would own its own output and sidestep the whole issue.
 
 ## Priority 2 — centring and upscaling (tier 4)

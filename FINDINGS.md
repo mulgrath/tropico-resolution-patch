@@ -673,3 +673,7 @@ geometry and the window's actual location agree. `tools/tropico-gog.sh` now does
 `TROPICO_DISPLAY=<xrandr output>`, saving and restoring the previous primary.
 
 Note this also removes the negative-y origin, since the primary is always at (0,0).
+
+**CONFIRMED 2026-08-19 by the project owner:** with `TROPICO_DISPLAY=DP-3`, every resolution
+renders correctly on the 2560x1440 monitor, including 1600x900. The only remaining defect
+there is the §12 HUD chrome, which is the known tier-3 art problem and not display-related.
