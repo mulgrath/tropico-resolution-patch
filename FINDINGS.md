@@ -219,3 +219,40 @@ power of two matching no table entry — which pointed at a hardcoded 1024, and 
 `cmp reg,1024` immediates in `.text` found this chain.
 
 `tools/tropico-patch.py --set` now writes both tables and `--show` reports any mismatch.
+
+
+## 9. The compare-chain requires UNIQUE WIDTHS — VERIFIED
+
+The chain in §8 dispatches on width and **rejects outright** on a height mismatch, rather
+than falling through to the next entry:
+
+```asm
+52d15a:  cmp ecx,0x640 (1600)
+52d160:  jne 0x52d178          ; width differs -> try the next entry
+52d162:  cmp edx,0x4b0 (1200)
+52d168:  jne 0x52d329          ; height differs -> REJECT, no further entries tried
+```
+
+So the stock table works only because all five widths happen to be distinct. Assigning two
+slots the same width makes the later-tested one permanently unreachable.
+
+The chain tests entries in the order **4, 3, 2, 1, 0**.
+
+**Observed:** with slot 1 = 1600x900 and slot 4 = 1600x1200, selecting slot 1 produced
+"Unable to change to 1600x900". Mode 1600x900 matched slot 4's width test, failed its
+height test, and was rejected before slot 1's own entry was ever reached.
+
+`tools/tropico-patch.py` now warns on any width collision.
+
+### Slot status on the corrected build
+
+| slot | mode | result |
+|---|---|---|
+| 0 | 640x480 | works |
+| 3 | 1280x1024 | works |
+| 4 | 1600x1200 | works |
+| 1 | 1600x900 | rejected — width collision (fixed by using a unique width) |
+| 2 | 1920x1080 | mode sets and HUD lays out correctly; **world render still clips** |
+
+Slot 2 remains **open**. Syncing the code chain did not fix the render, so the x=1024 clip
+originates somewhere other than the chain immediates.

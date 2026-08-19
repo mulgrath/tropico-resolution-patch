@@ -108,6 +108,18 @@ def main():
         buf[va2off(GATE_VA):va2off(GATE_VA)+6] = GATE_NOP
         print(f'  gate NOPed at file 0x{va2off(GATE_VA):06x}')
 
+    # The code chain at 0x52d15a dispatches on WIDTH first and rejects outright on a
+    # height mismatch, so two slots sharing a width make the later one unreachable.
+    tbl = read_table(buf)
+    order = [4, 3, 2, 1, 0]                      # the order the chain tests entries
+    for i, (w, h) in enumerate(tbl):
+        first = next(j for j in order if tbl[j][0] == w)
+        if first != i:
+            print(f'  WARNING: slot {i} ({w}x{h}) shares width {w} with slot {first} '
+                  f'({tbl[first][0]}x{tbl[first][1]}), which the code chain tests first.')
+            print(f'           Slot {i} will be UNREACHABLE and report '
+                  f'"Unable to change to {w} x {h}". Give it a unique width.')
+
     out = a.out or a.exe + '.patched'
     open(out, 'wb').write(buf)
     print(f'output: {out}  (md5 {hashlib.md5(buf).hexdigest()})')
