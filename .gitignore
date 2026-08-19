@@ -6,3 +6,6 @@
 *.PK2
 *.xdt
 *.lng
+
+# raw traces are large; commit them gzipped
+logs/*.log

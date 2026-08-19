@@ -131,14 +131,39 @@ cover `0x272` and `0x276`.
 The three (and only three) writers of `[obj+0x18]` are `0x514f44`, `0x5155ab` (bulk
 settings-apply from stack args) and `0x5159e8` (this stomp).
 
-## 6. The renderer is WINDOWED — VERIFIED from a +ddraw trace
+## 6. Fullscreen vs windowed — CORRECTED
 
-A full 4043-line trace of a session contains **zero `SetDisplayMode` calls**. The software
-renderer uses `DDSCL_NORMAL` plus a clipper, drawing into a system-memory offscreen
-surface the size of the chosen resolution and `Blt`-ing it to the primary.
+An earlier draft of this file claimed the renderer is always windowed and never calls
+`SetDisplayMode`. **That was wrong** — it was inferred from a failing trace only.
+
+Comparing a successful 1600x1200 session against a failing one:
+
+| | successful | failing |
+|---|---|---|
+| `SetDisplayMode` calls | 3 — 640x480, 1024x768, 1600x1200, all bpp 16 | **0** |
+| cooperative level | `DDSCL_FULLSCREEN\|ALLOWREBOOT\|EXCLUSIVE` (x3) + `DDSCL_NORMAL` (x5) | `DDSCL_NORMAL` only |
+| rendering | exclusive fullscreen | windowed + clipper into an offscreen surface |
+
+So the game normally takes exclusive fullscreen and sets a 16bpp mode. Windowed operation
+with a clipper is the **failure path**, not the design.
 
 It calls `GetDisplayMode` immediately before creating the primary surface, and
 `EnumDisplayModes` once at startup (callback `0x52D4D0`).
+
+### Leading hypothesis — NOT yet tested
+
+CFG `+0x1c` (file `0x246`) correlates exactly with this split: it was **0** in every
+working configuration and **1** in every failing one. The loader sets it explicitly at
+`0x439173` (`mov dword [eax+0x1c],1`) under a condition involving `[0x5f1fe8]`, in the
+same function that references the `"ForceWin"` string at `0x58a4a0`. That is consistent
+with `+0x1c` being a force-windowed flag.
+
+If true, the tier-3 failures may have nothing to do with widescreen at all — the game may
+simply have been stuck in windowed mode. **Test before believing.**
+
+An earlier arithmetic derivation in §3 concluded `[+0x1c]` must be 1 for the descriptor
+lookup to resolve. Since `+0x1c == 0` is empirically the working state, that derivation is
+wrong somewhere and should not be relied on.
 
 The error format string is at `0x5a8f8c`:
 `"DirectDraw Error #%1,  file '%2',  line# %3"`, with 33 call sites. The number comes

@@ -58,7 +58,7 @@ the expected build.
 - `TESTING.md` — methodology, and the traps that invalidated earlier experiments
 - `tools/` — the patcher and the launcher
 - `probes/` — small Win32 programs used to measure Wine/DirectDraw behaviour directly
-- `logs/` — captured `+ddraw` traces
+- `logs/` — captured `+ddraw` traces (gzipped)
 
 ## Environment
 
