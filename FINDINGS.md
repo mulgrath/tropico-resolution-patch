@@ -611,7 +611,16 @@ not a mode-unavailable error**, so §13's attribution of the project's original 
 a rectangle sized for a display mode the app no longer owns after losing exclusive
 fullscreen.
 
-**NOT YET ATTRIBUTED.** It is not known whether this predates the §16 patch. It is a
-foreground/exclusive-mode fault by nature and there is no reason a VRAM comparison would
-cause it, but that is a hypothesis, not a measurement — and this project has a documented
-history of confident wrong attributions. See TESTING.md for the control to run.
+**UNREPRODUCED, deprioritised by the owner.** The control run did not throw it. That is
+*not* exoneration: the symptom is a race ("I happened to tab out at the wrong moment"), and a
+single non-reproduction of a race carries almost no information. Left open deliberately.
+
+**Leading hypothesis (owner's, and it fits the machine):** map load performs a
+`SetDisplayMode` ladder rather than jumping straight to the target (TESTING trap 4). Alt-tab
+during that ladder drops exclusive mode between a rectangle being computed and the blit that
+uses it, which is precisely how `DDERR_INVALIDRECT` arises. It would then be a pre-existing
+2001-era exclusive-fullscreen race, unrelated to §16.
+
+If it ever needs fixing, the cheap route is to make `0x52d500` swallow `DDERR_INVALIDRECT`
+the way it already swallows `DDERR_SURFACEBUSY` and `DDERR_SURFACELOST` — the dialog is
+the defect here, not the lost blit.
