@@ -348,3 +348,49 @@ the vertical half remains: no art set is 900 tall.
 **Conclusion.** Every stock art set is 4:3 except 1280x1024 (5:4). No widescreen art exists,
 so a fully correct widescreen HUD needs re-authored or re-anchored HUD assets — tier 4 work,
 not a byte patch. This is the outcome the project brief anticipated.
+
+
+## 13. The virtual desktop is NOT required — the premise was wrong
+
+The project brief assumed the Wine virtual desktop is mandatory because "Wine can't set a
+16bpp mode on a modern compositor". **Measured, that is false.**
+
+`probes/ddnodesk.c`, run with `HKCU\Software\Wine\Explorer\Desktop` deleted, on a
+1920x1080 + 2560x1440 XWayland setup:
+
+```
+desktop: 1920 x 1080 @ 32 bpp
+DirectDrawCreateEx           -> OK
+SetCoopLevel EXCLUSIVE|FULL  -> OK
+84 modes enumerated | 8bpp=28  16bpp=28  32bpp=28
+   SetDisplayMode( 640, 480,16) -> OK
+   SetDisplayMode(1024, 768,16) -> OK
+   SetDisplayMode(1280,1024,16) -> OK
+   SetDisplayMode(1600, 900,16) -> OK
+   SetDisplayMode(1600,1200,16) -> 0x80004001 DDERR_UNSUPPORTED
+```
+
+Control, with a 1600x1200 virtual desktop: 63 modes (21 per depth), all five succeed.
+
+So **removing the virtual desktop gives MORE 16bpp modes, not fewer** (28 vs 21) — they are
+the display's real modes, including 1600x900, 1440x900, 1368x768 and 1920x1080.
+
+**The only failure is 1600x1200**, because modern widescreen panels offer no 4:3 mode that
+large. That is Tropico's top stock resolution — and almost certainly the origin of both the
+"DirectDraw Error #150" that started this project and the reported "extra slider entry that
+crashes". It was never an incomplete table slot; it is the one stock mode the hardware
+cannot produce.
+
+### Consequence for tier 1
+
+The virtual desktop is a workaround for a single unsupported resolution, not for 16bpp. A
+build whose table contains only modes the actual display supports should run with **no prefix
+surgery at all**. Combined with §11 (art width must be >= target width, so slot 4), the
+natural configuration is **slot 4 = 1600x900**: 16:9, a real display mode, and matching art
+width.
+
+This also means the eventual proxy DLL should populate the table from
+`EnumDisplayModes` at runtime rather than hardcoding anything.
+
+**Still to verify:** that the full game (not just the probe) launches and plays with no
+virtual desktop. The probe exercises DirectDraw only.

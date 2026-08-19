@@ -34,7 +34,16 @@ by looking at the assets. **Verify this first** — the whole mod plan depends o
 
 ## Priority 1 — tier 1, launch with no manual setup
 
-Highest value for the stated goal, and completely untouched.
+**Substantially solved on the diagnosis side — see FINDINGS §13.** The premise was wrong:
+16bpp modes work fine without a virtual desktop, and you get MORE of them (28 vs 21). The
+only mode that fails is 1600x1200, which modern widescreen panels do not offer.
+
+Remaining work is to confirm the full game runs with no virtual desktop, using a table
+containing only real display modes. Test with:
+
+```bash
+TROPICO_NODESK=1 TROPICO_EXE=Tropico_ws.EXE tools/tropico-gog.sh
+```
 
 The game currently requires `HKCU\Software\Wine\Explorer\Desktop=Default` or DirectDraw fails
 on a fullscreen mode request ("DirectDraw Error #150"). What we now know that helps:

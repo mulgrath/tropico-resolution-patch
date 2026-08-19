@@ -14,8 +14,16 @@ export DISPLAY="${DISPLAY:-:1}"
 export WINEDEBUG="${WINEDEBUG:--all}"
 GAMEDIR="/mnt/Windows/GOG Games/Tropico/app"
 
-wine reg add 'HKCU\Software\Wine\Explorer'          /v Desktop /t REG_SZ /d Default /f >/dev/null 2>&1
-wine reg add 'HKCU\Software\Wine\Explorer\Desktops' /v Default /t REG_SZ /d "$DESK"  /f >/dev/null 2>&1
+if [ -n "${TROPICO_NODESK:-}" ]; then
+  # No Wine virtual desktop: the game talks to the real display. Measured 2026-08-19 --
+  # 16bpp modes enumerate and set fine without one; only modes the monitor lacks (notably
+  # 1600x1200 on a widescreen panel) fail. This is the tier-1 configuration.
+  wine reg delete 'HKCU\Software\Wine\Explorer' /v Desktop /f >/dev/null 2>&1
+  DESK="(none - real display)"
+else
+  wine reg add 'HKCU\Software\Wine\Explorer'          /v Desktop /t REG_SZ /d Default /f >/dev/null 2>&1
+  wine reg add 'HKCU\Software\Wine\Explorer\Desktops' /v Default /t REG_SZ /d "$DESK"  /f >/dev/null 2>&1
+fi
 # IMPORTANT: the `wine reg` calls above themselves start wineserver + the virtual
 # desktop using the OLD value. Without this kill, the game joins the stale desktop
 # and you silently test the previous size.
@@ -38,11 +46,13 @@ if [ -n "${TROPICO_RES:-}" ]; then
 fi
 
 echo "== virtual desktop: $DESK =="
+if [ -n "${TROPICO_NODESK:-}" ]; then echo "== running against the REAL display (no virtual desktop) =="; else
 echo "== expected selectable modes (width < ${DESK%x*}): =="
 for m in 640x480 800x600 1024x768 1280x1024 1600x1200; do
   w=${m%x*}
   if [ "$w" = 640 ] || [ "$w" -lt "${DESK%x*}" ]; then echo "     $m   OK"; else echo "     $m   REJECTED -> zeroed descriptor -> expect crash if picked"; fi
 done
+fi
 echo
 cd "$GAMEDIR" || exit 1
 if [ -n "${TROPICO_LOG:-}" ]; then
