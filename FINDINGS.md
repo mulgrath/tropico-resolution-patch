@@ -394,3 +394,61 @@ This also means the eventual proxy DLL should populate the table from
 
 **Still to verify:** that the full game (not just the probe) launches and plays with no
 virtual desktop. The probe exercises DirectDraw only.
+
+
+## 14. Hardware 3D is refused by a signed VRAM overflow — MEASURED
+
+`Tropico.lng` string **1721**: *"Hardware 3D is not available on this computer... the card
+must have a working DirectX 7 driver and at least 16MB of memory."*
+
+Wine reports plenty of memory and advertises 3D, so the check should pass:
+
+```
+HAL dwCaps        = 0xf5408661  (DDCAPS_3D = YES)
+HAL dwVidMemTotal = 4286672895 bytes (4088.1 MB)
+```
+
+But `4286672895 = 0xFF816FFF`, which as a **signed 32-bit int is -8,294,401**. A check
+written `if ((int)dwVidMemTotal < 16*1024*1024) reject;` sees a negative number and refuses.
+This is the classic large-VRAM signed overflow that breaks many pre-2005 titles.
+
+Confirmed by capping what Wine reports (`probes/ddcaps.c`):
+
+| `HKCU\Software\Wine\Direct3D\VideoMemorySize` | dwVidMemTotal | as signed | passes |
+|---|---|---|---|
+| unset | 4,286,672,895 | **-8,294,401** | no |
+| 256 | 260,141,056 | 260,141,056 | yes |
+| 512 | 528,576,512 | 528,576,512 | yes |
+
+**Zero-patch workaround:** set `VideoMemorySize` to 256. Already applied to
+`~/.wine-tropico-gog`.
+
+Not yet verified that the game then accepts Hardware 3D — that needs a run. And note the
+brief's warning that the hardware renderer has its own pitch/stride bug on modern GPUs, so
+it may render badly even once accepted. Software 3D remains the known-good path.
+
+A permanent fix would patch the comparison from signed to unsigned (`jl` -> `jb`) so no
+registry change is needed. The compare site has not been located yet.
+
+## 15. No virtual desktop means no mode switching — content sits top-left
+
+With the virtual desktop removed (§13) the game launches fullscreen, but XWayland does not
+actually switch the physical mode. The root stays at the native resolution and the game is
+painted at its own size in the **top-left corner**, with the remainder black.
+
+Confirmed by the owner: 640x480 menu in the top-left of a 1920x1080 screen; changing
+resolution in-game scales correctly but stays uncentred.
+
+XWayland *does* advertise several modes (1920x1080, 1440x1080, 1400x1050, 1280x1024,
+1280x960), so this is emulation rather than a missing mode list.
+
+Options, none yet tested:
+- **gamescope** — `gamescope -W 1920 -H 1080 -w 1280 -h 1024 -f -- wine ...` would centre and
+  upscale, delivering tier 4's "upscaling/integer scaling" as well. Not packaged on Pop!_OS
+  24.04; would need a manual build or another source.
+- Run at the display's native mode — but §11 caps clean HUD rendering at 1600 wide.
+- Re-introduce a virtual desktop sized to the mode, which reintroduces the setup friction.
+
+**Best fully-correct experience available today without a virtual desktop: 1280x1024** — a
+real display mode, art width matches exactly, and the owner confirmed it renders correctly.
+Pillarboxed on a 16:9 panel, which the brief explicitly prefers over a stretched image.
