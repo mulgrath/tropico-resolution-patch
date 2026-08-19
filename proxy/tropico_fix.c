@@ -161,6 +161,52 @@ static const DWORD TABLE_SIG[10] = {640,480, 800,600, 1024,768, 1280,1024, 1600,
 
 typedef struct { DWORD w, h; } mode_t;
 
+/* ------------------------------------------------------------- diagnostics
+ *
+ * Added while chasing DDERR_INVALIDRECT (#150) on a 2560x1440 secondary monitor
+ * that works fine on the 1920x1080 primary.  The point is to record exactly what
+ * the game sees, at every boundary, BEFORE theorising: the adapters Windows
+ * reports, the virtual-screen geometry, and the GetDeviceCaps pair the gate
+ * itself consumes.  A wrong conclusion here is cheap to reach and expensive to
+ * unwind -- see ../TESTING.md.
+ */
+static void log_environment(void)
+{
+    logf_("--- environment as the GAME sees it ---");
+    logf_("  SM_CMONITORS      = %d", GetSystemMetrics(SM_CMONITORS));
+    logf_("  SM_CXSCREEN       = %d x %d   (primary monitor)",
+          GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    logf_("  virtual screen    = %d x %d at (%d,%d)",
+          GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN),
+          GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
+
+    /* This is the exact pair the desktop-width gate reads at 0x515160 and stores
+     * in [0x60c118] -- FINDINGS section 2. If it disagrees with the monitor the
+     * game actually lands on, that is the bug, not the mode list. */
+    HDC dc = GetDC(NULL);
+    if (dc) {
+        logf_("  GetDeviceCaps(NULL): HORZRES=%d VERTRES=%d BITSPIXEL=%d  <- what the gate uses",
+              GetDeviceCaps(dc, HORZRES), GetDeviceCaps(dc, VERTRES), GetDeviceCaps(dc, BITSPIXEL));
+        ReleaseDC(NULL, dc);
+    } else logf_("  GetDC(NULL) failed");
+
+    DISPLAY_DEVICEA dd; 
+    for (DWORD i = 0; ; i++) {
+        memset(&dd, 0, sizeof dd); dd.cb = sizeof dd;
+        if (!EnumDisplayDevicesA(NULL, i, &dd, 0)) break;
+        DEVMODEA cur; memset(&cur, 0, sizeof cur); cur.dmSize = sizeof cur;
+        int have = EnumDisplaySettingsA(dd.DeviceName, ENUM_CURRENT_SETTINGS, &cur);
+        logf_("  adapter %lu: %-16s flags=0x%08lx%s  current=%lux%lu@%lu at (%ld,%ld)",
+              i, dd.DeviceName, dd.StateFlags,
+              (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) ? " PRIMARY" : "",
+              have ? cur.dmPelsWidth : 0, have ? cur.dmPelsHeight : 0,
+              have ? cur.dmBitsPerPel : 0,
+              have ? (long)cur.dmPosition.x : 0, have ? (long)cur.dmPosition.y : 0);
+    }
+    logf_("---------------------------------------");
+}
+
+
 static int collides_with_stock(DWORD w)
 {
     return w == 640 || w == 800 || w == 1024 || w == 1280;
@@ -168,6 +214,7 @@ static int collides_with_stock(DWORD w)
 
 static int pick_mode(mode_t *out)
 {
+    log_environment();
     DEVMODEA dm; memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
 
     /* Desktop aspect: what the panel actually is, so we can prefer a mode that
@@ -180,6 +227,7 @@ static int pick_mode(mode_t *out)
     mode_t best = {0, 0};
     double best_err = 1e9;
     int considered = 0;
+    mode_t seen[128]; int nseen = 0;
 
     for (DWORD i = 0; ; i++) {
         memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
@@ -191,13 +239,19 @@ static int pick_mode(mode_t *out)
         if (h > 1200) continue;                    /* stock slot-4 art height  */
         if (w <= 640) continue;                    /* never worth slot 4       */
         if (collides_with_stock(w)) continue;      /* s9: unique widths        */
+
+        /* Wine lists every mode once per bit depth; only log each geometry once. */
+        int dup = 0;
+        for (int k = 0; k < nseen; k++) if (seen[k].w == w && seen[k].h == h) { dup = 1; break; }
+        if (dup) continue;
+        if (nseen < (int)(sizeof seen / sizeof seen[0])) { seen[nseen].w = w; seen[nseen].h = h; nseen++; }
         considered++;
 
         double err = fabs((double)w / (double)h - desk_aspect);
-        /* Aspect match first; among visually equivalent aspects, the larger. */
-        if (err < best_err - 0.02 || (fabs(err - best_err) <= 0.02 && w > best.w)) {
-            best.w = w; best.h = h; best_err = err;
-        }
+        int win = (err < best_err - 0.02 || (fabs(err - best_err) <= 0.02 && w > best.w));
+        logf_("    cand %4lux%-4lu aspect %.4f err %.4f%s", w, h,
+              (double)w / (double)h, err, win ? "   <- best so far" : "");
+        if (win) { best.w = w; best.h = h; best_err = err; }
     }
 
     logf_("  %d candidate modes passed the constraints", considered);
@@ -363,6 +417,17 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     /* GOG: .text is plaintext now, so patch immediately and skip the hook.
      * Steam: it is still ciphertext, so the scan finds nothing and we fall back
      * to patching on the first GetDeviceCaps, after the stub has decrypted. */
+    /* TROPICO_FIX_DISABLE=1 forwards Bink but applies NOTHING. This is the control
+     * for "is a fault mine at all?", runnable without renaming any file -- which
+     * matters, because a control that is awkward to run is a control that does not
+     * get run, and this project has a history of skipping them (see TESTING.md). */
+    char dis[8] = {0};
+    GetEnvironmentVariableA("TROPICO_FIX_DISABLE", dis, sizeof dis);
+    if (dis[0] == '1') {
+        logf_("[*] TROPICO_FIX_DISABLE=1 -- forwarding Bink only, applying NOTHING (control run)");
+        return TRUE;
+    }
+
     /* TROPICO_FIX_DEFER=1 forces the deferred path on an unwrapped build. This
      * exists to test the hook-and-patch mechanism itself without needing the
      * Steam DRM to cooperate -- it isolates "does deferral work" from "does
