@@ -61,6 +61,20 @@ not to be a patch bug — the control fails identically. Use
 it afterwards. **Confirmed working** — all resolutions correct on the 1440p panel. This is the same root cause family as §15 and is another argument for
 gamescope, which would own its own output and sidestep the whole issue.
 
+## Runtime choice (new, §22/§23)
+
+Two independent findings point the same way:
+
+* **Proton gives centring and upscaling for free** (§22) — the tier-4 outcome gamescope was
+  meant to provide, and gamescope is still unpackaged on Pop!_OS 24.04.
+* **Proton breaks Hardware 3D** (§23) — smears at every resolution; system wine does not.
+
+So neither runtime dominates. System wine is correct but paints top-left (§15) and needs
+`TROPICO_DISPLAY` (§18); Proton centres and upscales but loses the hardware renderer. Since
+the owner prefers the software renderer anyway, **Proton currently looks like the better
+default** — it solves the presentation problems that have no in-exe fix, and costs an option
+that was never going to be the default. Worth testing Proton against the GOG build.
+
 ## Priority 2 — centring and upscaling (tier 4)
 
 XWayland emulates rather than switches modes, so the game sits top-left with black around it

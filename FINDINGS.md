@@ -879,7 +879,7 @@ Pop!_OS 24.04 and has been blocking that tier. Proton delivers it without any ex
 runtime for the GOG build too, solving the top-left placement of §15 and probably the
 multi-monitor problem of §18 as well. Worth testing before investing in gamescope.
 
-## 23. Hardware 3D smears — NOT a surface pitch problem — OPEN
+## 23. Hardware 3D smears under Proton only — a runtime defect — RESOLVED
 
 With the §16 patch applied, Hardware 3D is now selectable on the Steam build and the owner
 reports it renders "the odd smear effect that looks like the pixels are being wrapped
@@ -913,17 +913,33 @@ shears exactly as described. §6 recorded that the *software* path sets 16bpp
 Note the descriptor array carries a bit-depth dimension (`d2`, §16) with four values —
 8/16/24/32 — so the engine does model depths above 16.
 
-### The discriminating test, not yet run
+### RESOLVED: it is the runtime, not the game — MEASURED
 
-Does the smear depend on the resolution, or on the renderer?
+The discriminating tests came back unambiguous:
 
-* Hardware 3D at **stock 1024x768** (a slot this project never touches):
-  * smears too -> the hardware path is broken independently of anything we changed, and this
-    is §14's predicted problem. Nothing in the patch is implicated.
-  * renders fine -> something about the chosen slot-4 mode interacts with the hardware path.
+| | Hardware 3D result |
+|---|---|
+| Steam build under **Proton** | smears at **every** resolution, stock slots included |
+| GOG build under **system wine 9.0** | **no smear** |
 
-A `WINEDEBUG=+ddraw` trace of a smearing session would settle the bpp question outright; that
-is the method that cracked §6, twice.
+So the variable is neither the resolution nor anything this project patches. The same engine,
+with the same §16 patch, renders correctly under system wine and smears under Proton. Both the
+resolution hypothesis and the patch are excluded: a stock, never-touched slot like 1024x768
+smears just as badly as slot 4.
 
-**Note the owner prefers the software renderer's visuals** (§14), so this affects the
-*availability* of an option rather than the default experience. It should not block shipping.
+This is a **Proton-side DirectDraw translation defect**, not a Tropico bug and not ours. Proton
+routes D3D through DXVK and handles ddraw via wined3d; the smear is consistent with a surface
+format or stride mismatch in that path. §14's warning that "the hardware path has its own
+pitch/stride bug on modern GPUs" turns out to be true only on some runtimes.
+
+The bytes-per-pixel hypothesis above is therefore no longer worth chasing inside the exe. If
+anyone wants to pursue it, the cheap experiments are Proton-side:
+
+* `PROTON_USE_WINED3D=1` as a Steam launch option, forcing the OpenGL path instead of DXVK
+* a different Proton build (Proton-GE in particular)
+
+**Practical position:** Hardware 3D works correctly where it matters — the GOG build under
+system wine, which is the primary target. On Steam/Proton it is selectable but visually broken,
+so software rendering is the right choice there. The owner prefers the software renderer's
+visuals anyway (§14), so this costs an option rather than the experience, and does not block
+shipping.
