@@ -256,3 +256,35 @@ height test, and was rejected before slot 1's own entry was ever reached.
 
 Slot 2 remains **open**. Syncing the code chain did not fix the render, so the x=1024 clip
 originates somewhere other than the chain immediates.
+
+
+## 10. Width must be a multiple of 4 (pitch alignment) — MEASURED
+
+The classic Tropico pitch/stride bug, reproduced and quantified. DirectDraw aligns the
+surface pitch to an **8-byte** boundary. The game assumes `pitch == width * 2` (16bpp) and
+writes rows at that spacing, so any width whose `width*2` is not 8-byte aligned makes every
+row drift — a progressive shear down the screen.
+
+Measured with `probes/ddpitch.c`, 16bpp system-memory offscreen surfaces:
+
+| width | width % 16 | width*2 | actual pitch | padding |
+|---|---|---|---|---|
+| 640, 800, 1024, 1152, 1280, 1360, 1400, 1440, 1600, 1680, 1920 | — | — | = width*2 | **0** |
+| **1366** | 6 | 2732 | **2736** | **4** |
+
+So the constraint is `width % 4 == 0`, not `% 16`: 1400 (%16 == 8) is fine, 1366 is not.
+
+**Observed:** slot 1 = 1366x768 produced "an extremely smeared and askew image... almost
+like wrapping the pixel rows incorrectly" — exactly this shear.
+
+`tools/tropico-patch.py` now REFUSES to build a table entry with `width % 4 != 0`.
+It previously only printed a warning, which was easy to miss.
+
+## Constraints on any replacement resolution — summary
+
+1. `width % 4 == 0` (§10), else the image shears.
+2. Width must be unique across all five slots (§9), else the slot is unreachable.
+3. Prefer a mode in Wine's standard list (§7), else the desktop must equal it exactly.
+4. Do not replace slot 0 — it is the menu/frontend resolution and is special-cased in the
+   enumerator as always-accepted.
+5. Both the data table and the code compare-chain must be updated together (§8).

@@ -99,7 +99,12 @@ def main():
         slot, w, h = int(slot), int(w), int(h)
         if not 0 <= slot < TABLE_LEN: sys.exit(f'ERROR: slot must be 0..{TABLE_LEN-1}')
         if slot == 0: print('  WARNING: slot 0 is the menu/frontend resolution; expect trouble')
-        if w % 4 or h % 4: print(f'  WARNING: {w}x{h} is not a multiple of 4; surface pitch may misbehave')
+        if w % 4:
+            print(f'  *** ERROR: width {w} is not a multiple of 4. DirectDraw pads the row')
+            print(f'      pitch to an 8-byte boundary ({w}*2 = {w*2} -> {(w*2+7)//8*8}), but the game')
+            print(f'      assumes pitch == width*2 and writes into the padding. The image will')
+            print(f'      shear progressively down the screen. Measured: 1366 pads by 4 bytes.')
+            sys.exit('      Refusing to produce a knowingly broken build.')
         struct.pack_into('<II', buf, va2off(TABLE_VA) + 8*slot, w, h)
         write_chain(buf, slot, w, h)
         print(f'  set slot {slot} -> {w}x{h}  (data table + code compare-chain)')
