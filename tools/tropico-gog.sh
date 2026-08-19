@@ -8,6 +8,52 @@
 set -u
 DESK="${1:-1280x1024}"
 shift 2>/dev/null || true
+
+# TROPICO_DISPLAY=<xrandr output>  -- run on a specific monitor (FINDINGS section 18).
+#
+# Wine measures ONLY the primary monitor: GetDeviceCaps(HORZRES) returns the primary's
+# width, not the virtual-screen width, and EnumDisplaySettings lists the primary's modes.
+# But the compositor opens the window on whichever monitor the launching terminal is on.
+# Run on a non-primary monitor and the game paints with rectangles computed for a screen
+# it is not on -- and if that monitor sits at a negative y origin, as a taller secondary
+# usually does, DirectDraw rejects the rect with DDERR_INVALIDRECT (error #150).
+#
+# Verified NOT to be a patch bug: the control run (TROPICO_FIX_DISABLE=1, stock exe)
+# fails identically.
+#
+# So make the target monitor primary for the duration of the run. That aligns what Wine
+# measures with where the window lands, and puts the origin back at (0,0).
+RESTORE_PRIMARY=""
+restore_primary() {
+  if [ -n "$RESTORE_PRIMARY" ]; then
+    echo "== restoring primary monitor -> $RESTORE_PRIMARY =="
+    xrandr --output "$RESTORE_PRIMARY" --primary 2>/dev/null || true
+    RESTORE_PRIMARY=""
+  fi
+}
+if [ -n "${TROPICO_DISPLAY:-}" ]; then
+  if ! command -v xrandr >/dev/null 2>&1; then
+    echo "!! TROPICO_DISPLAY set but xrandr is not installed" >&2; exit 1
+  fi
+  if ! xrandr | grep -q "^${TROPICO_DISPLAY} connected"; then
+    echo "!! '$TROPICO_DISPLAY' is not a connected output. Available:" >&2
+    xrandr | awk '/ connected/{printf "     %s%s\n", $1, ($2=="primary"||$3=="primary")?"  (current primary)":""}' >&2
+    exit 1
+  fi
+  RESTORE_PRIMARY="$(xrandr | awk '/ primary /{print $1; exit}')"
+  # Restore on ANY exit, including Ctrl-C -- leaving someone's primary monitor moved
+  # because a test crashed is not acceptable.
+  trap restore_primary EXIT INT TERM
+  if [ "$RESTORE_PRIMARY" = "$TROPICO_DISPLAY" ]; then
+    echo "== $TROPICO_DISPLAY is already primary; nothing to change =="
+    RESTORE_PRIMARY=""
+    trap - EXIT INT TERM
+  else
+    echo "== making $TROPICO_DISPLAY primary for this run (was $RESTORE_PRIMARY) =="
+    xrandr --output "$TROPICO_DISPLAY" --primary
+  fi
+fi
+
 export WINEPREFIX="$HOME/.wine-tropico-gog"
 export WINEARCH=win32
 export DISPLAY="${DISPLAY:-:1}"
@@ -64,10 +110,20 @@ done
 fi
 echo
 cd "$GAMEDIR" || exit 1
+# NOTE: `exec` replaces this shell and would skip the EXIT trap, stranding the user's
+# primary monitor on the wrong output. Only exec when there is nothing to restore.
 if [ -n "${TROPICO_LOG:-}" ]; then
   LOG="$HOME/tropico-ddraw.log"
   echo "== logging DirectDraw calls to $LOG =="
-  WINEDEBUG=+ddraw exec wine "${TROPICO_EXE:-Tropico.EXE}" "$@" >"$LOG" 2>&1
+  if [ -n "$RESTORE_PRIMARY" ]; then
+    WINEDEBUG=+ddraw wine "${TROPICO_EXE:-Tropico.EXE}" "$@" >"$LOG" 2>&1
+  else
+    WINEDEBUG=+ddraw exec wine "${TROPICO_EXE:-Tropico.EXE}" "$@" >"$LOG" 2>&1
+  fi
 else
-  exec wine "${TROPICO_EXE:-Tropico.EXE}" "$@"
+  if [ -n "$RESTORE_PRIMARY" ]; then
+    wine "${TROPICO_EXE:-Tropico.EXE}" "$@"
+  else
+    exec wine "${TROPICO_EXE:-Tropico.EXE}" "$@"
+  fi
 fi

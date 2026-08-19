@@ -624,3 +624,52 @@ uses it, which is precisely how `DDERR_INVALIDRECT` arises. It would then be a p
 If it ever needs fixing, the cheap route is to make `0x52d500` swallow `DDERR_INVALIDRECT`
 the way it already swallows `DDERR_SURFACEBUSY` and `DDERR_SURFACELOST` — the dialog is
 the defect here, not the lost blit.
+
+## 18. Multi-monitor: the game runs on one monitor and measures another — VERIFIED
+
+Reported by the owner: `DirectDraw Error #150` (`DDERR_INVALIDRECT`, §17) whenever the game
+is run on a 2560x1440 secondary monitor. It works on the 1920x1080 primary.
+
+**Not caused by any patch in this project.** The control run — the proxy loaded and
+forwarding Bink but applying *nothing* (`TROPICO_FIX_DISABLE=1`), against a stock
+`Tropico.EXE` — fails identically. Both the patched and unpatched builds throw it.
+
+### The mismatch
+
+Instrumenting the environment the game actually sees (`proxy/tropico_fix.c`,
+`log_environment`) on a two-monitor XWayland setup:
+
+```
+SM_CMONITORS      = 2
+SM_CXSCREEN       = 1920 x 1080   (primary monitor)
+virtual screen    = 4480 x 1440 at (0,-360)
+GetDeviceCaps(NULL): HORZRES=1920 VERTRES=1080 BITSPIXEL=32
+adapter 0: \\.\DISPLAY1  flags=0x00000005 PRIMARY  current=1920x1080@32 at (0,0)
+adapter 1: \\.\DISPLAY2  flags=0x00000001           current=2560x1440@32 at (1920,-360)
+```
+
+Two independent facts collide:
+
+1. **Wine measures the primary monitor only.** `GetDeviceCaps(HORZRES)` is 1920 — not the
+   4480 virtual width — and `EnumDisplaySettings(NULL, ...)` returns the standard mode list
+   for the primary. 2560x1440 never appears as a candidate. So every rectangle the game
+   computes is sized for a 1920x1080 screen whose origin is (0,0).
+2. **The compositor places the window elsewhere.** The owner selects a monitor by launching
+   from a terminal on it; the window opens on that monitor. Here that is DISPLAY2, at
+   **(1920,-360) — a negative y origin**.
+
+The game therefore paints with rects derived from a screen it is not on, and a rect with a
+negative top is a direct route to `DDERR_INVALIDRECT`.
+
+This is the same class of problem as §15: with no virtual desktop, XWayland emulates rather
+than switches modes, so the game's idea of "the screen" and the compositor's placement of its
+window are only accidentally related.
+
+### Consequence
+
+The game must run on whatever Wine considers the **primary** monitor. The fix is therefore not
+in the exe: make the target monitor primary for the duration of the run, so the measured
+geometry and the window's actual location agree. `tools/tropico-gog.sh` now does this via
+`TROPICO_DISPLAY=<xrandr output>`, saving and restoring the previous primary.
+
+Note this also removes the negative-y origin, since the primary is always at (0,0).

@@ -52,6 +52,15 @@ The pieces exist but a user still has to run a script and set a registry value.
    Steam path end-to-end (the hook installs correctly, but the DRM never released the process
    outside Steam, so decrypt-then-patch is unverified there).
 
+## Multi-monitor (solved, §18)
+
+Wine measures only the primary monitor while the compositor places the window wherever the
+launching terminal is, so running on a secondary throws `DDERR_INVALIDRECT` (#150). Verified
+not to be a patch bug — the control fails identically. Use
+`TROPICO_DISPLAY=<xrandr output>`, which makes that monitor primary for the run and restores
+it afterwards. This is the same root cause family as §15 and is another argument for
+gamescope, which would own its own output and sidestep the whole issue.
+
 ## Priority 2 — centring and upscaling (tier 4)
 
 XWayland emulates rather than switches modes, so the game sits top-left with black around it

@@ -130,3 +130,28 @@ C is the decisive one. `Tropico_nogate.EXE` has the stock signed compare, so rea
 hardware path in it needs `VideoMemorySize=256` put back first — otherwise B and C differ in
 *two* variables (alt-tab and renderer) and neither result means anything. That is exactly
 the shape of trap 2.
+
+## Trap 7 — testing on a monitor that is not the primary
+
+Wine measures the **primary** monitor and nothing else: `GetDeviceCaps(HORZRES)` returns the
+primary's width rather than the virtual-screen width, and `EnumDisplaySettings` lists the
+primary's modes. But the compositor opens the window wherever the launching terminal is.
+
+Launch from a terminal on a secondary monitor and the game paints with rectangles computed
+for a screen it is not on. On a taller secondary — which normally sits at a negative y origin
+— that surfaces as `DirectDraw Error #150` (`DDERR_INVALIDRECT`) on map load.
+
+**This has nothing to do with any patch.** Confirmed by control: `TROPICO_FIX_DISABLE=1`
+against a stock `Tropico.EXE` fails identically. Two hours could easily be lost blaming a
+resolution table for it.
+
+**Fix:** `TROPICO_DISPLAY=<xrandr output>`, which makes that monitor primary for the run and
+restores the previous primary on exit. Measured effect, HDMI-A-5 primary -> DP-3 primary:
+
+```
+HORZRES=1920  adapter1 at (1920,-360)   ->   HORZRES=2560  adapter0 at (0,0)
+```
+
+**If you flip the primary by hand, do not kill the launcher with SIGKILL** — the restore is
+an EXIT trap and `kill -9` strands the user's desktop on the wrong monitor. The script only
+`exec`s wine when it has nothing to restore, for the same reason.
