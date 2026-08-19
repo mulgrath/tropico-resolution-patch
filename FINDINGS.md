@@ -1431,3 +1431,51 @@ The bound is computed at runtime from values that are not 1600 in the file. Stat
 is exhausted; the remaining route is a debugger — breakpoint the terrain column loop and
 read where its limit comes from. That is a materially larger commitment than anything else
 in this project, with a real but unguaranteed payoff.
+
+
+## 32. The live scan narrows 1600 to TWO globals — VERIFIED
+
+`[Scan]` in `tropico-fix.ini` (proxy), fired 45s into a run, `SM_CXSCREEN now 1920 x 1080`,
+CFG `0x242` read back **4**. So the scan measured the intended state.
+
+42 hits for the value 1600 in the exe's image. Classified against the PE section table:
+
+| where | count | what |
+|---|---|---|
+| `.text` | **38** | the `push 0x640` / `mov eax,0x640` immediates already enumerated in §31 |
+| `.idata` | 1 | `0x61f2d4`, inside the import table — a coincidental byte pattern |
+| `.data` | 1 | `0x597c6e` (u16) — **no instruction references it**, inert |
+| `.data` | **2** | `0x614418` and `0x61abc0` — live globals, read and written |
+
+So the search space went from "somewhere in 1.4 MB" to **two addresses**.
+
+### Both are the width field of an unpacked rect
+
+```asm
+; 0x5263e7  -- unpacking [esi+0x08..0x14] into four globals
+mov edx,[esi+0x08]   ->  ds:0x616408
+mov edx,[esi+0x0c]   ->  ds:0x61640c
+mov edx,[esi+0x10]   ->  ds:0x614418     <- candidate A
+mov edx,[esi+0x14]   ->  ds:0x6161c4
+
+; 0x50b4f8  -- the same shape, a different destination set
+mov esi,[ecx+0x08]   ->  ds:0x61ab9c
+mov esi,[ecx+0x0c]   ->  ds:0x61aba0
+mov esi,[ecx+0x10]   ->  ds:0x61abc0     <- candidate B
+mov esi,[ecx+0x14]   ->  ds:0x61ab b4
+```
+
+Two independent sites unpacking a struct's `+0x08/+0x0c/+0x10/+0x14` into globals: an
+(x, y, w, h) quad. Field `+0x10` is the width, and it holds **1600** while the screen is
+1920 — exactly the signature we were hunting.
+
+Reads: `0x614418` is read at `0x522174`, `0x5265f5`, `0x5265ff`; `0x61abc0` at `0x50b472`.
+
+### Next: poke, do not reason
+
+`[Poke]` writes chosen addresses repeatedly (every 200ms). **Repeat is not optional** —
+these are derived globals, so if anything re-runs the unpack, a one-shot write is silently
+undone and a correct hypothesis looks like a failed one. That is trap 2 in `TESTING.md`
+wearing a different hat.
+
+Test both at once first; if the terrain extends, bisect to whichever one matters.

@@ -562,6 +562,56 @@ static void scan_report(BYTE *base, SIZE_T len, const char *what, int *n32, int 
     }
 }
 
+/* ------------------------------------------------------------- targeted poke
+ *
+ * The scan narrows; this confirms. Both surviving candidates (FINDINGS 32) are
+ * written as `mov reg,[struct+0x10]` into a global, with neighbours coming from
+ * +0x08/+0x0c/+0x14 -- an (x, y, w, h) quad being unpacked. So write the real
+ * width into them and watch the terrain.
+ *
+ * Repeat matters: these are DERIVED globals. If the game re-runs that unpack on
+ * any event, a one-shot poke is silently undone and a real fix looks like a
+ * failure. So keep writing.
+ *
+ *   [Poke]
+ *   Delay=45
+ *   Repeat=1               keep re-writing every 200ms
+ *   A=0x614418  Av=1920    up to four address/value pairs, A..D
+ *   B=0x61abc0  Bv=1920
+ */
+static DWORD g_poke_addr[4], g_poke_val[4]; static int g_poke_n, g_poke_repeat;
+
+static void poke_apply(int first)
+{
+    for (int i = 0; i < g_poke_n; i++) {
+        DWORD *p = (DWORD *)(SIZE_T)g_poke_addr[i];
+        DWORD old_prot;
+        if (!VirtualProtect(p, 4, PAGE_EXECUTE_READWRITE, &old_prot)) continue;
+        if (first) logf_("  poke %p : was %u -> %u", (void *)p, (unsigned)*p,
+                         (unsigned)g_poke_val[i]);
+        *p = g_poke_val[i];
+        VirtualProtect(p, 4, old_prot, &old_prot);
+    }
+}
+
+static void maybe_load_pokes(void)
+{
+    char path[MAX_PATH], key[4] = "A", vkey[4] = "Av";
+    snprintf(path, sizeof path, "%s\\tropico-fix.ini", g_dir);
+    g_poke_repeat = GetPrivateProfileIntA("Poke", "Repeat", 1, path);
+    for (int i = 0; i < 4; i++) {
+        char buf[32];
+        key[0] = (char)('A' + i); vkey[0] = (char)('A' + i);
+        GetPrivateProfileStringA("Poke", key, "", buf, sizeof buf, path);
+        if (!buf[0]) continue;
+        DWORD a = (DWORD)strtoul(buf, NULL, 0);
+        DWORD v = (DWORD)GetPrivateProfileIntA("Poke", vkey, 0, path);
+        if (!a || !v) continue;
+        g_poke_addr[g_poke_n] = a; g_poke_val[g_poke_n] = v; g_poke_n++;
+    }
+    if (g_poke_n) logf_("[*] %d poke(s) loaded, repeat=%d", g_poke_n, g_poke_repeat);
+}
+
 static DWORD WINAPI scan_thread(LPVOID unused)
 {
     (void)unused;
@@ -573,7 +623,8 @@ static DWORD WINAPI scan_thread(LPVOID unused)
     logf_("  SM_CXSCREEN now %d x %d", GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
 
     int n32 = 0, n16 = 0;
-    if (!strcmp(g_scan_scope, "all")) {
+    if (!g_scan_find) { logf_("  (poke-only run, no scan)"); }
+    else if (!strcmp(g_scan_scope, "all")) {
         MEMORY_BASIC_INFORMATION mbi;
         BYTE *p = NULL;
         while (VirtualQuery(p, &mbi, sizeof mbi) == sizeof mbi) {
@@ -598,6 +649,11 @@ static DWORD WINAPI scan_thread(LPVOID unused)
     logf_("  %d u32 hit(s), %d u16 hit(s)%s", n32, n16,
           g_scan_repl ? " -- ALL OVERWRITTEN" : "");
     logf_("--- scan done ---");
+    if (g_poke_n) {
+        logf_("--- applying %d poke(s) ---", g_poke_n);
+        poke_apply(1);
+        while (g_poke_repeat) { Sleep(200); poke_apply(0); }
+    }
     return 0;
 }
 
@@ -605,8 +661,11 @@ static void maybe_start_scan(void)
 {
     char path[MAX_PATH];
     snprintf(path, sizeof path, "%s\\tropico-fix.ini", g_dir);
+    maybe_load_pokes();
     g_scan_delay = GetPrivateProfileIntA("Scan", "Delay", 0, path);
+    if (!g_scan_delay) g_scan_delay = (DWORD)GetPrivateProfileIntA("Poke", "Delay", 0, path);
     if (!g_scan_delay) return;
+    if (!GetPrivateProfileIntA("Scan", "Delay", 0, path)) g_scan_find = 0;  /* poke-only run */
     g_scan_find = GetPrivateProfileIntA("Scan", "Find", 1600, path);
     g_scan_repl = GetPrivateProfileIntA("Scan", "Replace", 0, path);
     GetPrivateProfileStringA("Scan", "Scope", "image", g_scan_scope, sizeof g_scan_scope, path);
