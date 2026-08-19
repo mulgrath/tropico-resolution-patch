@@ -324,3 +324,27 @@ Best candidate: **slot 4 = 1600x900** — art width 1600 exactly equals target w
 
 Vertical does not appear to be affected: in the slot-3 test the art was 1024 tall against a
 900-tall screen and the HUD bar still sat correctly at the bottom.
+
+
+## 12. 1600x900 in slot 4 — world correct, HUD chrome wrong
+
+Configuration: `--set 4=1600x900` (art width 1600 == target width 1600).
+
+**Works:** the game world paints the entire screen at true 16:9. Measured on the
+screenshot: zero fully-black columns, zero fully-black rows, 3% black pixels overall
+(texture shadow only). No shear, no unpainted strip. The resolution readout in the F2
+dialog correctly reads "1600 x 900".
+
+**Still wrong:** HUD chrome authored for a 1200-tall screen.
+- notebook tabs (OVERVIEW/GRAPHICS/MEMORY) clipped on the right
+- the middle span of the bottom bar is absent; the world shows through between the
+  minimap cluster and the logo/treasury cluster
+- bottom status text overlaps itself
+
+Corner-anchored clusters are positioned from the real resolution and land correctly; the
+fixed art spans do not. So the horizontal half of §11 is solved by matching art width, but
+the vertical half remains: no art set is 900 tall.
+
+**Conclusion.** Every stock art set is 4:3 except 1280x1024 (5:4). No widescreen art exists,
+so a fully correct widescreen HUD needs re-authored or re-anchored HUD assets — tier 4 work,
+not a byte patch. This is the outcome the project brief anticipated.
