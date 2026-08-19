@@ -182,3 +182,40 @@ Wine enumerates a fixed standard set **plus the current virtual desktop size**:
 Measured directly (`probes/ddsurf.c`): at 1600x900 and 1600x896 under a matching desktop,
 `SetDisplayMode`, primary+flip creation, `Lock` (exact pitch, zero padding) and offscreen
 surface creation **all succeed**. DirectDraw does not object to widescreen.
+
+
+## 8. The SECOND resolution table — a code compare-chain — VERIFIED
+
+Patching only the data table at `0x5a0fa0` is **not sufficient**. A parallel mapping lives
+in code at `0x52d15a`, inside the DirectDraw wrapper. It takes an enumerated display mode
+(`ecx`=width, `edx`=height) and maps it back to a slot index using stock dimensions:
+
+```asm
+cmp ecx,0x640 (1600) / cmp edx,0x4b0 (1200)  -> index 4
+cmp ecx,0x500 (1280) / cmp edx,0x400 (1024)  -> index 3
+cmp ecx,0x400 (1024) / cmp edx,0x300  (768)  -> index 2
+cmp ecx,0x320  (800) / cmp edx,0x258  (600)  -> index 1
+cmp ecx,0x280  (640) / cmp edx,0x1e0  (480)  -> index 0
+```
+
+Anything unmatched falls through to `0x52d329`, a bare `ret 0x24` — the mode is silently
+dropped. There is exactly one copy of this chain in the binary.
+
+Immediate VAs per slot (file offset = VA − 0x400000):
+
+| slot | width imm | height imm |
+|---|---|---|
+| 0 | 0x52d1d4 | 0x52d1e0 |
+| 1 | 0x52d1b6 | 0x52d1be |
+| 2 | 0x52d198 | 0x52d1a0 |
+| 3 | 0x52d17a | 0x52d182 |
+| 4 | 0x52d15c | 0x52d164 |
+
+**How it was found.** Setting slot 2 to 1920x1080 produced a working fullscreen 1920x1080
+mode with the HUD correctly laid out across the full width, but the world render clipped
+at exactly x=1023/1024 with stale content beyond. Measuring the screenshot ruled out a
+pitch/stride shear (row-to-row horizontal shift measured 0.00 px). The clip landed on a
+power of two matching no table entry — which pointed at a hardcoded 1024, and a search for
+`cmp reg,1024` immediates in `.text` found this chain.
+
+`tools/tropico-patch.py --set` now writes both tables and `--show` reports any mismatch.

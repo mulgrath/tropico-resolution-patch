@@ -27,7 +27,31 @@ GATE_NOP    = b'\x90' * 6
 # Longer anchor for runtime pattern-scanning the DRM-wrapped Steam build:
 GATE_ANCHOR = bytes.fromhex('3da00f5a007408' '3918' '0f8d9d000000')
 
+# SECOND resolution table: a compare-chain in code at 0x52d15a that maps an
+# enumerated display mode (ecx=width, edx=height) back to a slot index. It uses
+# STOCK dimensions, so patching only the data table leaves the renderer using the
+# stock size for that slot -- observed as the world clipping at x=1024 when slot 2
+# was set to 1920x1080 while this chain still said index 2 == 1024x768.
+# An unmatched mode falls through to 0x52d329, a bare `ret 0x24` (silently dropped).
+# VA of each cmp immediate, per slot: (width_imm_va, height_imm_va)
+CHAIN_VA = {
+    4: (0x52d15c, 0x52d164),
+    3: (0x52d17a, 0x52d182),
+    2: (0x52d198, 0x52d1a0),
+    1: (0x52d1b6, 0x52d1be),
+    0: (0x52d1d4, 0x52d1e0),
+}
+
 def va2off(va): return va - IMAGE_BASE
+
+def read_chain(buf, slot):
+    wo, ho = (va2off(v) for v in CHAIN_VA[slot])
+    return struct.unpack_from('<I', buf, wo)[0], struct.unpack_from('<I', buf, ho)[0]
+
+def write_chain(buf, slot, w, h):
+    wo, ho = (va2off(v) for v in CHAIN_VA[slot])
+    struct.pack_into('<I', buf, wo, w)
+    struct.pack_into('<I', buf, ho, h)
 
 def read_table(buf):
     o = va2off(TABLE_VA)
@@ -36,9 +60,10 @@ def read_table(buf):
 def show(buf, label):
     print(f'  {label}')
     for i, (w, h) in enumerate(read_table(buf)):
-        g = ''
-        if i == 0: g = '  (entry 0: menu/frontend resolution - do not replace)'
-        print(f'    [{i}]  {w:5d} x {h:<5d}  file 0x{va2off(TABLE_VA)+8*i:06x}{g}')
+        cw, ch = read_chain(buf, i)
+        sync = 'in sync' if (cw, ch) == (w, h) else f'*** MISMATCH: code chain says {cw}x{ch} ***'
+        g = '  (menu/frontend resolution - do not replace)' if i == 0 else ''
+        print(f'    [{i}]  {w:5d} x {h:<5d}  file 0x{va2off(TABLE_VA)+8*i:06x}  [{sync}]{g}')
     gate = bytes(buf[va2off(GATE_VA):va2off(GATE_VA)+6])
     state = 'NOPed (all entries always offered)' if gate == GATE_NOP else \
             'original jge (entries gated on desktop width)' if gate == GATE_ORIG else \
@@ -76,7 +101,8 @@ def main():
         if slot == 0: print('  WARNING: slot 0 is the menu/frontend resolution; expect trouble')
         if w % 4 or h % 4: print(f'  WARNING: {w}x{h} is not a multiple of 4; surface pitch may misbehave')
         struct.pack_into('<II', buf, va2off(TABLE_VA) + 8*slot, w, h)
-        print(f'  set slot {slot} -> {w}x{h}')
+        write_chain(buf, slot, w, h)
+        print(f'  set slot {slot} -> {w}x{h}  (data table + code compare-chain)')
 
     if not a.no_gate_patch:
         buf[va2off(GATE_VA):va2off(GATE_VA)+6] = GATE_NOP
