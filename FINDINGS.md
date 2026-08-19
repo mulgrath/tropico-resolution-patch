@@ -1379,3 +1379,55 @@ rectangles. Whatever is still 1600 will name itself in one run. That is a bounde
 code we already own and control.
 
 **Do not** conclude from §29 that this needs an allocation moved. It needs a value found.
+
+
+## 31. The 1600 is a fixed constant, and static analysis cannot find it — MEASURED
+
+### It is a constant, not an offset
+
+§30 measured the terrain cutoff at x=1600 on a **1680**-wide screen. That single data point
+could not distinguish a constant from an offset (1680 - 80). Measured again at **1920**
+(screenshot 1919x1078, software renderer, CFG `0x242` read back as **4**, proxy log
+`slot 4 -> 1920x1080`, `4 applied 0 failed`, trace shows `SetDisplayMode ... 1920, 1080`):
+
+```
+1598  mean=80.2  dark=0.01
+1600  mean=16.9  dark=0.81   <- edge
+```
+
+1600 at 1680 wide and 1600 at 1920 wide. An offset would have given ~1840. **Fixed value.**
+
+### Everywhere it is not
+
+* **Not a DirectDraw geometry.** `WINEDEBUG=+ddraw` over a full run: 1877 surfaces created
+  at 1920x1080, 3200 at 640x480 (the map-load phase), the rest small tile textures. The
+  string `1600` appears five times in a 1.8 GB trace: three mode enumerations of 1600x900
+  and two pointer values. The game never asks DirectDraw for anything 1600 wide.
+* **Not a second resolution table.** Searching the image for the five stock widths as a
+  consecutive array yields exactly one hit, `0x5a0fa0` (§1).
+* **Not a derived array.** No 5-element array of widths or heights divided by 2,4,8,16,20,
+  32,40,64 or 80 exists anywhere in the file; nor any ascending 5-element u32 array ending
+  in 1600 or 1200.
+* **Not a float.** Neither `1600.0f` nor `1600.0` appears aligned anywhere.
+* **Not a buffer size.** No `1600*1200`, `1600*1200*2`; the two hits for 3200 are unrelated.
+
+### Every 1600 comparison in the binary, accounted for
+
+```
+0x41fce2  mov eax,0x640    default return value, error path
+0x45d343  mov eax,0x640    default return value, error path
+0x46e75d  cmp ax,0x640     width global vs 1600 then 1280, selects an fadd nudge
+0x4aacb4  cmp eax,0x640    band chain 1600/1300/1100/900/700 selecting a float scale
+0x4d06c4  mov [esp+0x640]  a stack offset, not the value
+0x52d15a  cmp ecx,0x640    the §8 code chain -- ALREADY PATCHED by the proxy
+```
+
+None of these is a terrain clip. `0x4aacb4` is a *band* chain (greater-than thresholds, not
+stock widths) and 1920 takes its first branch correctly.
+
+### Conclusion
+
+The bound is computed at runtime from values that are not 1600 in the file. Static analysis
+is exhausted; the remaining route is a debugger — breakpoint the terrain column loop and
+read where its limit comes from. That is a materially larger commitment than anything else
+in this project, with a real but unguaranteed payoff.
