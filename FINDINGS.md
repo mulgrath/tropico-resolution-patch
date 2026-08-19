@@ -570,6 +570,48 @@ replacement touches x87 not at all.
 `tools/tropico-patch.py` applies both by default and reports their state in `--show`; pass
 `--no-vram-fix` to leave them alone.
 
+**CONFIRMED 2026-08-19 by the project owner.** With `VideoMemorySize` *deleted* from
+`~/.wine-tropico-gog`, `Tropico_vram.EXE` offers the Hardware/Software toggle in the F2
+dialog and it switches correctly. The registry workaround from §14 is no longer needed and
+the prefix no longer carries it. Tier 1 needs no registry surgery.
+
 **Watch the displacement.** The first build used `76 23`, which lands *inside* the
 `call [edx+0x8]` at `0x52dfa3`. Always disassemble the patched exe and confirm the branch
 target is the intended instruction boundary — the tool cannot check this for you.
+
+
+## 17. Alt-tabbing during map load raises DDERR_INVALIDRECT — OPEN
+
+Reported by the owner on the §16 confirmation run: alt-tabbing away while a map loads throws
+
+```
+D3D Error in file "", line 745, 'undefined'
+  error code 1: #150
+  error code 2: #-2005532522
+```
+
+and offers "Continue?". Launching and *not* alt-tabbing works perfectly.
+
+**The two numbers are the same error.** `-2005532522` is `0x88760096` = `MAKE_DDHRESULT(150)`
+= **`DDERR_INVALIDRECT`** (confirmed against `mingw-w64/include/ddraw.h:97`). The central
+error reporter at `0x52d500` computes the short form with
+`lea ebx,[esi+0x778a0000]`, i.e. `hr - 0x88760000`, so `#150` is just the HRESULT's code
+field. This corrects a standing assumption: **"DirectDraw Error #150" is DDERR_INVALIDRECT,
+not a mode-unavailable error**, so §13's attribution of the project's original #150 to
+1600x1200 being unsupported should be re-examined.
+
+`0x52d500` silently swallows exactly two HRESULTs and shows the dialog for everything else:
+
+```asm
+52d557:  cmp esi,0x887601ae   ; DDERR_SURFACEBUSY (430)  -> swallow
+52d563:  cmp esi,0x887601c2   ; DDERR_SURFACELOST (450)  -> swallow, restore path at 0x52d5f4
+```
+
+`DDERR_INVALIDRECT` is not handled, which is consistent with a blit or lock being issued with
+a rectangle sized for a display mode the app no longer owns after losing exclusive
+fullscreen.
+
+**NOT YET ATTRIBUTED.** It is not known whether this predates the §16 patch. It is a
+foreground/exclusive-mode fault by nature and there is no reason a VRAM comparison would
+cause it, but that is a hypothesis, not a measurement — and this project has a documented
+history of confident wrong attributions. See TESTING.md for the control to run.

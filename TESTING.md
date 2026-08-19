@@ -103,3 +103,30 @@ TROPICO_EXE=Tropico_nogate.EXE tools/tropico-gog.sh 1600x1200
 
 This is the reference configuration. It has been reproduced from a pristine CFG after a
 regression. If it ever fails, fix the harness before investigating anything else.
+
+## Trap 6 — attributing a fault to the patch you just applied
+
+The §16 confirmation run also produced a *new* symptom (alt-tab during map load ->
+`DDERR_INVALIDRECT`, FINDINGS §17). The tempting move is to reason about whether a VRAM
+comparison could plausibly cause it. Don't reason — measure. The same reasoning is what
+produced traps 1, 2 and 4.
+
+**The control.** Alt-tab is the only variable; hold the exe and the renderer constant, then
+hold the alt-tab constant and vary the exe:
+
+```bash
+# A: the new build, WITHOUT alt-tabbing        -> known good (owner confirmed)
+TROPICO_NODESK=1 TROPICO_RES=0 TROPICO_EXE=Tropico_vram.EXE  ~/tropico-gog.sh
+
+# B: the new build, software renderer, alt-tab during map load
+#    errors too  -> not specific to the hardware path the patch unlocked
+# C: the PRE-patch baseline, alt-tab during map load
+TROPICO_NODESK=1 TROPICO_RES=0 TROPICO_EXE=Tropico_nogate.EXE ~/tropico-gog.sh
+#    errors too  -> pre-existing, the patch is exonerated
+#    does NOT error -> the patch is implicated; bisect the two byte changes
+```
+
+C is the decisive one. `Tropico_nogate.EXE` has the stock signed compare, so reaching the
+hardware path in it needs `VideoMemorySize=256` put back first — otherwise B and C differ in
+*two* variables (alt-tab and renderer) and neither result means anything. That is exactly
+the shape of trap 2.
