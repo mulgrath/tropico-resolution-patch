@@ -363,7 +363,17 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     /* GOG: .text is plaintext now, so patch immediately and skip the hook.
      * Steam: it is still ciphertext, so the scan finds nothing and we fall back
      * to patching on the first GetDeviceCaps, after the stub has decrypted. */
-    if (locate_sections() && find_unique(GATE_SIG, sizeof GATE_SIG, g_text, g_textlen, "gate-probe")) {
+    /* TROPICO_FIX_DEFER=1 forces the deferred path on an unwrapped build. This
+     * exists to test the hook-and-patch mechanism itself without needing the
+     * Steam DRM to cooperate -- it isolates "does deferral work" from "does
+     * SteamStub decrypt in time", which are separate claims. */
+    char defer[8] = {0};
+    GetEnvironmentVariableA("TROPICO_FIX_DEFER", defer, sizeof defer);
+    int force_defer = (defer[0] == '1');
+    if (force_defer) logf_("[*] TROPICO_FIX_DEFER=1 -- forcing the deferred path");
+
+    if (!force_defer && locate_sections()
+        && find_unique(GATE_SIG, sizeof GATE_SIG, g_text, g_textlen, "gate-probe")) {
         logf_("[*] .text is readable at load time (unwrapped build) -- patching now");
         apply_patches();
     } else {

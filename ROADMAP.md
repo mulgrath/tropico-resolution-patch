@@ -38,12 +38,19 @@ The pieces exist but a user still has to run a script and set a registry value.
    Owner confirmed the F2 Hardware/Software toggle works with `VideoMemorySize` deleted.
    **New, unattributed:** alt-tabbing during map load raises `DDERR_INVALIDRECT` (§17). Run
    the control in TESTING.md before assuming the §16 patch is or is not responsible.
-2. **Decide the resolution strategy.** Hardcoding is wrong; the table should be populated from
-   `EnumDisplayModes` at runtime, honouring the four constraints in §11 summary.
-3. **Build the proxy `ddraw.dll`.** Applies the gate NOP, both resolution tables, and the VRAM
-   fix by pattern scan at runtime, then forwards to the real ddraw. This is also the only path
-   that works for the DRM-wrapped Steam build. Known imports: `DirectDrawCreate`,
-   `DirectDrawCreateEx`, `DirectDrawEnumerateExA`.
+2. ~~**Decide the resolution strategy.**~~ **DONE.** Owner chose slot-4-only: slots 0-3 stay
+   stock, slot 4 is chosen at runtime from `EnumDisplaySettings` under all four constraints.
+   Rationale: §11 caps every slot at its own stock art width, so slot 4's 1600 is the only
+   width worth competing for and rebuilding the other slots cannot raise the ceiling.
+3. ~~**Build the proxy `ddraw.dll`.**~~ **DONE, but as a `binkw32.dll` proxy — see `proxy/`.**
+   A ddraw proxy is impossible: ddraw is `LoadLibrary`d from the tail of `0x514d60`, the very
+   function holding the gate, so it is handed `DllMain` too late. `binkw32.dll` is a static
+   import of both builds. Verified on GOG against a **stock** exe: 4 applied, 0 failed,
+   slot 4 -> 1600x900.
+
+   **Remaining:** confirm in-game that F2 offers 1600x900 and it renders; and confirm the
+   Steam path end-to-end (the hook installs correctly, but the DRM never released the process
+   outside Steam, so decrypt-then-patch is unverified there).
 
 ## Priority 2 — centring and upscaling (tier 4)
 
