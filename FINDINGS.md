@@ -3918,3 +3918,66 @@ being able to damage the thing it measures, which is the actual lesson of the fi
 It is also more faithful to the design: a widget with no authored rect means "derive my rect
 from the art", and deriving it once and keeping it forever is what made the stock bar rigid
 across mode changes in the first place.
+
+## 59. SOLVED: style 1 vanishes because the blit REJECTS a rect that touches the screen edge
+
+Run R's log answered three separate questions at once, and the third is the one that matters.
+
+### 59.1 §54.3 was right after all — mechanism 1 moves only the clip
+
+```
+[chrome] BAR rect x=0 y=1390 w=3200 h=1010 virtual -> px x=0 y=625 w=1920 h=454
+[chrome]   origin +0x88=0 +0x8c=-1390 -> style-0 draw position = (0, 0) virtual = (0, 0) px
+                                          <- CANCELS, so s54.3 was right
+```
+
+The printed draw position is `(0, 0)`. The scale factor **does** cancel between the position
+and the origin, exactly as §54.3 derived and §57 wrongly retracted on the strength of an
+ambiguous description. The bar is still drawn at its stored 695..1200 px and truncated by a
+1080-tall screen — which is the owner's own corrected account ("part of the chrome's bottom is
+truncated"). §57 is withdrawn; §54.3 stands.
+
+**So mechanism 1 alone does nothing useful.** It sets a correct clip around a bar that is
+still drawn in the wrong place at the wrong size. It is a prerequisite for style 1, not a fix.
+
+### 59.2 The style-1 blit does NOT add the sprite's own offset
+
+With the position zeroed, the bar drew at the **top** of the screen, full width, horizontally
+stretched. §56.2's question is closed on the second branch: the style-1 destination rect is
+absolute. No offset compensation is needed.
+
+### 59.3 The vanish: a whole-blit reject, 0.05 of a pixel over the line
+
+`FUN_005002c0` tests the destination against the screen and **skips the entire draw** — it
+does not clip:
+
+```asm
+5004d1:  cmp ebx,ds:0x60c18c      ; x2 vs screen width
+5004d3:  jge 0x500960             ; -> reject the whole blit
+5004e8:  cmp eax,ds:0x60c18e      ; y2 vs screen height
+5004ea:  jge 0x500960
+```
+
+The bar's correct rect at 1920x1080:
+
+```
+x2 = 0    + 3200 - 1 = 3199 virtual  ->  1919.90 px   <  1920   ok
+y2 = 1390 + 1010 - 1 = 2399 virtual  ->  1080.05 px  >= 1080   REJECTED
+```
+
+**Five hundredths of a pixel**, and the whole bar disappears. With the position zeroed,
+`y2 = 1009 virtual = 454.55 px`, comfortably inside — which is why that one drew. One cause,
+both observations, and it retires §56.2's "some other cause I have no story for".
+
+This also explains §52 without contradiction: `brempty` at 560x560 sits in the middle of the
+screen and never approaches an edge, so style 1 stretched it cleanly. Style 1 is not
+size-limited (§54.2 was right to retract the texture-page story) — it is **edge**-limited, and
+a full-screen HUD element is exactly the case that touches an edge.
+
+### 59.4 Method change: absolute replay, never read-modify-write
+
+Runs M and Q both destroyed a write-once field with a relative edit, and §58's guard patch did
+not make it recomputable (the pre-draw is evidently not called per frame, so testing the
+authored rect changed nothing). The probe now **learns the engine's own computed rect once and
+replays it verbatim or modified**, which is idempotent whatever the engine does. A phase can
+be entered and left without leaving damage — the property that has been missing since run M.

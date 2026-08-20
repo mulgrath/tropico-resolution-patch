@@ -90,6 +90,7 @@ static int patch_pathb_recompute(BYTE *layout_fn);
 static int patch_chrome_scale(DWORD table_va);
 static DWORD g_hud_mw, g_hud_mh;
 static int g_chr_enable;
+static DWORD g_chr_trim = 8;
 static DWORD g_hud_ph_style[8], g_hud_ph_size[8];
 static int g_hud_nph;
 static DWORD g_hud_table_va;
@@ -569,6 +570,7 @@ static void apply_patches(void)
             g_hud_mw = (DWORD)GetPrivateProfileIntA("HudProbe", "MatchW", 560, ip);
             g_hud_mh = (DWORD)GetPrivateProfileIntA("HudProbe", "MatchH", 560, ip);
             g_chr_enable = GetPrivateProfileIntA("HudProbe", "Chrome", 0, ip);
+            g_chr_trim   = (DWORD)GetPrivateProfileIntA("HudProbe", "EdgeTrim", 8, ip);
             for (int k = 0; k < 8; k++) {
                 char key[8], buf[32]; unsigned st, sz;
                 snprintf(key, sizeof key, "P%d", k);
@@ -1790,6 +1792,13 @@ static volatile DWORD g_chr_hits;
 static volatile DWORD g_chr_rect, g_chr_pos;
 static volatile DWORD g_chr_ox, g_chr_oy;
 static volatile DWORD g_chr_zero;
+/* Absolute writes, learned once and replayed every frame.  The rect is write-once
+ * (the pre-draw is not called per frame, so s58's guard patch did not make it
+ * recompute), and every relative edit this project has tried either compounded or
+ * stuck.  Writing a REMEMBERED ABSOLUTE value is idempotent whatever the engine
+ * does, so a phase can be entered and left without damaging anything. */
+static volatile DWORD g_chr_base;
+static volatile DWORD g_chr_apply, g_chr_setx, g_chr_sety, g_chr_setcx, g_chr_setcy;
 static volatile DWORD g_chr_dirty;
 static float g_chr_fx = 2.0f, g_chr_fy = 2.0f;
 static const DWORD CHR_ART_W[5] = { 640, 800, 1024, 1280, 1600 };
@@ -2057,19 +2066,21 @@ static int patch_hud_probe(void)
             DWORD a_z =(DWORD)(SIZE_T)&g_chr_zero;
             int z1;
             stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_ch,4); i+=4;  /* inc [g_chr_hits] */
-            /* Zero the destination POSITION when asked.  If the style-1 blit adds
-             * the sprite's own stored offset (0,695 px for the bar), a zeroed rect
-             * puts the bar at exactly that stored position -- visible, full width,
-             * too low.  If it does not, the bar lands at the top of the screen.
-             * Those two are unmistakable, and they measure the thing directly
-             * instead of inferring it from a disappearance. */
-            stub[i++]=0x83; stub[i++]=0x3d; memcpy(stub+i,&a_z,4); i+=4; stub[i++]=0x00;
-            stub[i++]=0x74; z1=i++;                                        /* cmp zero,0; je  */
-            stub[i++]=0x66; stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x0b;
-            stub[i++]=0x00; stub[i++]=0x00;                                /* mov w[+0x0b],0  */
-            stub[i++]=0x66; stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x0d;
-            stub[i++]=0x00; stub[i++]=0x00;                                /* mov w[+0x0d],0  */
-            if (!fix_short(stub, z1, i, "zeropos")) return 0;
+            /* Replay a remembered absolute rect.  Never a read-modify-write:
+             * runs M and Q both died on those. */
+            {   DWORD a_ap=(DWORD)(SIZE_T)&g_chr_apply;
+                DWORD f[4]; int z1;
+                f[0]=(DWORD)(SIZE_T)&g_chr_setx;  f[1]=(DWORD)(SIZE_T)&g_chr_sety;
+                f[2]=(DWORD)(SIZE_T)&g_chr_setcx; f[3]=(DWORD)(SIZE_T)&g_chr_setcy;
+                static const BYTE FL[4] = { 0x0b, 0x0d, 0x0f, 0x11 };
+                stub[i++]=0x83; stub[i++]=0x3d; memcpy(stub+i,&a_ap,4); i+=4; stub[i++]=0x00;
+                stub[i++]=0x74; z1=i++;                                  /* cmp apply,0; je */
+                for (int k = 0; k < 4; k++) {
+                    stub[i++]=0xa1; memcpy(stub+i,&f[k],4); i+=4;        /* mov eax,[val]   */
+                    stub[i++]=0x66; stub[i++]=0x89; stub[i++]=0x41; stub[i++]=FL[k];
+                }
+                if (!fix_short(stub, z1, i, "apply")) return 0;
+            }
             /* record THIS widget's rect and position, so the log can speak about
              * the bar rather than about whatever drew last */
             stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x0f;
@@ -2172,7 +2183,23 @@ static DWORD WINAPI hudprobe_thread(LPVOID unused)
                 /* size column doubles as the chrome mode: 0 = leave the bar stock,
                  * non-zero = rescale it into the art set's design space. */
                 g_chr_on    = g_hud_ph_size[ph] ? 1 : 0;
-                g_chr_zero  = (g_hud_ph_size[ph] == 2) ? 1 : 0;
+                g_chr_zero  = 0;
+                /* mode 3 = replay the learned rect with its bottom-right pulled
+                 * EdgeTrim virtual units inside the screen.  s59: the style-1 blit
+                 * REJECTS the whole draw when x2 or y2 lands on or past the screen
+                 * edge (0x5004d3 / 0x5004ea, jge -> 0x500960), and the bar's correct
+                 * rect ends at 1080.05 px on a 1080-tall screen -- 0.05 px too far. */
+                if (g_hud_ph_size[ph] == 3 && g_chr_base) {
+                    g_chr_setcx = (DWORD)(WORD)(short)((short)g_chr_setcx - (short)g_chr_trim);
+                    g_chr_setcy = (DWORD)(WORD)(short)((short)g_chr_setcy - (short)g_chr_trim);
+                    g_chr_apply = 1;
+                    logf_("  [chrome] replaying learned rect TRIMMED by %lu virtual units:"
+                          " x=%d y=%d w=%d h=%d", (unsigned long)g_chr_trim,
+                          (short)g_chr_setx, (short)g_chr_sety,
+                          (short)g_chr_setcx, (short)g_chr_setcy);
+                } else {
+                    g_chr_apply = 0;
+                }
                 g_chr_style = (g_hud_style_want && hw3d) ? g_hud_style_want : 0;
                 logf_("  [chrome] style %lu; design-space factors now %.4f / %.4f"
                       " (live mode would be %.4f / %.4f)",
@@ -2202,6 +2229,13 @@ static DWORD WINAPI hudprobe_thread(LPVOID unused)
               (unsigned long)(g_hud_live[0] & 0xffff), (unsigned long)(g_hud_live[0] >> 16));
         if (g_chr_enable) {
             short cx = (short)(g_chr_rect & 0xffff), cy = (short)(g_chr_rect >> 16);
+            /* learn the engine's own computed rect once it looks like the bar */
+            if (!g_chr_apply && cx > 1000 && cy > 100) {
+                g_chr_setx = (DWORD)(WORD)(short)(g_chr_pos & 0xffff);
+                g_chr_sety = (DWORD)(WORD)(short)(g_chr_pos >> 16);
+                g_chr_setcx = (DWORD)(WORD)cx; g_chr_setcy = (DWORD)(WORD)cy;
+                g_chr_base = 1;
+            }
             short px = (short)(g_chr_pos  & 0xffff), py = (short)(g_chr_pos  >> 16);
             DWORD lw2 = wfb_read16(0x60c18c), lh2 = wfb_read16(0x60c18e);
             logf_("  [chrome] path-B draws=%lu | BAR rect x=%d y=%d w=%d h=%d virtual"
