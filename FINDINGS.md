@@ -3630,3 +3630,62 @@ Two guards on it:
 interleaves the bar with `mwspeed` (`32 x 30`), `mwextra` (`5 x 11`) and the rest. The
 runaway values are unambiguous against that background, but the readout is not
 bar-specific and should not be read as if it were.
+
+## 54. Run N: the control tested two changes at once, and the scale patch was exonerated by its own log
+
+Owner: "broke all of the chrome for all resolutions... way too large and doesn't align to the
+bottom... it seems like we are affecting it, just too much."
+
+### 54.1 The scale patch is NOT the cause, and the log says so directly
+
+```
+[chrome] style 1; design-space factors now 5.0000 / 5.0000 (live mode would be 5.0000 / 5.0000)
+[chrome] style 0; design-space factors now 2.5000 / 2.3438 (live mode would be 2.5000 / 2.3438)
+[chrome] style 1; design-space factors now 2.0000 / 2.0000 (live mode would be 1.6667 / 2.2222)
+```
+
+At 640x480 and 1280x1024 the replacement constants are **bit-identical to the ones they
+replaced**, exactly as §53.3 predicted. A patch that substitutes a value for itself cannot
+break anything. So the breakage at the stock modes came from the other change in the run —
+**style 1, which the ini left switched on during the control it called a control.**
+
+That is TESTING.md's opening trap, self-inflicted: `P0=1,1` set style 1 *and* the rescale, so
+"if the stock mode changes appearance, the patch is wrong" tested a conjunction and proved
+nothing about either half.
+
+### 54.2 Why style 1 fails on this sprite is NOT known
+
+The obvious hypothesis — that the Direct3D branch assumes a sprite fits one texture page, and
+the bar at 1600x505 does not — is **wrong**. `FUN_004eb5f0` returns a 21-byte sprite record
+and the branch reads `[rec+4]`/`[rec+6]`, which `FUN_004eb330` confirms are the sprite's own
+width and height, not a texture size. So the UV normalisation is against the right numbers and
+there is no page limit in sight.
+
+What is established is only the contrast: style 1 stretched `brempty` (277x279) cleanly in
+§52 and mangles `int_main` sprite 0 (1600x505) here. Size is the obvious difference and is
+**not** the proven cause. Recorded as an open question rather than a story.
+
+### 54.3 A prediction worth testing, because it makes mechanism 1 look useless
+
+Under style 0 the drawn position is `X + obj+0x88`, and `FUN_00502510` writes the same scaled
+quantity into both:
+
+```
+X        = sx * f + authored_X
+obj+0x88 = -(sx * f)
+```
+
+so the factor **cancels** and the position reduces to `authored_X` regardless of `f`. If that
+is right, patching all six operands changes only the clip rectangle and nothing visible —
+which would mean mechanism 1 as built cannot move the bar at all, and moving it needs the
+*position* pair patched while the *origin* pair is left stock (a difference of
+`sy*(f_art - f_live)` = -69 px at 1920x1080, which is exactly the offset the bar needs).
+
+Run O tests it: phase 0 is style 0 with the scale patch installed, and is predicted to be
+pixel-identical to stock at every resolution.
+
+### 54.4 Instrument gap closed
+
+Run N counted gate A (which `MatchW=0` had reduced to "any class-4 widget with art", hence
+the hundreds of thousands) but had **no counter at all for the path-B gate**, so "how many
+widgets did this touch" was unanswerable from the log. There is one now.

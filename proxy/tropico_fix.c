@@ -580,7 +580,12 @@ static void apply_patches(void)
                       " a probe with nothing to cycle would apply cleanly and do nothing.");
                 fail++;
             } else if (patch_hud_probe()) ok++; else fail++;
-            if (g_chr_enable) { if (patch_chrome_scale(table_va)) ok++; else fail++; }
+            if (g_chr_enable && GetPrivateProfileIntA("HudProbe", "ChromeScale", 1, ip)) {
+                if (patch_chrome_scale(table_va)) ok++; else fail++;
+            } else if (g_chr_enable) {
+                logf_("[*] [chrome] ChromeScale=0 -- the six fmul operands are LEFT STOCK;"
+                      " this run varies the draw style only");
+            }
         }
     }
 
@@ -1780,6 +1785,7 @@ static volatile DWORD g_hud_style_want = 0;
  * -- if 1600x1200 changes appearance, the patch is wrong. */
 static volatile DWORD g_chr_kx = 65536, g_chr_ky = 65536;
 static volatile DWORD g_chr_on = 0, g_chr_style = 0;
+static volatile DWORD g_chr_hits;
 static DWORD g_hud_delay, g_hud_every, g_hud_dwell;
 
 /* s50.7 / s50.8: does class-4 STYLE 1 stretch the sprite onto the widget rect?
@@ -1951,6 +1957,8 @@ static int patch_hud_probe(void)
          * The correction now happens where the value is COMPUTED -- the six fmul
          * operands inside FUN_00502510 (see patch_chrome_scale) -- which is
          * idempotent by construction because it is a computation, not a mutation. */
+        {   DWORD a_ch=(DWORD)(SIZE_T)&g_chr_hits;
+            stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_ch,4); i+=4; } /* inc [g_chr_hits]*/
         stub[i++]=0xa1; memcpy(stub+i,&a_cs,4); i+=4;                 /* mov eax,[g_chr_style]*/
         stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x7c;               /* mov [ecx+0x7c],eax   */
         fix_near(stub,b1,i); fix_near(stub,b2,i); fix_near(stub,b3,i);
@@ -2067,6 +2075,9 @@ static DWORD WINAPI hudprobe_thread(LPVOID unused)
               (slot < 5 ? suf[slot] : "?"), hw ? "HARDWARE 3D" : "SOFTWARE",
               (unsigned long)g_hud_calls, (unsigned long)g_hud_hits,
               (unsigned long)(g_hud_live[0] & 0xffff), (unsigned long)(g_hud_live[0] >> 16));
+        if (g_chr_enable)
+            logf_("  [chrome] path-B widgets touched this run: %lu draws",
+                  (unsigned long)g_chr_hits);
         if (g_hud_style_want && !hw3d)
             logf_("  [hudprobe]   (this phase is INCONCLUSIVE while the renderer is"
                   " Software -- the branch that can stretch is never reached)");
