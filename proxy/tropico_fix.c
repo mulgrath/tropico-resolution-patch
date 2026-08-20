@@ -563,10 +563,11 @@ static void scan_report(BYTE *base, SIZE_T len, const char *what, int *n32, int 
             if (g_scan_hi && va >= g_scan_hi) continue;
             if (*n32 < 40) logf_("    u32 %s+0x%06x  (VA %p)  [hit %d]", what, (unsigned)i, at, *n32);
             (*n32)++;
-            if (g_scan_repl) {
-                DWORD r = g_scan_repl; memcpy(at, &r, 4);
-                if (g_hits < SCAN_MAX_HITS) { g_hit_addr[g_hits] = va; g_hit[g_hits++] = (DWORD *)at; }
-            }
+            /* Record ALWAYS, not only when replacing -- [Watch] needs the address
+             * list on a read-only run, and tying the two together meant a
+             * Replace=0 run silently armed nothing. */
+            if (g_hits < SCAN_MAX_HITS) { g_hit_addr[g_hits] = va; g_hit[g_hits++] = (DWORD *)at; }
+            if (g_scan_repl) { DWORD r = g_scan_repl; memcpy(at, &r, 4); }
         }
     }
     if (g_scan_bits == 32) return;   /* u16 hits are far noisier; skip when asked */
@@ -715,7 +716,16 @@ static void watch_arm_all(DWORD *addrs, int n)
 static DWORD WINAPI scan_thread(LPVOID unused)
 {
     (void)unused;
-    Sleep(g_scan_delay * 1000);
+    /* Heartbeat. A silent log is ambiguous -- it could mean the timer had not
+     * elapsed, or that the thread never ran at all, and those need different
+     * fixes. Ticking every 10s makes the difference visible, and records the
+     * resolution at each tick so we can also see WHEN the F2 climb landed. */
+    for (DWORD t = 10; t < g_scan_delay; t += 10) {
+        Sleep(10 * 1000);
+        logf_("  [alive] %us in, screen %dx%d", (unsigned)t,
+              GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    }
+    Sleep((g_scan_delay % 10 ? g_scan_delay % 10 : 10) * 1000);
     logf_("--- live scan: find %u, replace %u, scope %s, after %us ---",
           (unsigned)g_scan_find, (unsigned)g_scan_repl, g_scan_scope, (unsigned)g_scan_delay);
     /* what the game currently believes the screen is -- if this is not the mode you
