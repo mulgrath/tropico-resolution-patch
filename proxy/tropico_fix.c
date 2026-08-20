@@ -87,6 +87,7 @@ static int locate_sections(void)
 static int patch_world_viewport(UINT match_w, UINT new_w);
 static int patch_hud_probe(void);
 static DWORD g_hud_mw, g_hud_mh;
+static int g_chr_enable;
 static DWORD g_hud_ph_style[8], g_hud_ph_size[8];
 static int g_hud_nph;
 static DWORD g_hud_table_va;
@@ -565,6 +566,7 @@ static void apply_patches(void)
         if (GetPrivateProfileIntA("HudProbe", "Enable", 0, ip)) {
             g_hud_mw = (DWORD)GetPrivateProfileIntA("HudProbe", "MatchW", 560, ip);
             g_hud_mh = (DWORD)GetPrivateProfileIntA("HudProbe", "MatchH", 560, ip);
+            g_chr_enable = GetPrivateProfileIntA("HudProbe", "Chrome", 0, ip);
             for (int k = 0; k < 8; k++) {
                 char key[8], buf[32]; unsigned st, sz;
                 snprintf(key, sizeof key, "P%d", k);
@@ -1766,6 +1768,16 @@ static volatile DWORD g_hud_hash[4], g_hud_live[4];
 /* written by the phase thread, read by the stub every draw */
 static volatile DWORD g_hud_style = 0, g_hud_cx = 0, g_hud_cy = 0;
 static volatile DWORD g_hud_style_want = 0;
+/* s53: the chrome bar.  int_main widget 17 is PATH B (s48.3) -- authored rect
+ * 0x0, so FUN_00502510 recomputes its rect every frame from the art sprite's own
+ * PIXEL coordinates using the LIVE mode's factors, which is an identity
+ * round-trip and pins the bar to the resolution the art was drawn for.
+ * g_chr_kx/ky rescale that result into the ART SET's design space instead:
+ *      want/live = W_live/art_w   (16.16 fixed point)
+ * At the stock mode the factor is exactly 1.0, so the correction is the identity
+ * -- if 1600x1200 changes appearance, the patch is wrong. */
+static volatile DWORD g_chr_kx = 65536, g_chr_ky = 65536;
+static volatile DWORD g_chr_on = 0, g_chr_style = 0;
 static DWORD g_hud_delay, g_hud_every, g_hud_dwell;
 
 /* s50.7 / s50.8: does class-4 STYLE 1 stretch the sprite onto the widget rect?
@@ -1788,12 +1800,31 @@ static DWORD g_hud_delay, g_hud_every, g_hud_dwell;
  * not the live rect at obj+0x0f/0x11 -- otherwise the probe's own writes would
  * move the target out from under it and the phases could not cycle.
  */
+/* Short conditional jumps are a trap here: the stub grew past 127 bytes when the
+ * chrome block was added, and `stub[f] = i - f - 1` silently wrapped negative --
+ * a `je` that would have landed 150 bytes BACKWARDS, into unmapped memory, on the
+ * first artless class-4 widget.  Caught by disassembling a replica, which is the
+ * only reason it is not a crash report.  Every skip-to-end jump is now near
+ * (rel32), and the one remaining short jump is range-checked. */
+#define J_NEAR_NE(st,i,f)  do { (st)[(i)++]=0x0f; (st)[(i)++]=0x85; (f)=(i); (i)+=4; } while (0)
+#define J_NEAR_EQ(st,i,f)  do { (st)[(i)++]=0x0f; (st)[(i)++]=0x84; (f)=(i); (i)+=4; } while (0)
+static int fix_near(BYTE *stub, int f, int i)
+{ LONG d = i - f - 4; memcpy(stub + f, &d, 4); return 1; }
+static int fix_short(BYTE *stub, int f, int i, const char *what)
+{
+    int d = i - f - 1;
+    if (d < 0 || d > 127) { logf_("[x] [hudprobe] short jump '%s' out of range (%d)"
+                                  " -- REFUSING to install a corrupt stub", what, d);
+                            return 0; }
+    stub[f] = (BYTE)d; return 1;
+}
+
 static int patch_hud_probe(void)
 {
     BYTE *at = find_unique_masked(HUD_SIG, HUD_MASK, sizeof HUD_SIG,
                                   g_text, g_textlen, "class-4 draw");
     if (!at) { logf_("[x] [hudprobe] class-4 draw signature not found"); return 0; }
-    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 192, MEM_COMMIT | MEM_RESERVE,
+    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 384, MEM_COMMIT | MEM_RESERVE,
                                       PAGE_EXECUTE_READWRITE);
     if (!stub) { logf_("[x] [hudprobe] VirtualAlloc failed"); return 0; }
 
@@ -1807,14 +1838,18 @@ static int patch_hud_probe(void)
     stub[i++]=0x52;                                                   /* push edx             */
     stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_calls,4); i+=4;  /* inc [g_hud_calls]    */
 
-    stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x41; stub[i++]=0x50;   /* movsx eax,w[ecx+0x50]*/
-    stub[i++]=0x3d; memcpy(stub+i,&g_hud_mw,4); i+=4;                 /* cmp eax,MatchW       */
-    stub[i++]=0x75; f1=i++;                                           /* jne skip             */
-    stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x41; stub[i++]=0x52;   /* movsx eax,w[ecx+0x52]*/
-    stub[i++]=0x3d; memcpy(stub+i,&g_hud_mh,4); i+=4;                 /* cmp eax,MatchH       */
-    stub[i++]=0x75; f2=i++;                                           /* jne skip             */
+    /* MatchW == 0 would collide with the path-B gate (authored rect 0x0), so the
+     * rect comparison is emitted only when a real rect is being targeted. */
+    if (g_hud_mw) {
+        stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x41; stub[i++]=0x50; /* movsx eax,w[+0x50] */
+        stub[i++]=0x3d; memcpy(stub+i,&g_hud_mw,4); i+=4;               /* cmp eax,MatchW     */
+        J_NEAR_NE(stub, i, f1);                                         /* jne skip (near)    */
+        stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x41; stub[i++]=0x52; /* movsx eax,w[+0x52] */
+        stub[i++]=0x3d; memcpy(stub+i,&g_hud_mh,4); i+=4;               /* cmp eax,MatchH     */
+        J_NEAR_NE(stub, i, f2);                                         /* jne skip (near)    */
+    } else { f1 = f2 = -1; }
     stub[i++]=0x83; stub[i++]=0x79; stub[i++]=0x66; stub[i++]=0x00;   /* cmp d[ecx+0x66],0    */
-    stub[i++]=0x74; f3=i++;                                           /* je  skip  (NO ART)   */
+    J_NEAR_EQ(stub, i, f3);                                           /* je  skip  (NO ART)   */
 
     /* record the first four: resource pointer, and the LIVE rect as seen on entry
      * (obj+0x0f and obj+0x11 are adjacent WORDs, so one dword is CX | CY<<16) --
@@ -1825,7 +1860,7 @@ static int patch_hud_probe(void)
     stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x66;                   /* mov edx,[ecx+0x66]   */
     stub[i++]=0x89; stub[i++]=0x14; stub[i++]=0x85;
     memcpy(stub+i,&a_hash,4); i+=4;                                   /* mov [hash+eax*4],edx */
-    stub[f4] = (BYTE)(i - f4 - 1);                                    /* nostore:             */
+    if (!fix_short(stub, f4, i, "nostore")) return 0;                 /* nostore:             */
     /* The live rect is recorded on EVERY match, not only the first four.  In run K
      * it sat inside the first-four gate, froze on frame one and read "560 x 560"
      * for the whole run -- an instrument reporting a constant, which is the shape
@@ -1835,14 +1870,45 @@ static int patch_hud_probe(void)
     stub[i++]=0x89; stub[i++]=0x15; memcpy(stub+i,&a_live,4); i+=4;   /* mov [g_hud_live],edx */
     stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_hits,4); i+=4;   /* inc [g_hud_hits]     */
 
-    stub[i++]=0xa1; memcpy(stub+i,&a_cx,4); i+=4;                     /* mov eax,[g_hud_cx]   */
-    stub[i++]=0x66; stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x0f;   /* mov w[ecx+0x0f],ax   */
-    stub[i++]=0xa1; memcpy(stub+i,&a_cy,4); i+=4;                     /* mov eax,[g_hud_cy]   */
-    stub[i++]=0x66; stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x11;   /* mov w[ecx+0x11],ax   */
-    stub[i++]=0xa1; memcpy(stub+i,&a_style,4); i+=4;                  /* mov eax,[g_hud_style]*/
-    stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x7c;                   /* mov [ecx+0x7c],eax   */
+    /* ---- gate B: PATH-B widgets (authored rect 0x0) ------------------------
+     * Rescale the four fields FUN_00502510 just wrote, from the live mode's
+     * space into the art set's design space.  Idempotent: the pre-draw recomputes
+     * them from the sprite every frame, so this always operates on fresh values. */
+    if (g_chr_enable) {
+        DWORD a_kx=(DWORD)(SIZE_T)&g_chr_kx, a_ky=(DWORD)(SIZE_T)&g_chr_ky;
+        DWORD a_on=(DWORD)(SIZE_T)&g_chr_on, a_cs=(DWORD)(SIZE_T)&g_chr_style;
+        int b1, b2, b3;
+        stub[i++]=0x66; stub[i++]=0x83; stub[i++]=0x79; stub[i++]=0x50; stub[i++]=0x00;
+        J_NEAR_NE(stub, i, b1);                                       /* cmp w[+0x50],0; jne  */
+        stub[i++]=0x66; stub[i++]=0x83; stub[i++]=0x79; stub[i++]=0x52; stub[i++]=0x00;
+        J_NEAR_NE(stub, i, b2);                                       /* cmp w[+0x52],0; jne  */
+        stub[i++]=0x83; stub[i++]=0x3d; memcpy(stub+i,&a_on,4); i+=4; stub[i++]=0x00;
+        J_NEAR_EQ(stub, i, b3);                                       /* cmp [g_chr_on],0; je */
+        static const BYTE FLD[4] = { 0x0b, 0x0d, 0x0f, 0x11 };
+        for (int k = 0; k < 4; k++) {
+            DWORD kf = (k & 1) ? a_ky : a_kx;                         /* X,CX use kx; Y,CY ky */
+            stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x41; stub[i++]=FLD[k];
+            stub[i++]=0x0f; stub[i++]=0xaf; stub[i++]=0x05;
+            memcpy(stub+i,&kf,4); i+=4;                               /* imul eax,[k]         */
+            stub[i++]=0xc1; stub[i++]=0xf8; stub[i++]=0x10;           /* sar eax,16           */
+            stub[i++]=0x66; stub[i++]=0x89; stub[i++]=0x41; stub[i++]=FLD[k];
+        }
+        stub[i++]=0xa1; memcpy(stub+i,&a_cs,4); i+=4;                 /* mov eax,[g_chr_style]*/
+        stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x7c;               /* mov [ecx+0x7c],eax   */
+        fix_near(stub,b1,i); fix_near(stub,b2,i); fix_near(stub,b3,i);
+    }
 
-    stub[f1]=(BYTE)(i-f1-1); stub[f2]=(BYTE)(i-f2-1); stub[f3]=(BYTE)(i-f3-1);  /* skip: */
+    if (g_hud_mw) {
+        stub[i++]=0xa1; memcpy(stub+i,&a_cx,4); i+=4;                 /* mov eax,[g_hud_cx]   */
+        stub[i++]=0x66; stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x0f;
+        stub[i++]=0xa1; memcpy(stub+i,&a_cy,4); i+=4;                 /* mov eax,[g_hud_cy]   */
+        stub[i++]=0x66; stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x11;
+        stub[i++]=0xa1; memcpy(stub+i,&a_style,4); i+=4;              /* mov eax,[g_hud_style]*/
+        stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x7c;               /* mov [ecx+0x7c],eax   */
+    }
+
+    if (f1 >= 0) { fix_near(stub,f1,i); fix_near(stub,f2,i); }
+    fix_near(stub, f3, i);                                            /* skip:                */
     stub[i++]=0x5a;                                                   /* pop edx              */
     stub[i++]=0x58;                                                   /* pop eax              */
     stub[i++]=0x51; stub[i++]=0x53; stub[i++]=0x56;                   /* push ecx/ebx/esi     */
@@ -1889,11 +1955,37 @@ static DWORD WINAPI hudprobe_thread(LPVOID unused)
             logf_("  [hudprobe]   Hardware 3D is live -- style %lu now applied",
                   (unsigned long)g_hud_style);
         }
+        /* Recompute the design-space factors every tick from the LIVE slot and mode.
+         * The art set follows the slot (s19) and the proxy has already rewritten
+         * slot 4's table entry to the target mode, so the design size CANNOT be
+         * read back from the table -- it is the slot's stock size. */
+        {
+            static const DWORD ART_W[5] = { 640, 800, 1024, 1280, 1600 };
+            static const DWORD ART_H[5] = { 480, 600,  768, 1024, 1200 };
+            DWORD cfg0 = wfb_read32(0x612fec), sl = 0xffffffff;
+            if (cfg0 && !IsBadReadPtr((void *)(SIZE_T)cfg0, 0x1c))
+                memcpy(&sl, (BYTE *)(SIZE_T)(cfg0 + 0x18), 4);
+            DWORD lw = wfb_read16(0x60c18c), lh = wfb_read16(0x60c18e);
+            if (sl < 5 && lw && lh) {
+                g_chr_kx = (DWORD)((65536.0 * lw) / ART_W[sl]);
+                g_chr_ky = (DWORD)((65536.0 * lh) / ART_H[sl]);
+            }
+        }
         if (GetTickCount() >= next) {
             ph = (ph + 1) % g_hud_nph;
             g_hud_style_want = g_hud_ph_style[ph];
             g_hud_style = (g_hud_style_want && !hw3d) ? 0 : g_hud_style_want;
             g_hud_cx = g_hud_cy = g_hud_ph_size[ph];
+            if (g_chr_enable) {
+                /* size column doubles as the chrome mode: 0 = leave the bar stock,
+                 * non-zero = rescale it into the art set's design space. */
+                g_chr_on    = g_hud_ph_size[ph] ? 1 : 0;
+                g_chr_style = (g_hud_style_want && hw3d) ? g_hud_style_want : 0;
+                logf_("  [chrome] bar %s, style %lu, kx=%.4f ky=%.4f",
+                      g_chr_on ? "RESCALED to design space" : "stock",
+                      (unsigned long)g_chr_style,
+                      g_chr_kx / 65536.0, g_chr_ky / 65536.0);
+            }
             next = GetTickCount() + g_hud_dwell * 1000;
             logf_("  [hudprobe] ===> PHASE %d: style %lu, rect %lux%lu  (%s)", ph,
                   (unsigned long)g_hud_style, (unsigned long)g_hud_cx, (unsigned long)g_hud_cy,
