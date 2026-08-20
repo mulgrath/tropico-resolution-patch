@@ -1623,3 +1623,46 @@ what sent us to the decompiler — but §33 should not be read as a real fix.
 
 **Untested in-game.** Everything above is static. The claim that raising the clamp makes the
 terrain draw at 1920 is a prediction until it is run.
+
+
+## 36. §35's clamp is ELIMINATED — and the framebuffer stride is correct
+
+The `FUN_0046b020` clamp was patched and the terrain did not move. Log:
+`world-extent clamp at 0046b140: 3200x2400 -> 3840x2160`, `5 applied, 0 failed`, CFG `0x242`
+= 4. Raising a clamp with no visible effect is ambiguous, so the **reverse test** was run:
+forced to `ClampW=1600` (= 800 px, half the observed cutoff).
+
+Result: `3200x2400 -> 1600x2160` applied, and the terrain **still stopped at 1600**. A clamp
+that cannot move the cutoff inward does not control it. `FUN_0046b020` is eliminated.
+
+**§35 should be read as a plausible-but-wrong lead, like §33.** Two confident calls have now
+failed at the same evidentiary standard: "a constant that looks like the right number, in a
+function that touches the right global". That standard is not sufficient. Nothing should be
+presented as found again until the cutoff is observed to *move*.
+
+### What the 39 width-referencing functions do establish
+
+* `FUN_0052e480` loads `DAT_0060c18c` directly from the resolution table at `0x5a0fa0`, which
+  the proxy patches — so the width global genuinely holds 1920 at runtime.
+* The software renderer computes pixel addresses as `DAT_0060c191 + (DAT_0060c18c * y + x) * 2`
+  in `FUN_0046da20`, `FUN_0046e040`, `FUN_0044da90`, `FUN_00511c90`, `FUN_0052b750`.
+  **The framebuffer stride is the real width.** Nothing about the surface or the blit path is
+  limited to 1600.
+
+So the limit is upstream of the framebuffer, in whatever decides which terrain to draw.
+
+### Artefacts, now durable
+
+Ghidra 12.1.3 project, the full decompilation of all 3276 functions, and the objdump listing
+live in `~/tropico-re/`:
+
+```
+~/tropico-re/tropico_decomp.c      8.1 MB, all 3276 functions, decompiled C
+~/tropico-re/tropico-objdump.txt   objdump -d -M intel of .text
+~/tropico-re/ghidraproj/           the analysed Ghidra project (reusable, -noanalysis)
+~/tropico-re/*.java                the headless scripts
+```
+
+Grepping the decompilation locally costs nothing and needs no Ghidra run. First survey of
+clamp idioms (`if (CONST < x) x = CONST`) shows no constant near 1600/3200/800 beyond the one
+already eliminated, so the bound is likely not a literal clamp at all.
