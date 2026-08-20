@@ -3981,3 +3981,87 @@ not make it recomputable (the pre-draw is evidently not called per frame, so tes
 authored rect changed nothing). The probe now **learns the engine's own computed rect once and
 replays it verbatim or modified**, which is idempotent whatever the engine does. A phase can
 be entered and left without leaving damage — the property that has been missing since run M.
+
+## 60. SOLVED, and it closes style 1: HUD sprites are MULTI-PIECE, and style 1 draws only one
+
+The owner, from two screenshots: "it seems like we're trying to scale one PART of the chrome
+across the whole bottom, when it's not a single sprite. The texture atlas probably has
+multiple slices that get rendered next to each other, and we're only messing with the very
+first one?"
+
+That is correct, and the code says so plainly.
+
+### 60.1 The evidence
+
+**The EdgeTrim prediction was confirmed first.** Phase 1 (untrimmed) vanished; phase 2, with
+the rect pulled 8 virtual units inside the screen, **drew** —
+
+```
+[chrome] replaying learned rect TRIMMED by 8 virtual units: x=0 y=1390 w=3192 h=1002
+[chrome] BAR rect ... -> px x=0 y=625 w=1915 h=450
+```
+
+So §59.3 is confirmed: the blit rejects a destination that touches the screen edge, and
+trimming it fixes the vanish. Drawing it is what exposed the real problem underneath.
+
+**What drew was a repeat, not a magnification.** The screenshot shows the minimap corner
+chrome, then wall, then *the minimap chrome again* further right. A single stretched image
+cannot do that; a wrapped texture coordinate can.
+
+### 60.2 The mechanism
+
+A "sprite" is a **list of pieces**. `FUN_004eb330` walks `pcVar1[4]` sub-records of 0x15 bytes
+each at `[pcVar1+0x1a]`, accumulating a union bounding box — which is why it looked like a
+plain rect getter. And the style-0 blit loops over exactly that count:
+
+```asm
+501da4:  mov al, BYTE PTR [esi+0x4]    ; piece count
+501daf:  dec eax
+501db6:  jl  0x502334                  ; done
+```
+
+while `FUN_004eb5f0` — the one the style-1 path calls — returns a **single** record:
+`uVar2 * 0x15 + [pcVar1+0x1a]`.
+
+So:
+
+* **style 0** = draw this sprite = iterate every piece, each blitted 1:1 at its own stored
+  position and size;
+* **style 1** = stretch **one** piece onto a rectangle.
+
+The bar is a 1600x505 image split into pieces at load. Style 1 takes piece 0, stretches it
+across the full width, and the texture coordinates wrap — producing exactly the repeated
+minimap chrome in the screenshot.
+
+### 60.3 Consequences
+
+**Style 1 is dead for the bar, and for any multi-piece sprite.** Not an edge case, not a
+tuning problem: it is the wrong primitive. This also retires the last of §54.2's uncertainty
+about why `brempty` (277x279) stretched cleanly in §52 — it is small enough to be a single
+piece, so style 1 was drawing the whole sprite there. Size was never the limit *directly*;
+piece count is, and piece count follows size.
+
+The §52 conclusion that "style 1 removes the packet-encoding blocker" is therefore
+**retracted**. It removes it only for single-piece sprites, which excludes every large chrome
+element — i.e. exactly the ones that need it.
+
+**Where the bar now stands:**
+
+| route | status |
+|---|---|
+| mechanism 1 alone (design-space rect) | moves only the clip (§59.1). Necessary, not sufficient. |
+| style 1 | draws one piece of many. **Dead.** |
+| rewriting the runtime piece records | could reposition pieces but not scale their pixels — style 0 blits 1:1, so it would open gaps |
+| derived art set at the target resolution | still the only complete route, still blocked on the `.iNN` packet encoding for any width change |
+
+So the answer to the owner's question — "I'm still not sure if we can even upscale the art
+assets, I'd like to determine what we have to work with" — is now settled, and it is the
+unwelcome one: **the engine will not scale HUD art for us, by any route we have found. The
+packet encoding is unavoidable.**
+
+### 60.4 Credit where it is due
+
+This was diagnosed from two screenshots by the owner, after I had spent runs K through S
+building increasingly elaborate instruments around the wrong model. The repeat was visible in
+the first image of it; I was reading log numbers and did not look at what the picture was
+actually showing.
