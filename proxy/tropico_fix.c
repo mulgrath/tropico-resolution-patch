@@ -1786,6 +1786,8 @@ static volatile DWORD g_hud_style_want = 0;
 static volatile DWORD g_chr_kx = 65536, g_chr_ky = 65536;
 static volatile DWORD g_chr_on = 0, g_chr_style = 0;
 static volatile DWORD g_chr_hits;
+static volatile DWORD g_chr_rect, g_chr_pos;
+static volatile DWORD g_chr_zero;
 static volatile DWORD g_chr_dirty;
 static float g_chr_fx = 2.0f, g_chr_fy = 2.0f;
 static const DWORD CHR_ART_W[5] = { 640, 800, 1024, 1280, 1600 };
@@ -2008,7 +2010,30 @@ static int patch_hud_probe(void)
             if (!fix_short(stub, d1, i, "dirty")) return 0;
         }
         {   DWORD a_ch=(DWORD)(SIZE_T)&g_chr_hits;
-            stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_ch,4); i+=4; } /* inc [g_chr_hits]*/
+            DWORD a_rc=(DWORD)(SIZE_T)&g_chr_rect, a_ps=(DWORD)(SIZE_T)&g_chr_pos;
+            DWORD a_z =(DWORD)(SIZE_T)&g_chr_zero;
+            int z1;
+            stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_ch,4); i+=4;  /* inc [g_chr_hits] */
+            /* Zero the destination POSITION when asked.  If the style-1 blit adds
+             * the sprite's own stored offset (0,695 px for the bar), a zeroed rect
+             * puts the bar at exactly that stored position -- visible, full width,
+             * too low.  If it does not, the bar lands at the top of the screen.
+             * Those two are unmistakable, and they measure the thing directly
+             * instead of inferring it from a disappearance. */
+            stub[i++]=0x83; stub[i++]=0x3d; memcpy(stub+i,&a_z,4); i+=4; stub[i++]=0x00;
+            stub[i++]=0x74; z1=i++;                                        /* cmp zero,0; je  */
+            stub[i++]=0x66; stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x0b;
+            stub[i++]=0x00; stub[i++]=0x00;                                /* mov w[+0x0b],0  */
+            stub[i++]=0x66; stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x0d;
+            stub[i++]=0x00; stub[i++]=0x00;                                /* mov w[+0x0d],0  */
+            if (!fix_short(stub, z1, i, "zeropos")) return 0;
+            /* record THIS widget's rect and position, so the log can speak about
+             * the bar rather than about whatever drew last */
+            stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x0f;
+            stub[i++]=0x89; stub[i++]=0x15; memcpy(stub+i,&a_rc,4); i+=4;  /* rect  = [+0x0f] */
+            stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x0b;
+            stub[i++]=0x89; stub[i++]=0x15; memcpy(stub+i,&a_ps,4); i+=4;  /* pos   = [+0x0b] */
+        }
         stub[i++]=0xa1; memcpy(stub+i,&a_cs,4); i+=4;                 /* mov eax,[g_chr_style]*/
         stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x7c;               /* mov [ecx+0x7c],eax   */
         fix_near(stub,b1,i); fix_near(stub,b2,i); fix_near(stub,b3,i);
@@ -2094,6 +2119,7 @@ static DWORD WINAPI hudprobe_thread(LPVOID unused)
                 /* size column doubles as the chrome mode: 0 = leave the bar stock,
                  * non-zero = rescale it into the art set's design space. */
                 g_chr_on    = g_hud_ph_size[ph] ? 1 : 0;
+                g_chr_zero  = (g_hud_ph_size[ph] == 2) ? 1 : 0;
                 g_chr_style = (g_hud_style_want && hw3d) ? g_hud_style_want : 0;
                 logf_("  [chrome] style %lu; design-space factors now %.4f / %.4f"
                       " (live mode would be %.4f / %.4f)",
@@ -2121,9 +2147,17 @@ static DWORD WINAPI hudprobe_thread(LPVOID unused)
               (slot < 5 ? suf[slot] : "?"), hw ? "HARDWARE 3D" : "SOFTWARE",
               (unsigned long)g_hud_calls, (unsigned long)g_hud_hits,
               (unsigned long)(g_hud_live[0] & 0xffff), (unsigned long)(g_hud_live[0] >> 16));
-        if (g_chr_enable)
-            logf_("  [chrome] path-B widgets touched this run: %lu draws",
-                  (unsigned long)g_chr_hits);
+        if (g_chr_enable) {
+            short cx = (short)(g_chr_rect & 0xffff), cy = (short)(g_chr_rect >> 16);
+            short px = (short)(g_chr_pos  & 0xffff), py = (short)(g_chr_pos  >> 16);
+            DWORD lw2 = wfb_read16(0x60c18c), lh2 = wfb_read16(0x60c18e);
+            logf_("  [chrome] path-B draws=%lu | BAR rect x=%d y=%d w=%d h=%d virtual"
+                  "  ->  px x=%ld y=%ld w=%ld h=%ld%s",
+                  (unsigned long)g_chr_hits, px, py, cx, cy,
+                  (long)px * (long)lw2 / 3200, (long)py * (long)lh2 / 2400,
+                  (long)cx * (long)lw2 / 3200, (long)cy * (long)lh2 / 2400,
+                  g_chr_zero ? "   [position ZEROED this phase]" : "");
+        }
         if (g_hud_style_want && !hw3d)
             logf_("  [hudprobe]   (this phase is INCONCLUSIVE while the renderer is"
                   " Software -- the branch that can stretch is never reached)");

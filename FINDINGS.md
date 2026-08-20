@@ -3746,3 +3746,70 @@ finishes loading, and again at every F2. Its absence is the same bug.
   not test it, because the factor it cancelled was the wrong one.
 * Whether style 1 can draw this sprite correctly at all. Both observations of it so far were
   contaminated by the stale factor.
+
+## 56. Run P: mechanism 1 works; style 1 makes the bar vanish, as predicted
+
+Owner: "positioned correctly in the first phase on all resolutions, including 1920x1080, but
+the second phase makes the chrome vanish completely."
+
+### 56.1 The stale-factor bug is closed
+
+Phase 0 is style 0 with the corrected scale patch, and it is right at every resolution. §55's
+diagnosis holds: the whole of runs N and O was one uninitialised constant, consumed before the
+thread that sets it ever ran. The factor thread now starts at DLL load and invalidates path-B
+rects on a slot change, and the identity control that failed in run O passes.
+
+### 56.2 Style 1 vanishing matches the failure mode written down in advance
+
+Run N's ini recorded, before any of this was run:
+
+> "it is NOT established whether the style-1 blit also applies the sprite's own stored offset
+> (y=695). If it double-applies, the bar lands below the screen and you see no bar."
+
+The arithmetic fits: the style-1 destination is y 625..1079 px at 1920x1080; add the sprite's
+own 695 px and it becomes 1320..1774, entirely below a 1080-tall screen.
+
+**But a disappearance is weak evidence** — many faults look like nothing on screen, and §51
+already produced one vanishing that turned out to be the wrong renderer. So run Q measures it
+rather than accepting the fit: phase 1 forces style 1 with the destination **position zeroed**.
+
+* bar appears low (around y=695, full width, stretched) -> the blit **does** add the sprite
+  offset; the fix is to subtract it from the destination rect.
+* bar appears at the top (y=0, full width, stretched) -> it does **not**, and the vanishing
+  has a cause I have no story for.
+* still nothing -> neither, and the logged rect becomes the next lead.
+
+### 56.3 Instrument gap closed: the log can now speak about the bar
+
+Every previous run reported `live rect on entry`, a single global written by **every**
+art-bearing class-4 widget — so it interleaved the bar with `mwspeed` and `mwextra` and could
+never answer a question about the bar. §53.1's runaway numbers were legible only because they
+were absurd.
+
+Gate B now records its own widget's rect and position, reported in virtual units *and*
+pixels each tick:
+
+```
+[chrome] path-B draws=N | BAR rect x= y= w= h= virtual  ->  px x= y= w= h=
+```
+
+Those pixel numbers are a prediction of where the bar should be. If they disagree with the
+screen, then the rect is not what decides where the bar lands — which would be worth more than
+the fix.
+
+### 56.4 An open question about what phase 0 actually did
+
+§54.3 predicted that under style 0 the scale factor **cancels** between the position and the
+origin:
+
+```
+X        =  round(sx * f) + authored_X
+obj+0x88 = -round(sx * f)
+draw x   =  X + parent_x + obj+0x88  ~=  authored_X + parent_x
+```
+
+If that holds, mechanism 1 moves only the clip rectangle, and phase 0 at 1920x1080 should be
+**indistinguishable from stock** — a 1600-wide bar starting at y=695 and running off the
+bottom — rather than a corrected full-width bottom-aligned bar. The owner's "positioned
+correctly" is consistent with either reading, and the difference decides whether mechanism 1
+is a fix or only a prerequisite for style 1. Asked rather than assumed.
