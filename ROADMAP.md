@@ -20,10 +20,16 @@ hand to another person.
 | 1600x1200 | correct, but needs a virtual desktop — modern panels have no such mode |
 | 1600x900 world render | correct, true 16:9, full screen, no shear — confirmed on both a 1080p and a 1440p panel |
 | 1600x900 HUD chrome | broken — art authored for a 1200-tall screen |
-| 1920x1080 | not reachable by patching; no art set is that wide |
+| 1920x1080 world render | **works** (§44) — full-width terrain and void on Software and Hardware, reduce-shifting either way. Needs `[Resolution] 1920x1080` + `[WorldFix] ObjW=3200`; the auto-picker still will not choose it because `ART_WIDTH_CAP` is 1600 |
+| 1920x1080 HUD chrome | still authored for 1600x1200 — the art mod is now the blocker, not the engine |
+| Arbitrary-resolution world render | **works** (§47) — verified at 1920x1080 and 2560x1440, same binary, every renderer. Four writes at `0x526220`. Known-good build archived in `known-good/` |
+| HUD / UI at any non-stock mode | broken — 1600x1200 art, unscaled and misplaced. **This is now the whole remaining problem** |
+| Zoomed detail preview (bottom right) | **fixed** (§47) — was ours, caused by an unguarded write; a size gate separates it from the main viewport at any mode |
 | Centring / upscaling | **not started** — game paints top-left, rest black (§15) |
 
-Best fully-correct experience today: **1280x1024**, no virtual desktop. A real display mode,
+Best fully-correct experience today: **1280x1024**, no virtual desktop (the largest mode whose HUD art is right). The world itself now renders correctly at any mode; the HUD is what caps the usable resolution.
+
+Original note follows: Best fully-correct experience today: **1280x1024**, no virtual desktop. A real display mode,
 art width matches exactly, pillarboxed on 16:9 — which the brief prefers over stretching.
 
 ## Priority 1 — make it packageable

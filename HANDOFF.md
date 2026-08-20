@@ -10,10 +10,28 @@ session — do not broaden it.
 ## Read first, in this order, before touching anything
 
 - `~/tropico-resolution-patch/ROADMAP.md` — goal and state
-- `~/tropico-resolution-patch/FINDINGS.md` — **read §29–§36 carefully**, they are this
-  question's entire history
+- `~/tropico-resolution-patch/FINDINGS.md` — **read §29–§37 carefully**, they are this
+  question's entire history. §37 closes the static search and sets up the instrument.
 - `~/tropico-resolution-patch/TESTING.md` — seven traps, each of which produced a
   confidently wrong conclusion
+
+## STATUS: SOLVED
+
+The terrain cutoff was the world display object's **virtual rect**, `obj+0x0f` = 2666
+(= 1600 px at a 1920 mode). Three consumers read it: the terrain painter, the black void
+fill, and the region presented each frame -- which is why "reduce graphical shifting"
+appeared to be part of the bug and why Software could never be fixed by widening the
+image alone.
+
+Fix: `[WorldFix] Enable=1 / ObjW=3200` in `tropico-fix.ini`, applied by an inline detour
+at `0x526220` (painter entry, filtered on return address `0x50b15b`; `obj = ecx - 0x7a`).
+Verified by the owner: full 1920 terrain and void, no smear, on Software and Hardware,
+reduce-shifting on and off.
+
+Outstanding: the `ObjW=1333` lowering control, the `Match=0` minimisation (is the image
+write redundant?), and a possible vertical twin of the bug (world measured 864 px against
+a 1080 screen). See the end of FINDINGS §44. The original question is kept below for
+context.
 
 ## The question
 
@@ -41,7 +59,14 @@ Measured, not assumed:
 | Every `0x640` immediate in the binary | all six accounted for, none is a terrain clip |
 | DirectDraw geometry | full `WINEDEBUG=+ddraw` trace: 1877 surfaces at 1920x1080, `1600` appears 5 times in 1.8 GB and all are mode enumerations or pointers |
 | Live memory scan for u32 1600 | §32–§34; the two static globals `0x614418`/`0x61abc0` were held at 1920 with no effect |
-| `FUN_0046b020`'s `0xC80`/`0x960` clamp | §35–§36, **patched and reverse-tested**: forcing it to 800px did not move the cutoff |
+| `FUN_0046b020`'s `0xC80`/`0x960` clamp | §35–§36, **patched and reverse-tested**: forcing it to 800px did not move the cutoff. §37: it is the *cursor* path |
+| Every `0xC80` immediate | §37, all 17 accounted for |
+| Any float equal to 1600/3200/800/400 or a reciprocal | §37, all 7 sites identified |
+| A per-slot width array in any encoding | §37 |
+| A stored 3200x2400 or 1600x1200 rect | §37, one hit: slot 4 of the mode table |
+| The CFG file | §37, holds the slot index and no geometry |
+| The D3D viewport | §37, `FUN_004fcd80` reads the patched table. Note §31's ddraw trace never covered this — Wine logs `SetViewport` by pointer |
+| `0x614418` / `0x61abc0` (§32's two globals) | §37, they are `FUN_0050b430`'s memoised sprite bounds — 1600 is the HUD bar's width (§27) |
 
 The value is very likely **not stored as 1600 anywhere**. §35 found it stored as `0xC80`
 (3200, doubled coordinates) in one place, and that place turned out to be the wrong one.
@@ -79,6 +104,13 @@ That bug cost a full pass.
 | `0x52d15a` | the code compare-chain the proxy patches |
 | `0x46b140` | the eliminated clamp (§35/§36) |
 | `0x46da20`, `0x46e040`, `0x44da90`, `0x511c90`, `0x52b750` | software rasteriser inner loops using the stride |
+
+## The instrument that is already built and installed
+
+`[WatchFB]` in `proxy/tropico_fix.c` puts a hardware write breakpoint on one framebuffer
+pixel, so the terrain rasteriser traps and names itself, with its callers read off the
+stack. The rebuilt `binkw32.dll` is installed and `tropico-fix.ini` is set up for the run.
+Read §37 for the predictions — write them down before reading the log.
 
 ## Suggested approach
 

@@ -84,6 +84,9 @@ static int locate_sections(void)
  * specific enough and we would be guessing which one the game actually uses --
  * refuse rather than patch the wrong site.
  */
+static int patch_world_viewport(UINT match_w, UINT new_w);
+static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
+                            UINT objm, UINT objw, UINT objhm, UINT objh, int force, UINT guard);
 static BYTE *find_unique(const BYTE *pat, SIZE_T len, BYTE *start, SIZE_T size, const char *what)
 {
     BYTE *hit = NULL;
@@ -509,6 +512,45 @@ static void apply_patches(void)
         }
     }
 
+    /* §43: the world viewport. Off by default -- it is the newest patch here and
+     * the one most likely to need tuning, so it is opted into from the ini
+     * rather than inflicted on a working configuration. */
+    {
+        char ip[MAX_PATH];
+        snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+        if (GetPrivateProfileIntA("WorldFix", "Enable", 0, ip)) {
+            UINT mw = (UINT)GetPrivateProfileIntA("WorldFix", "Match", 1600, ip);
+            UINT nw = (UINT)GetPrivateProfileIntA("WorldFix", "Width", 0, ip);
+            if (!nw) nw = (UINT)m.w;
+            int mode_ctor = GetPrivateProfileIntA("WorldFix", "Ctor", 0, ip);
+            UINT om = (UINT)GetPrivateProfileIntA("WorldFix", "ObjMatch", 2666, ip);
+            UINT ow = (UINT)GetPrivateProfileIntA("WorldFix", "ObjW", 0, ip);
+            UINT ohm = (UINT)GetPrivateProfileIntA("WorldFix", "ObjHMatch", 1920, ip);
+            UINT oh  = (UINT)GetPrivateProfileIntA("WorldFix", "ObjH", 0, ip);
+            UINT mh  = (UINT)GetPrivateProfileIntA("WorldFix", "HMatch", 864, ip);
+            UINT nh  = (UINT)GetPrivateProfileIntA("WorldFix", "Height", 0, ip);
+            int force = GetPrivateProfileIntA("WorldFix", "Force", 0, ip);
+            /* -1 = auto (half the mode width); 0 = no gate at all. */
+            int gi = GetPrivateProfileIntA("WorldFix", "Guard", -1, ip);
+            UINT guard = force ? (gi < 0 ? (UINT)m.w / 2 : (UINT)gi) : 0;
+            /* Force writes unconditionally, so Width defaulting to the mode is
+             * exactly right and is not a no-op. */
+            if (force && nw == mw) mw = 0;
+            /* Match=0 disables only the image-width half: `cmp [ecx+0x10],0` never
+             * matches, so control falls straight through to the object block. */
+            if (nw == mw && mw != 0) {
+                /* A patch that substitutes a value for itself applies cleanly and
+                 * does nothing -- and reads as success in the log.  Refuse it. */
+                logf_("[x] WorldFix: width %u -> %u is a NO-OP.  Either set"
+                      " [WorldFix] Width explicitly, or set [Resolution] Width/Height"
+                      " -- slot 4 is only %ux%u this run.", mw, nw, m.w, m.h);
+                fail++;
+            } else if (patch_world_draw(mw, nw, mh, nh, om, ow, ohm, oh, force, guard)) ok++;
+              else fail++;
+            if (mode_ctor) { if (patch_world_viewport(mw, nw)) ok++; else fail++; }
+        }
+    }
+
     logf_("[*] done: %d applied, %d failed", ok, fail);
     if (fail) {
         /* Make a failure diagnosable from the log alone -- the user may be the only
@@ -726,30 +768,281 @@ static void maybe_load_pokes(void)
  * rather than silently watching nothing.
  */
 static int g_watch_auto, g_watch_max, g_watch_seen;
+static int g_watch_stack, g_watch_off;
 static DWORD g_watch_eip[32]; static int g_watch_neip;
+
+/* Call logging via EXECUTION breakpoints ------------------------------------
+ *
+ * Watching a framebuffer pixel needs the framebuffer, and two runs have now shown
+ * that this configuration puts a surface pointer in none of the three globals
+ * that can hold one.  So stop needing it.  A debug register in execute mode is a
+ * breakpoint on a FUNCTION, and at the moment it fires ESP still points at the
+ * return address and the arguments -- which gives both the values and the caller,
+ * with no code patching and nothing to guess.
+ *
+ * The functions worth watching all set a drawing bound:
+ *   0x4e6e40  add clip rect, PIXEL coords     (x1=ecx, y1=edx, x2, y2, which)
+ *   0x4e6dd0  add clip rect, VIRTUAL coords   (the 3200x2400 space, section 37)
+ *   0x4fcd80  Direct3D SetViewport            (x1=ecx, y1=edx, x2, y2)
+ *
+ * If any of them is ever handed a right edge near 1599 while the screen is 1920,
+ * that is the bound, and the logged return address is the code that computed it.
+ * If none ever is, clipping is eliminated as the mechanism -- which is equally
+ * worth one run.
+ *
+ * An instruction breakpoint is a FAULT, not a trap: it fires before the
+ * instruction runs, so returning without setting EFLAGS.RF re-enters it forever.
+ */
+static DWORD wfb_read32(DWORD va);
+static WORD  wfb_read16(DWORD va);
+static DWORD g_site_addr[4]; static int g_site_kind[4], g_nsite;
+/* [WorldW]: rewrite the world display object's width field every frame, cycling
+ * through phases so one run tests several values.  §40 measured the object at
+ * 2666x1920 VIRTUAL units, which is 1600x864 pixels at 1920x1080 -- exactly the
+ * terrain cutoff and exactly the 864 ceiling.  This is the test that decides
+ * whether that field IS the bound.  The lowering phase is the informative one:
+ * raising a limit and seeing nothing is ambiguous, but if the cutoff moves
+ * INWARD when the field is lowered, the field controls it (TESTING.md). */
+static DWORD g_ww_vt, g_ww_dwell, g_ww_phase[4]; static int g_ww_nphase, g_ww_last = -1;
+static DWORD g_ww_t0;
+/* [ImgW]: the SOURCE image width, in pixels, at [image+0x10].
+ * §41 showed the world display object's rect is only a clip: lowering it moved
+ * the cutoff inward, raising it produced no new terrain, so the content itself
+ * stops at 1600.  The painter registered in DAT_0060a628 is 0x526220, and it
+ * takes the image in ECX and reads its pixel width from [ecx+0x10] -- the field
+ * copied to 0x614418, the global §32 measured holding 1600.
+ * Only the world's own call is touched: at function entry [esp] is the return
+ * address, and 0x50b15b is the call inside FUN_0050b100. */
+static DWORD g_iw_dwell, g_iw_phase[4], g_iw_match; static int g_iw_nphase, g_iw_last = -1;
+static DWORD g_iw_t0; static int g_iw_seen;
+static DWORD g_seen_key[256]; static int g_nseen_key, g_clip_max;
+
+static const char *site_name(int kind)
+{
+    return kind == 1 ? "clip-px" : kind == 2 ? "clip-virt" : kind == 3 ? "viewport"
+         : kind == 4 ? "objrect" : kind == 5 ? "objsize"
+         : kind == 6 ? "worldw" : kind == 7 ? "imgw" : "?";
+}
 
 static LONG CALLBACK watch_veh(EXCEPTION_POINTERS *ep)
 {
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP)
         return EXCEPTION_CONTINUE_SEARCH;
     DWORD eip = ep->ContextRecord->Eip;
+
+    /* An execution breakpoint reports EIP == the watched function's entry. */
+    for (int i = 0; i < g_nsite; i++) {
+        if (!g_site_kind[i] || eip != g_site_addr[i]) continue;
+        ep->ContextRecord->EFlags |= 0x10000;      /* RF: do not re-fault */
+        ep->ContextRecord->Dr6 = 0;
+        DWORD *sp = (DWORD *)(SIZE_T)ep->ContextRecord->Esp;
+        DWORD ret = 0, a3 = 0, a4 = 0, a5 = 0;
+        if (!IsBadReadPtr(sp, 16)) { ret = sp[0]; a3 = sp[1]; a4 = sp[2]; a5 = sp[3]; }
+        DWORD ecx = ep->ContextRecord->Ecx, edx = ep->ContextRecord->Edx;
+        /* Deduping on the full argument tuple would blow the cap instantly --
+         * every sprite pushes a different rect.  Dedupe on the CALLER instead,
+         * which is what we actually want to enumerate, and keep a second,
+         * separate budget for rects whose edge lands in the suspicious bands:
+         * 1550..1650 in pixels, or 3100..3300 in the virtual 3200x2400 space
+         * (section 37).  Those are logged even from a caller already seen. */
+        /* kind 4: 0x52be38, the instruction after the vtable+0x50 call in
+         * FUN_0052bdb0.  At that point the object's screen rectangle is sitting
+         * in four globals, and ESI is the display object.  Every drawn object
+         * announces its own extent here, so one run enumerates them -- and the
+         * terrain's, if it really is bounded at 1600, cannot hide.
+         * Logging [esi] (the vtable) identifies the CLASS, which is what we can
+         * then chase statically. */
+        if (g_site_kind[i] == 4) {
+            DWORD x1 = wfb_read32(0x60bc3c), y1 = wfb_read32(0x60bc38);
+            DWORD x2 = wfb_read32(0x60bc08), y2 = wfb_read32(0x60bc04);
+            DWORD obj = ep->ContextRecord->Esi, vt = 0;
+            if (obj && !IsBadReadPtr((void *)(SIZE_T)obj, 4)) memcpy(&vt, (void *)(SIZE_T)obj, 4);
+            int hot4 = ((int)x2 >= 1500 && (int)x2 <= 1700);
+            DWORD k = vt * 2654435761u ^ (hot4 ? x2 * 40503u : 0u) ^ 4u;
+            for (int q = 0; q < g_nseen_key; q++) if (g_seen_key[q] == k)
+                return EXCEPTION_CONTINUE_EXECUTION;
+            if (g_nseen_key >= 256 || g_nseen_key >= g_clip_max) {
+                if (!g_watch_off) { ep->ContextRecord->Dr7 = 0; g_watch_off = 1;
+                                    logf_("  [cliplog] limit reached, disarmed"); }
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            g_seen_key[g_nseen_key++] = k;
+            logf_("  %s[objrect] x1=%-6d y1=%-6d x2=%-6d y2=%-6d  w=%-5d obj=%08x vtable=%08x (+%x)",
+                  hot4 ? "!! " : "   ", (int)x1, (int)y1, (int)x2, (int)y2,
+                  (int)x2 - (int)x1 + 1, (unsigned)obj, (unsigned)vt,
+                  (unsigned)(vt - (DWORD)(SIZE_T)g_base));
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+
+        /* kind 5: 0x52be55, the call to FUN_004e7150.  ESI is the display object
+         * and the four bound getters (vtable +0x44/+0x48/+0x4c/+0x50) read these
+         * fields off it directly:
+         *      obj+0x0b  x        (int16)
+         *      obj+0x0d  y        (int16)
+         *      obj+0x0f  width    (int16)
+         *      obj+0x11  height   (int16)
+         *      obj+0x5a  container -> +0x11 originX, +0x15 originY
+         * so this logs each object's DECLARED size, not a rect already
+         * intersected with a damage region.  Deduped by (vtable, w, h): one line
+         * per class per distinct size. */
+        if (g_site_kind[i] == 5) {
+            DWORD obj = ep->ContextRecord->Esi, vt = 0, cont = 0;
+            short ox = 0, oy = 0, ow = 0, oh = 0;
+            int cx = 0, cy = 0;
+            if (!obj || IsBadReadPtr((void *)(SIZE_T)obj, 0x5e))
+                return EXCEPTION_CONTINUE_EXECUTION;
+            BYTE *o = (BYTE *)(SIZE_T)obj;
+            memcpy(&vt, o, 4);
+            memcpy(&ox, o + 0x0b, 2); memcpy(&oy, o + 0x0d, 2);
+            memcpy(&ow, o + 0x0f, 2); memcpy(&oh, o + 0x11, 2);
+            memcpy(&cont, o + 0x5a, 4);
+            if (cont && !IsBadReadPtr((void *)(SIZE_T)cont, 0x19)) {
+                memcpy(&cx, (BYTE *)(SIZE_T)cont + 0x11, 4);
+                memcpy(&cy, (BYTE *)(SIZE_T)cont + 0x15, 4);
+            }
+            DWORD k = vt * 2654435761u ^ (DWORD)(unsigned short)ow * 40503u
+                    ^ (DWORD)(unsigned short)oh * 2246822519u ^ 5u;
+            for (int q = 0; q < g_nseen_key; q++) if (g_seen_key[q] == k)
+                return EXCEPTION_CONTINUE_EXECUTION;
+            if (g_nseen_key >= 256 || g_nseen_key >= g_clip_max) {
+                if (!g_watch_off) { ep->ContextRecord->Dr7 = 0; g_watch_off = 1;
+                                    logf_("  [cliplog] limit reached, disarmed"); }
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            g_seen_key[g_nseen_key++] = k;
+            logf_("  %s[objsize] w=%-6d h=%-6d  x=%-6d y=%-6d origin=(%d,%d)  "
+                  "vtable=%08x (+%x) obj=%08x",
+                  (ow == 1600 || oh == 1600 || ow == 864) ? "!! " : "   ",
+                  (int)ow, (int)oh, (int)ox, (int)oy, cx, cy,
+                  (unsigned)vt, (unsigned)(vt - (DWORD)(SIZE_T)g_base), (unsigned)obj);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+
+        if (g_site_kind[i] == 7) {
+            if (ret != (DWORD)(SIZE_T)(g_base + 0x10b15b))
+                return EXCEPTION_CONTINUE_EXECUTION;
+            DWORD img = ep->ContextRecord->Ecx;
+            if (!img || IsBadReadPtr((void *)(SIZE_T)img, 0x18))
+                return EXCEPTION_CONTINUE_EXECUTION;
+            BYTE *m = (BYTE *)(SIZE_T)img;
+            DWORD iw = 0, ih = 0, ix = 0, iy = 0;
+            memcpy(&ix, m + 0x08, 4); memcpy(&iy, m + 0x0c, 4);
+            memcpy(&iw, m + 0x10, 4); memcpy(&ih, m + 0x14, 4);
+            if (!g_iw_seen) {
+                g_iw_seen = 1;
+                logf_("  [imgw] world source image: x=%d y=%d w=%d h=%d  (image %08x)",
+                      (int)ix, (int)iy, (int)iw, (int)ih, (unsigned)img);
+            }
+            if (g_iw_match && iw != g_iw_match && (DWORD)g_iw_last == 0xffffffffu)
+                return EXCEPTION_CONTINUE_EXECUTION;
+            DWORD el = (GetTickCount() - g_iw_t0) / (g_iw_dwell * 1000);
+            int ph = (int)(el % (DWORD)g_iw_nphase);
+            if (ph != g_iw_last) {
+                g_iw_last = ph;
+                logf_("  [imgw] phase %d: source width %d -> %s%d", ph, (int)iw,
+                      g_iw_phase[ph] ? "" : "unchanged ",
+                      (int)(g_iw_phase[ph] ? g_iw_phase[ph] : iw));
+            }
+            if (g_iw_phase[ph]) {
+                DWORD nw = g_iw_phase[ph];
+                memcpy(m + 0x10, &nw, 4);
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+
+        if (g_site_kind[i] == 6) {
+            DWORD obj = ep->ContextRecord->Esi, vt = 0;
+            if (!obj || IsBadReadPtr((void *)(SIZE_T)obj, 0x14))
+                return EXCEPTION_CONTINUE_EXECUTION;
+            BYTE *o = (BYTE *)(SIZE_T)obj;
+            memcpy(&vt, o, 4);
+            if (vt != g_ww_vt) return EXCEPTION_CONTINUE_EXECUTION;
+            DWORD el = (GetTickCount() - g_ww_t0) / (g_ww_dwell * 1000);
+            int ph = (int)(el % (DWORD)g_ww_nphase);
+            short cur = 0; memcpy(&cur, o + 0x0f, 2);
+            if (g_ww_phase[ph]) {
+                short nw = (short)g_ww_phase[ph];
+                memcpy(o + 0x0f, &nw, 2);
+            }
+            if (ph != g_ww_last) {
+                g_ww_last = ph;
+                logf_("  [worldw] phase %d: width %d -> %s%d   (~%d px at this mode)  "
+                      "obj=%08x", ph, (int)cur,
+                      g_ww_phase[ph] ? "" : "unchanged ", (int)(g_ww_phase[ph] ? g_ww_phase[ph]
+                                                                              : (DWORD)cur),
+                      (int)((g_ww_phase[ph] ? g_ww_phase[ph] : (DWORD)cur)
+                            * (DWORD)wfb_read16(0x60c18c) / 3200), (unsigned)obj);
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+
+        int hot = 0;
+        DWORD v[4] = { ecx, edx, a3, a4 };
+        for (int q = 0; q < 4; q++)
+            if ((v[q] >= 1550 && v[q] <= 1650) || (v[q] >= 3100 && v[q] <= 3300)) hot = 1;
+
+        DWORD key = ret * 668265263u ^ (DWORD)g_site_kind[i] * 2654435761u
+                  ^ (hot ? (a3 * 2246822519u ^ ecx * 40503u) : 0u);
+        for (int k = 0; k < g_nseen_key; k++) if (g_seen_key[k] == key)
+            return EXCEPTION_CONTINUE_EXECUTION;
+        if (g_nseen_key >= 256 || g_nseen_key >= g_clip_max) {
+            if (!g_watch_off) { ep->ContextRecord->Dr7 = 0; g_watch_off = 1;
+                                logf_("  [cliplog] limit reached, disarmed"); }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+        g_seen_key[g_nseen_key++] = key;
+        logf_("  %s[%s] x1=%-6d y1=%-6d x2=%-6d y2=%-6d a5=%-6d  <- caller %08x (+%x)",
+              hot ? "!! " : "   ", site_name(g_site_kind[i]),
+              (int)ecx, (int)edx, (int)a3, (int)a4, (int)a5,
+              (unsigned)ret, (unsigned)(ret - (DWORD)(SIZE_T)g_base));
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
     int known = 0;
     for (int i = 0; i < g_watch_neip; i++) if (g_watch_eip[i] == eip) { known = 1; break; }
     if (!known && g_watch_neip < 32) {
         g_watch_eip[g_watch_neip++] = eip;
-        logf_("  [watch] store from EIP %08x   (module+0x%x)",
-              (unsigned)eip, (unsigned)(eip - (DWORD)(SIZE_T)g_base));
+        DWORD dr6 = ep->ContextRecord->Dr6 & 0xf;
+        logf_("  [watch] store from EIP %08x   (module+0x%x)  DR%s",
+              (unsigned)eip, (unsigned)(eip - (DWORD)(SIZE_T)g_base),
+              dr6 & 1 ? "0" : dr6 & 2 ? "1" : dr6 & 4 ? "2" : dr6 & 8 ? "3" : "?");
+        /* Walk the stack for return addresses.  EIP alone names the rasteriser;
+         * the callers are what compute its bounds, and that is the actual
+         * question.  No EBP chain is assumed -- frame pointers are omitted in the
+         * hot loops -- so this scans raw stack words and keeps the ones that
+         * point into .text.  Some will be stale data; a repeated address across
+         * several traps is the real one. */
+        if (g_watch_stack > 0 && g_text) {
+            DWORD *sp = (DWORD *)(SIZE_T)ep->ContextRecord->Esp;
+            DWORD lo = (DWORD)(SIZE_T)g_text, hi = lo + (DWORD)g_textlen;
+            char line[512]; int n = 0;
+            int len = snprintf(line, sizeof line, "            stack:");
+            for (int i = 0; i < 256 && n < g_watch_stack; i++) {
+                DWORD v;
+                if (IsBadReadPtr(sp + i, 4)) break;
+                v = sp[i];
+                if (v <= lo || v >= hi) continue;
+                len += snprintf(line + len, sizeof line - (size_t)len, " %08x(+%x)",
+                                (unsigned)v, (unsigned)(v - (DWORD)(SIZE_T)g_base));
+                n++;
+                if (len > (int)sizeof line - 40) break;
+            }
+            if (n) logf_("%s", line);
+        }
     }
     if (++g_watch_seen > g_watch_max) {           /* disarm to stop flooding */
         ep->ContextRecord->Dr7 = 0;
+        g_watch_off = 1;
         logf_("  [watch] limit reached, disarmed");
     }
     ep->ContextRecord->Dr6 = 0;
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
-/* DR7 for slot i: local-enable bit (2i), RW bits at 16+4i (01 = write only),
- * LEN bits at 18+4i (11 = four bytes). */
+/* DR7 for slot i: local-enable bit (2i), RW bits at 16+4i, LEN bits at 18+4i.
+ * RW 01 = write, 00 = execute; LEN 11 = four bytes, 00 = one byte (required for
+ * execute).  g_exec_mode switches the whole set between the two. */
+static int g_exec_mode;
 static void watch_arm_thread(HANDLE th, DWORD *addrs, int n)
 {
     CONTEXT c; memset(&c, 0, sizeof c);
@@ -759,8 +1052,8 @@ static void watch_arm_thread(HANDLE th, DWORD *addrs, int n)
     for (int i = 0; i < n && i < 4; i++) {
         (&c.Dr0)[i] = addrs[i];
         dr7 |= (DWORD)1 << (2 * i);
-        dr7 |= (DWORD)0x1 << (16 + 4 * i);
-        dr7 |= (DWORD)0x3 << (18 + 4 * i);
+        dr7 |= (DWORD)(g_exec_mode ? 0x0 : 0x1) << (16 + 4 * i);
+        dr7 |= (DWORD)(g_exec_mode ? 0x0 : 0x3) << (18 + 4 * i);
     }
     c.Dr7 = dr7; c.Dr6 = 0;
     c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
@@ -786,6 +1079,261 @@ static void watch_arm_all(DWORD *addrs, int n)
     } while (Thread32Next(snap, &te));
     CloseHandle(snap);
     logf_("  [watch] armed on %d thread(s)", armed);
+}
+
+/* ------------------------------------------------- framebuffer pixel watch
+ *
+ * FINDINGS 36 left the question "which code draws the terrain?" unanswered, and
+ * every static search for the number 1600 has now been exhausted (every 0x640
+ * and 0xc80 immediate in the image is accounted for; no float, no derived array,
+ * no second table).  So stop looking for the value and go and find the CODE, by
+ * catching it in the act.
+ *
+ * The software renderer addresses pixels as
+ *      DAT_0060c191 + (DAT_0060c18c * y + x) * bpp
+ * so a hardware write breakpoint on one pixel INSIDE the terrain traps in the
+ * terrain rasteriser itself, with EIP naming it and the stack naming its callers.
+ * Those callers are where the bound is computed.
+ *
+ * Two columns are watched at once, which makes the run self-checking:
+ *   X  (e.g. 1500) is inside the drawn terrain  -> must trap
+ *   X2 (e.g. 1700) is beyond the cutoff         -> if it also traps, something
+ *                                                  DOES draw there and the
+ *                                                  premise "nothing is drawn"
+ *                                                  is wrong
+ *
+ *   [WatchFB]
+ *   Delay=60     seconds before arming: you must already be in the map at the
+ *                target resolution, so allow map load plus the F2 climb
+ *   X=1500       column inside the terrain
+ *   X2=1700      column past the cutoff (0 disables)
+ *   Y=400        row -- pick one that is terrain, not HUD
+ *   Max=24       stop after this many distinct traps
+ *   Stack=8      stack return addresses to log per trap
+ *   Rearm=120    seconds to keep re-reading the surface pointer and re-arming
+ *
+ * The surface pointer moves when the game locks a different back buffer, so a
+ * one-shot arm can silently watch a stale address -- the same "derived value has
+ * to be held, not set" trap as the pokes.  Re-arm whenever it changes.
+ */
+static DWORD g_wfb_delay, g_wfb_x, g_wfb_x2, g_wfb_x3, g_wfb_y, g_wfb_rearm;
+static DWORD g_wfb_base_ovr, g_wfb_stride_ovr;
+
+static DWORD wfb_read32(DWORD va)
+{
+    DWORD v = 0;
+    BYTE *p = g_base + (va - 0x400000);
+    memcpy(&v, p, 4);
+    return v;
+}
+static WORD wfb_read16(DWORD va)
+{
+    WORD v = 0;
+    BYTE *p = g_base + (va - 0x400000);
+    memcpy(&v, p, 2);
+    return v;
+}
+
+/* Which global holds the locked surface depends on the configuration.  0052d085:
+ *
+ *      eax = ds:0x612fe8
+ *      if      ([eax+0x18]) ds:0x61c818 = lpSurface;   stride = [eax+0x18]
+ *      else if ([eax+0x38]) ds:0x61c81c = lpSurface;   stride = [eax+0x38]
+ *      else                 ds:0x60c191 = lpSurface;   stride = ds:0x60c18c
+ *
+ * The strides are in PIXELS, not bytes: FUN_0052c5f0 addresses 0x61c81c as
+ * (stride * y + x) * 2, exactly the shape of the 0x60c191 formula in section 36.
+ *
+ * The first run of this watch read only 0x60c191, found it NULL, and armed
+ * nothing -- which is why all three are read and logged now, and why the choice
+ * is overridable from the ini without a rebuild. */
+static void wfb_pick(DWORD *base_out, DWORD *stride_out, int announce)
+{
+    DWORD p91 = wfb_read32(0x60c191), p18 = wfb_read32(0x61c818), p1c = wfb_read32(0x61c81c);
+    DWORD dev = wfb_read32(0x612fe8);
+    DWORD s18 = 0, s38 = 0;
+    if (dev && !IsBadReadPtr((void *)(SIZE_T)dev, 0x3c)) {
+        memcpy(&s18, (BYTE *)(SIZE_T)(dev + 0x18), 4);
+        memcpy(&s38, (BYTE *)(SIZE_T)(dev + 0x38), 4);
+    }
+    if (announce)
+        logf_("  [watchfb] surfaces: 0x60c191=%08x 0x61c818=%08x 0x61c81c=%08x | "
+              "dev=%08x [+0x18]=%u [+0x38]=%u | width=%u",
+              (unsigned)p91, (unsigned)p18, (unsigned)p1c, (unsigned)dev,
+              (unsigned)s18, (unsigned)s38, (unsigned)wfb_read16(0x60c18c));
+
+    DWORD base = 0, stride = 0;
+    if (g_wfb_base_ovr) { base = wfb_read32(g_wfb_base_ovr); stride = 0; }
+    else if (s18 && p18)  { base = p18; stride = s18; }
+    else if (s38 && p1c)  { base = p1c; stride = s38; }
+    else if (p91)         { base = p91; stride = wfb_read16(0x60c18c); }
+    else if (p18)         { base = p18; stride = s18; }
+    else if (p1c)         { base = p1c; stride = s38; }
+    if (g_wfb_stride_ovr) stride = g_wfb_stride_ovr;
+    if (!stride) stride = wfb_read16(0x60c18c);
+    /* A surface pitch below the screen width is not a surface pitch.  The first
+     * run fell through to base=0185adc9 stride=4 and armed on unrelated heap,
+     * which then trapped and produced two authoritative-looking but meaningless
+     * EIPs.  Refuse rather than report garbage. */
+    if (base && stride < wfb_read16(0x60c18c)) {
+        if (announce) logf_("  [watchfb] rejecting base %08x: stride %u < width %u",
+                            (unsigned)base, (unsigned)stride, (unsigned)wfb_read16(0x60c18c));
+        base = 0;
+    }
+    *base_out = base; *stride_out = stride;
+}
+
+static DWORD WINAPI watchfb_thread(LPVOID unused)
+{
+    (void)unused;
+    for (DWORD t = 10; t < g_wfb_delay; t += 10) {
+        Sleep(10 * 1000);
+        logf_("  [alive] %us in, screen %dx%d", (unsigned)t,
+              GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    }
+    Sleep((g_wfb_delay % 10 ? g_wfb_delay % 10 : 10) * 1000);
+
+    AddVectoredExceptionHandler(1, watch_veh);
+
+    DWORD last = 0, seen_bases[2]; int nseen = 0, armed = 0, rearms = 0;
+    DWORD until  = GetTickCount() + g_wfb_rearm * 1000;
+    DWORD settle = GetTickCount() + 4000;
+    DWORD report = 0;
+    int announced = 0;
+
+    for (;;) {
+        DWORD base = 0, stride = 0;
+        WORD  w = wfb_read16(0x60c18c), h = wfb_read16(0x60c18e);
+        int   bpp = wfb_read32(0x5a0f88) ? 1 : 2;
+
+        if (!announced) {
+            logf_("--- [watchfb] arming: game says %ux%u, %d byte(s)/px; SM_CXSCREEN %dx%d ---",
+                  (unsigned)w, (unsigned)h, bpp,
+                  GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+            if (g_wfb_y >= h || g_wfb_x >= w)
+                logf_("  [watchfb] !! X=%u Y=%u is outside %ux%u -- nothing will trap",
+                      (unsigned)g_wfb_x, (unsigned)g_wfb_y, (unsigned)w, (unsigned)h);
+        }
+        /* Re-report the pointer set every 10s while nothing has been found: the
+         * surface may only be non-NULL between Lock and Unlock, and a run that
+         * saw it NULL every time has to be distinguishable from one that never
+         * looked. */
+        int announce = !announced || (!armed && GetTickCount() > report);
+        if (announce) { report = GetTickCount() + 10000; }
+        wfb_pick(&base, &stride, announce);
+        announced = 1;
+
+        if (base) {
+            int known = 0;
+            for (int i = 0; i < nseen; i++) if (seen_bases[i] == base) known = 1;
+            if (!known && nseen < 2) seen_bases[nseen++] = base;
+            int changed = (base != last);
+            last = base;
+
+            /* The arming test must be evaluated EVERY poll, not only when the
+             * pointer changes.  A single stable surface changes exactly once --
+             * on the first poll, before the settle timer has expired -- so
+             * nesting this inside "changed" meant a perfectly good base was
+             * found and then never armed on.  That is what the software-mode
+             * run did: 0x60c191 = 07d60030 for 60 s, armed=0. */
+            int fresh = (changed && !known && armed && !g_watch_neip && rearms < 8);
+            if ((!armed && (nseen == 2 || GetTickCount() > settle)) || fresh) {
+                DWORD cols[3] = { g_wfb_x, g_wfb_x2, g_wfb_x3 };
+                DWORD a[4]; int n = 0;
+                logf_("  [watchfb] base(s) %08x%s%08x, stride %u px, %d byte(s)/px",
+                      (unsigned)seen_bases[0], nseen > 1 ? " / " : "",
+                      nseen > 1 ? (unsigned)seen_bases[1] : 0u, (unsigned)stride, bpp);
+                for (int i = 0; i < nseen && n < 4; i++)
+                    for (int c = 0; c < 3 && n < 4; c++) {
+                        if (!cols[c]) continue;
+                        a[n] = (seen_bases[i] + ((DWORD)stride * g_wfb_y + cols[c])
+                                * (DWORD)bpp) & ~3u;
+                        logf_("  [watchfb] DR%d = %08x   (surface %08x, x=%u, y=%u)",
+                              n, (unsigned)a[n], (unsigned)seen_bases[i],
+                              (unsigned)cols[c], (unsigned)g_wfb_y);
+                        n++;
+                    }
+                watch_arm_all(a, n);
+                armed = 1; rearms++;
+                if (fresh) { nseen = 1; seen_bases[0] = base; }
+            }
+        }
+
+        if (g_watch_off || (g_wfb_rearm && GetTickCount() > until)) {
+            logf_("--- [watchfb] finished: %d distinct EIP(s), armed=%d ---", g_watch_neip, armed);
+            if (!armed) logf_("  [watchfb] never armed: no surface pointer was ever non-NULL. "
+                              "In Hardware 3D there is no CPU framebuffer and this is expected; "
+                              "in Software it means the surface lives somewhere else again.");
+            if (armed) { DWORD none[1] = {0}; watch_arm_all(none, 0); }   /* leave DRs free */
+            return 0;
+        }
+        Sleep(armed ? 500 : 2);     /* before arming, poll hard: the pointer may
+                                     * only be live inside a Lock/Unlock pair */
+    }
+}
+
+/*   [ClipLog]
+ *   Delay=60     seconds before arming -- be in the map at the target mode
+ *   Window=20    seconds to stay armed (every call traps, so this is not free)
+ *   Max=150      distinct (args, caller) tuples to log
+ *   Sites=7      bitmask: 1 = clip-px 0x4e6e40, 2 = clip-virt 0x4e6dd0,
+ *                4 = viewport 0x4fcd80
+ */
+static DWORD g_clip_delay, g_clip_window, g_clip_sites;
+
+static DWORD WINAPI cliplog_thread(LPVOID unused)
+{
+    (void)unused;
+    for (DWORD t = 10; t < g_clip_delay; t += 10) {
+        Sleep(10 * 1000);
+        logf_("  [alive] %us in, screen %dx%d", (unsigned)t,
+              GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    }
+    Sleep((g_clip_delay % 10 ? g_clip_delay % 10 : 10) * 1000);
+
+    g_watch_off = 0;        /* WatchFB may have run and finished before us */
+    g_nseen_key = 0;
+    logf_("--- [cliplog] arming: game says %ux%u; SM_CXSCREEN %dx%d ---",
+          (unsigned)wfb_read16(0x60c18c), (unsigned)wfb_read16(0x60c18e),
+          GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+
+    DWORD a[4]; int n = 0;
+    if (g_clip_sites & 1) { g_site_addr[n] = (DWORD)(SIZE_T)(g_base + 0x0e6e40); g_site_kind[n] = 1; n++; }
+    if (g_clip_sites & 2) { g_site_addr[n] = (DWORD)(SIZE_T)(g_base + 0x0e6dd0); g_site_kind[n] = 2; n++; }
+    if (g_clip_sites & 4) { g_site_addr[n] = (DWORD)(SIZE_T)(g_base + 0x0fcd80); g_site_kind[n] = 3; n++; }
+    if (g_clip_sites & 8) { g_site_addr[n] = (DWORD)(SIZE_T)(g_base + 0x12be38); g_site_kind[n] = 4; n++; }
+    if (g_clip_sites & 16) { g_site_addr[n] = (DWORD)(SIZE_T)(g_base + 0x12be55); g_site_kind[n] = 5; n++; }
+    /* 0x52be35 is the first bound-getter call, so a write here is seen by all
+     * four getters in the same frame. */
+    if (g_clip_sites & 32) { g_site_addr[n] = (DWORD)(SIZE_T)(g_base + 0x12be35); g_site_kind[n] = 6; n++; }
+    if (g_clip_sites & 64) { g_site_addr[n] = (DWORD)(SIZE_T)(g_base + 0x126220); g_site_kind[n] = 7; n++; }
+    g_nsite = n;
+    for (int i = 0; i < n; i++) {
+        a[i] = g_site_addr[i];
+        logf_("  [cliplog] DR%d = %08x  (%s)", i, (unsigned)a[i], site_name(g_site_kind[i]));
+    }
+    AddVectoredExceptionHandler(1, watch_veh);
+    g_exec_mode = 1;
+    g_ww_t0 = GetTickCount(); g_iw_t0 = g_ww_t0;
+    watch_arm_all(a, n);
+
+    /* Keep ticking while armed.  The previous run ended between the 50 s tick
+     * and the 60 s arm, and the log could not distinguish "quit early" from
+     * "crashed on arming" because nothing was written after arming either way.
+     * A heartbeat inside the window makes the two look different. */
+    for (DWORD t = 0; t < g_clip_window; t += 10) {
+        Sleep((g_clip_window - t < 10 ? g_clip_window - t : 10) * 1000);
+        logf_("  [armed] %us into the window, %d tuple(s) so far", (unsigned)(t + 10),
+              g_nseen_key);
+        if (g_watch_off) break;
+    }
+    g_watch_off = 1;
+    { DWORD none[1] = {0}; g_exec_mode = 0; g_nsite = 0; watch_arm_all(none, 0); }
+    logf_("--- [cliplog] disarmed, %d distinct tuple(s) ---", g_nseen_key);
+    if (!g_nseen_key)
+        logf_("  [cliplog] nothing trapped at all -- either the breakpoints did not "
+              "take (Wine ptrace) or none of these functions runs in this renderer");
+    return 0;
 }
 
 static DWORD WINAPI scan_thread(LPVOID unused)
@@ -922,6 +1470,266 @@ static void maybe_start_scan(void)
     CloseHandle(CreateThread(NULL, 0, scan_thread, NULL, 0, NULL));
 }
 
+static void maybe_start_watchfb(void)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%s\\tropico-fix.ini", g_dir);
+    g_wfb_delay = GetPrivateProfileIntA("WatchFB", "Delay", 0, path);
+    if (!g_wfb_delay) return;
+    if (!g_base) { logf_("[x] [watchfb] module base unknown -- not arming"); return; }
+    g_wfb_x     = GetPrivateProfileIntA("WatchFB", "X", 1500, path);
+    g_wfb_x2    = GetPrivateProfileIntA("WatchFB", "X2", 1700, path);
+    g_wfb_x3    = GetPrivateProfileIntA("WatchFB", "X3", 0, path);
+    g_wfb_y     = GetPrivateProfileIntA("WatchFB", "Y", 400, path);
+    g_wfb_rearm = GetPrivateProfileIntA("WatchFB", "Rearm", 120, path);
+    {   char buf[32];
+        GetPrivateProfileStringA("WatchFB", "Base", "", buf, sizeof buf, path);
+        g_wfb_base_ovr = buf[0] ? (DWORD)strtoul(buf, NULL, 0) : 0;
+    }
+    g_wfb_stride_ovr = GetPrivateProfileIntA("WatchFB", "Stride", 0, path);
+    g_watch_max   = GetPrivateProfileIntA("WatchFB", "Max", 24, path);
+    g_watch_stack = GetPrivateProfileIntA("WatchFB", "Stack", 8, path);
+    logf_("[*] framebuffer watch armed: x=%u x2=%u x3=%u y=%u, fires %us after load, "
+          "max %d trap(s), %d stack word(s)",
+          (unsigned)g_wfb_x, (unsigned)g_wfb_x2, (unsigned)g_wfb_x3, (unsigned)g_wfb_y,
+          (unsigned)g_wfb_delay, g_watch_max, g_watch_stack);
+    CloseHandle(CreateThread(NULL, 0, watchfb_thread, NULL, 0, NULL));
+}
+
+static void maybe_start_cliplog(void)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%s\\tropico-fix.ini", g_dir);
+    g_clip_delay = GetPrivateProfileIntA("ClipLog", "Delay", 0, path);
+    if (!g_clip_delay) return;
+    if (!g_base) { logf_("[x] [cliplog] module base unknown -- not arming"); return; }
+    g_clip_window = GetPrivateProfileIntA("ClipLog", "Window", 20, path);
+    g_clip_max    = GetPrivateProfileIntA("ClipLog", "Max", 150, path);
+    g_clip_sites  = GetPrivateProfileIntA("ClipLog", "Sites", 7, path);
+    {   char buf[32];
+        GetPrivateProfileStringA("WorldW", "Vtable", "0x57e110", buf, sizeof buf, path);
+        g_ww_vt = (DWORD)strtoul(buf, NULL, 0);
+    }
+    g_ww_dwell = GetPrivateProfileIntA("WorldW", "Dwell", 15, path);
+    if (!g_ww_dwell) g_ww_dwell = 15;
+    for (int i = 0; i < 4; i++) {
+        char k[8]; snprintf(k, sizeof k, "W%d", i);
+        int v = GetPrivateProfileIntA("WorldW", k, -1, path);
+        if (v < 0) break;
+        g_ww_phase[g_ww_nphase++] = (DWORD)v;
+    }
+    if (!g_ww_nphase) { g_ww_phase[0] = 0; g_ww_nphase = 1; }
+    g_iw_dwell = GetPrivateProfileIntA("ImgW", "Dwell", 20, path);
+    if (!g_iw_dwell) g_iw_dwell = 20;
+    g_iw_match = GetPrivateProfileIntA("ImgW", "Match", 0, path);
+    for (int i = 0; i < 4; i++) {
+        char k[8]; snprintf(k, sizeof k, "W%d", i);
+        int v = GetPrivateProfileIntA("ImgW", k, -1, path);
+        if (v < 0) break;
+        g_iw_phase[g_iw_nphase++] = (DWORD)v;
+    }
+    if (!g_iw_nphase) { g_iw_phase[0] = 0; g_iw_nphase = 1; }
+    logf_("[*] clip/viewport call log armed: sites 0x%x, fires %us after load, "
+          "%us window, max %d tuple(s)",
+          (unsigned)g_clip_sites, (unsigned)g_clip_delay, (unsigned)g_clip_window, g_clip_max);
+    CloseHandle(CreateThread(NULL, 0, cliplog_thread, NULL, 0, NULL));
+}
+
+/* ------------------------------------------- the world viewport width (§43)
+ *
+ * FUN_0050af10, the constructor for display-object class 0x57e110 (the world),
+ * copies the object's own size fields into the embedded image's PIXEL size:
+ *
+ *   0050af89  movsx ecx,WORD PTR [esi+0x11]     ; object height
+ *   0050af8d  movsx eax,WORD PTR [esi+0x0f]     ; object width
+ *   0050af91  mov   [esi+0x8e],ecx              ; -> image.height  (= image+0x14)
+ *   0050afa9  mov   [esi+0x8a],eax              ; -> image.width   (= image+0x10)
+ *
+ * §42 measured that image at 1600x864 px while the screen was 1920x1080, and
+ * §43 showed that forcing its width to 1920 at DRAW time makes Hardware 3D
+ * render the full width correctly.  Doing it HERE instead sets the size before
+ * anything downstream is prepared from it, which is the difference between a
+ * debug-register hack and a patch that can ship -- and it is the only way to
+ * find out whether the software renderer's smear is a stale buffer or merely a
+ * refresh region that was never told it got wider.
+ *
+ * Eight bytes are replaced by a jump to a stub that reproduces both movsx
+ * instructions, substitutes the width when it is the stock 1600, and jumps back.
+ * An inline detour rather than a debug register: no exception per frame, and it
+ * survives without the VEH.
+ */
+/* The DRAW-time detour: the one that is known to work (§43).
+ *
+ * The constructor patch below applied cleanly and never fired, so the viewport
+ * size is not final when the object is built -- it is set again later, most
+ * likely on the F2 mode change, since the object is created during map load at
+ * 640x480.  Rather than guess at the birth site a second time, patch where the
+ * value was actually MEASURED to be 1600: the painter's entry.
+ *
+ *   00526220  sub  esp,0x2c            <- 7 bytes replaced by a jump
+ *   00526223  fild DWORD PTR [esp+0x30]
+ *   00526227  ...
+ *
+ * At entry ESP still points at the return address, so the world's own call is
+ * identified by [esp] == 0x50b15b and no other image blit is touched.  ECX is
+ * the image; [ecx+0x10] is its pixel width.
+ */
+static const BYTE DRAW_SIG[] = { 0x83,0xec,0x2c, 0xdb,0x44,0x24,0x30, 0x53,0x55,0x56 };
+
+/* force: emit the stores with no comparison at all.  The stock values are
+ * mode-dependent (1600/864 are what the image measures at a 1920 mode, and 1600
+ * came from a 1599.6 the engine rounded), so at any other mode a hardcoded match
+ * silently never fires.  The return-address filter, not the compare, is what
+ * keeps this off every other image. */
+static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
+                            UINT objm, UINT objw, UINT objhm, UINT objh, int force, UINT guard)
+{
+    BYTE *at = find_unique(DRAW_SIG, sizeof DRAW_SIG, g_text, g_textlen, "world painter");
+    if (!at) return 0;
+    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 128, MEM_COMMIT | MEM_RESERVE,
+                                      PAGE_EXECUTE_READWRITE);
+    if (!stub) { logf_("[x] world painter: VirtualAlloc failed"); return 0; }
+
+    DWORD callsite = (DWORD)(SIZE_T)(g_base + 0x10b15b);
+    BYTE *ret_to = at + 7;
+    int i = 0, fix_top, fix_gate = -1, fix_img = -1, fix_obj = -1, fix_ih = -1, fix_h = -1;
+    (void)fix_img; (void)fix_obj; (void)fix_ih; (void)fix_h;
+
+    stub[i++]=0x50;                                                   /* push eax          */
+    stub[i++]=0x8b; stub[i++]=0x44; stub[i++]=0x24; stub[i++]=0x04;   /* mov eax,[esp+4]   */
+    stub[i++]=0x3d; memcpy(stub+i,&callsite,4); i+=4;                 /* cmp eax,callsite  */
+    stub[i++]=0x75; fix_top=i++;                                      /* jne skip          */
+
+    /* Size gate.  The return address proves the CALL SITE is the world's; it does
+     * not prove the VIEWPORT is the main one.  The zoomed detail preview in the
+     * corner is drawn through this same call, and Force=1 was overwriting its size
+     * with the full mode -- which displaced it to the north-west (s46).
+     * The main viewport is always 2666/3200 = 83% of the mode width, and the
+     * preview is a small panel, so "at least half the screen wide" separates them
+     * at every mode without knowing either stock value. */
+    if (guard) {
+        stub[i++]=0x81; stub[i++]=0x79; stub[i++]=0x10;
+        memcpy(stub+i,&guard,4); i+=4;                                /* cmp [ecx+0x10],g  */
+        stub[i++]=0x72; fix_gate=i++;                                 /* jb  skip          */
+    }
+
+    /* image pixel width: [ecx+0x10] */
+    if (!force) {
+        stub[i++]=0x81; stub[i++]=0x79; stub[i++]=0x10;
+        memcpy(stub+i,&match_w,4); i+=4;                               /* cmp [ecx+0x10],m */
+        stub[i++]=0x75; fix_img=i++;                                   /* jne past the mov */
+    }
+    stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x10;
+    memcpy(stub+i,&new_w,4); i+=4;                                     /* mov [ecx+0x10],n */
+    if (!force) stub[fix_img] = (BYTE)(i - fix_img - 1);
+
+    /* image pixel height: [ecx+0x14].  Run D showed the object rect alone does not
+     * fix the bottom edge, exactly as the object rect alone did not fix the sides
+     * -- the painter and the presented region are two consumers on both axes. */
+    if (new_h) {
+        if (!force) {
+            stub[i++]=0x81; stub[i++]=0x79; stub[i++]=0x14;
+            memcpy(stub+i,&match_h,4); i+=4;                           /* cmp [ecx+0x14],m */
+            stub[i++]=0x75; fix_ih=i++;                                /* jne past the mov */
+        }
+        stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x14;
+        memcpy(stub+i,&new_h,4); i+=4;                                 /* mov [ecx+0x14],n */
+        if (!force) stub[fix_ih] = (BYTE)(i - fix_ih - 1);
+    }
+
+    /* object virtual width: obj = ecx - 0x7a, field +0x0f, int16 */
+    if (objw) {
+        WORD om = (WORD)objm, ow = (WORD)objw;
+        if (!force) {
+            stub[i++]=0x66; stub[i++]=0x81; stub[i++]=0x79; stub[i++]=0x95;
+            memcpy(stub+i,&om,2); i+=2;                               /* cmp w[ecx-0x6b],om */
+            stub[i++]=0x75; fix_obj=i++;                              /* jne skip           */
+        }
+        stub[i++]=0x66; stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x95;
+        memcpy(stub+i,&ow,2); i+=2;                                   /* mov w[ecx-0x6b],ow */
+        if (!force) stub[fix_obj] = (BYTE)(i - fix_obj - 1);
+    }
+
+    /* object virtual height: same object, field +0x11 -> [ecx-0x69].  The world
+     * measures 1920 virtual = 864 px against a 1080 screen, so the bottom edge is
+     * the same bug on the other axis (2400 virtual = 1080 px). */
+    if (objh) {
+        WORD om = (WORD)objhm, oh = (WORD)objh;
+        if (!force) {
+            stub[i++]=0x66; stub[i++]=0x81; stub[i++]=0x79; stub[i++]=0x97;
+            memcpy(stub+i,&om,2); i+=2;                               /* cmp w[ecx-0x69],om */
+            stub[i++]=0x75; fix_h=i++;                                /* jne skip           */
+        }
+        stub[i++]=0x66; stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x97;
+        memcpy(stub+i,&oh,2); i+=2;                                   /* mov w[ecx-0x69],oh */
+        if (!force) stub[fix_h] = (BYTE)(i - fix_h - 1);
+    }
+
+    stub[fix_top] = (BYTE)(i - fix_top - 1);                          /* skip:              */
+    if (guard) stub[fix_gate] = (BYTE)(i - fix_gate - 1);
+    stub[i++]=0x58;                                                   /* pop eax            */
+    stub[i++]=0x83; stub[i++]=0xec; stub[i++]=0x2c;                   /* sub esp,0x2c       */
+    stub[i++]=0xdb; stub[i++]=0x44; stub[i++]=0x24; stub[i++]=0x30;   /* fild [esp+0x30]    */
+    stub[i++]=0xe9;
+    LONG back = (LONG)(SIZE_T)ret_to - (LONG)(SIZE_T)(stub + i + 4);
+    memcpy(stub+i,&back,4); i+=4;
+
+    DWORD old;
+    if (!VirtualProtect(at, 7, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    at[0] = 0xe9;
+    LONG rel = (LONG)(SIZE_T)stub - (LONG)(SIZE_T)(at + 5);
+    memcpy(at + 1, &rel, 4);
+    at[5] = at[6] = 0x90;
+    VirtualProtect(at, 7, old, &old);
+    if (force) logf_("[+] world painter at %p: FORCED writes for the call at %08x,"
+                     " gated on viewport width >= %u (stub %p)",
+                     at, (unsigned)callsite, guard, stub);
+    logf_("[+] world painter at %p: viewport width %u -> %u for the call at %08x "
+          "(stub %p)", at, match_w, new_w, (unsigned)callsite, stub);
+    if (new_h)
+        logf_("[+]   ... and image pixel height %u -> %u (field +0x14)", match_h, new_h);
+    if (objw)
+        logf_("[+]   ... and object virtual width %u -> %u (obj = ecx-0x7a, field +0x0f)",
+              objm, objw);
+    if (objh)
+        logf_("[+]   ... and object virtual height %u -> %u (field +0x11)", objhm, objh);
+    return 1;
+}
+
+static const BYTE VP_SIG[] = { 0x0f,0xbf,0x4e,0x11, 0x0f,0xbf,0x46,0x0f,
+                               0x89,0x8e,0x8e,0x00,0x00,0x00 };
+
+static int patch_world_viewport(UINT match_w, UINT new_w)
+{
+    BYTE *at = find_unique(VP_SIG, sizeof VP_SIG, g_text, g_textlen, "world viewport");
+    if (!at) return 0;
+    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE,
+                                      PAGE_EXECUTE_READWRITE);
+    if (!stub) { logf_("[x] world viewport: VirtualAlloc failed"); return 0; }
+
+    BYTE *ret_to = at + 8;                     /* 0x50af91 */
+    int i = 0;
+    stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x4e; stub[i++]=0x11;  /* movsx ecx,[esi+0x11] */
+    stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x46; stub[i++]=0x0f;  /* movsx eax,[esi+0x0f] */
+    stub[i++]=0x3d; memcpy(stub+i,&match_w,4); i+=4;                 /* cmp eax, match_w     */
+    stub[i++]=0x75; stub[i++]=0x05;                                  /* jne +5               */
+    stub[i++]=0xb8; memcpy(stub+i,&new_w,4); i+=4;                   /* mov eax, new_w       */
+    stub[i++]=0xe9;                                                  /* jmp ret_to           */
+    LONG back = (LONG)(SIZE_T)ret_to - (LONG)(SIZE_T)(stub + i + 4);
+    memcpy(stub+i,&back,4); i+=4;
+
+    DWORD old;
+    if (!VirtualProtect(at, 8, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    at[0] = 0xe9;
+    LONG rel = (LONG)(SIZE_T)stub - (LONG)(SIZE_T)(at + 5);
+    memcpy(at + 1, &rel, 4);
+    at[5] = at[6] = at[7] = 0x90;
+    VirtualProtect(at, 8, old, &old);
+    logf_("[+] world viewport at %p: image width %u -> %u when the object is %u wide "
+          "(stub %p)", at, match_w, new_w, match_w, stub);
+    return 1;
+}
+
 /* ------------------------------------------------------------------- DllMain */
 
 
@@ -976,5 +1784,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
             logf_("[x] could not hook GetDeviceCaps -- NOTHING WILL BE PATCHED");
     }
     maybe_start_scan();
+    maybe_start_watchfb();
+    maybe_start_cliplog();
     return TRUE;
 }

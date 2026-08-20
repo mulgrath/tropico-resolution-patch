@@ -1666,3 +1666,1491 @@ live in `~/tropico-re/`:
 Grepping the decompilation locally costs nothing and needs no Ghidra run. First survey of
 clamp idioms (`if (CONST < x) x = CONST`) shows no constant near 1600/3200/800 beyond the one
 already eliminated, so the bound is likely not a literal clamp at all.
+
+
+## 37. The engine's coordinate space is a virtual 3200x2400 — and the search space for 1600 is now closed
+
+Static work only; nothing here has been run. The point of this section is that it
+**closes off** the remaining static hypotheses and explains why they were empty, and it
+hands the next step to an instrument rather than to another guess.
+
+### The engine does not think in pixels
+
+`0x515059` computes four scale factors from the resolution table, once per mode change:
+
+```asm
+mov  eax,ds:0x612fec
+mov  ecx,[eax+0x18]                ; the resolution slot index
+fild DWORD PTR [ecx*8+0x5a0fa0]    ; table[slot].width
+fmul QWORD PTR ds:0x57e1b0         ; * 1/3200
+fstp DWORD PTR ds:0x5a0ffc         ; 0x5a0ffc = width  / 3200
+fild DWORD PTR [ecx*8+0x5a0fa0]
+fdivr QWORD PTR ds:0x57e1a8        ; 3200.0 / width
+fstp DWORD PTR ds:0x5a0ff8         ; 0x5a0ff8 = 3200   / width
+...                                ; 0x5a1004 = height / 2400
+...                                ; 0x5a1000 = 2400   / height
+```
+
+and `FUN_004e6dd0`, the clip-rect setter, takes its rectangle in those units and
+multiplies by `0x5a0ffc` / `0x5a1004` before calling the pixel-space setter
+`FUN_004e6e40`. Callers pass literals like `(0x9b3, 0x8d4)` = (2483, 2260) — far beyond
+any real screen.
+
+**So the UI is authored in a fixed 3200 x 2400 space, which is exactly 2x the 1600x1200
+slot-4 mode.** That is the design resolution, and it is why five per-resolution art sets
+exist at all (§11/§19).
+
+Two consequences:
+
+* §35's `0xC80` / `0x960` clamp was *correctly read* as 3200x2400 = "2x the biggest
+  mode". It was simply the **cursor** path — the same function goes on to scale a cursor
+  delta by `width * (1/1600)` at `0x46b199` — which is why §36 could not move the terrain
+  with it.
+* The scale factors are computed **from the table the proxy patches**, so at 1920 they are
+  1920/3200 = 0.6, not 0.5. The virtual system is not the bug by itself. But any code that
+  assumes "pixels = virtual / 2" — true only at 1600x1200 — yields exactly 1600 in every
+  mode, which is the shape of the observed fault. `0x46b17a` (`shl eax,1`) proves the
+  codebase does mix the two idioms.
+
+### Every remaining static route for the number 1600, closed
+
+| route | result |
+|---|---|
+| `0x640` immediates | 76 in the image. 70 are `push 0x640` in `(0x64, 0x640, -1, 0)` argument groups (not geometry). The other 6 are §31's list. **Closed.** |
+| `0xC80` immediates | 17. One clamp (§35, eliminated), two `mov ecx,0xC80` string ids, `sub/add esp,0xC80` frame adjusts, `mov WORD [esp+..],0xC80`, `push 0xC80`. **Closed.** |
+| float constants | the ONLY constants in the image equal to 1600/3200/800/400 or their reciprocals are `1/800` (`0x57c9a0`), `400.0` (`0x57caa0`), `1/1600` (`0x57d380`), `3200.0` (`0x57e1a8`), `1/3200` (`0x57e1b0`), plus `1/1200` and `1/2400`. All seven referencing sites are identified above or are cursor scaling. **Closed.** |
+| a per-slot width array | searched for `{640,800,1024,1280,1600}` and `{480,600,768,1024,1200}` as u32 and u16, and for *any* ascending 5-element u32 array ending in 1600. Zero hits outside the mode table. **Closed.** |
+| a stored 3200x2400 or 1600x1200 rect | one hit in the whole image: `0x5a0fc0`, slot 4 of the mode table. **Closed.** |
+| the CFG file | `data2/TROPICO.CFG` (782 bytes) contains no width or height in any encoding, only the slot index. **Closed.** |
+| a 1600-entry array in .data/.bss | gap analysis over all 5248 referenced globals found two arrays of interest; both identified (`0x61bb30` is the 800-entry ratio table of the generic rescaling blit `FUN_0052c5f0`). **Closed.** |
+
+### §32's two globals are finally identified — they were never candidates
+
+`0x614418` and `0x61abc0` held 1600 at a 1920 screen, which is what sent §33/§34 down the
+memory-scanner path. They are the memoised inputs of `FUN_0050b430`, which caches a
+sprite's transformed bounds and short-circuits when its descriptor is unchanged:
+
+```c
+if (DAT_005a7d80 == p[1] && DAT_0061ab9c == p[2] && ... && DAT_0061abc0 == p[4] ...)
+    return cached;                       /* p[4] is the sprite's WIDTH field */
+```
+
+So `0x61abc0` is the width of *whatever sprite was drawn last*, and 1600 is the width of
+the bottom HUD bar (§27, measured 1600x505). Holding it at 1920 could never do anything.
+`0x614418` is the same shape at the other call site. **§32/§33/§34 are now fully
+explained and closed.**
+
+### The Direct3D viewport is correct, and §31's ddraw trace never actually covered it
+
+`FUN_004fcd80` is the viewport setter:
+
+```c
+if (param_1 == -1) {                     /* -1 = "full screen" */
+    param_3 = (&DAT_005a0fa0)[slot * 2] - 1;          /* table[slot].width  - 1 */
+    param_4 = *(int *)(&DAT_005a0fa4 + slot * 8) - 1; /* table[slot].height - 1 */
+}
+... (**(code **)(*DAT_0061d248 + 0x34))(DAT_0061d248, &vp);   /* SetViewport */
+```
+
+It reads the patched table, so the hardware viewport is 1920 wide. Worth recording *why*
+this needed reading rather than trusting §31: Wine's `SetViewport` trace prints the
+`D3DVIEWPORT7` **by pointer**, so its dimensions never appear in a `+ddraw` log. §31's
+"DirectDraw geometry eliminated" did not cover the viewport at all. It is eliminated now,
+by reading the code.
+
+### Landmarks found along the way
+
+| address | what |
+|---|---|
+| `0x5a0ff8` / `0x5a0ffc` | 3200/width and width/3200 (39 and 60+ readers) |
+| `0x5a1000` / `0x5a1004` | 2400/height and height/2400 |
+| `0x4e6dd0` | add clip rect, **virtual** coords -> pixels |
+| `0x4e6e40` | add clip rect, pixel coords; `0x60a67c` is the rect list |
+| `0x4fcd80` / `0x4fcca0` | D3D SetViewport / push-viewport; `0x61808c` is the viewport stack depth |
+| `0x6163d0` | the **map cell array**, 19-byte cells (404 references) |
+| `0x59f9dc` / `0x59f9e0` | map width / height (461 and 816 references) |
+| `0x5a12d8` | the five art-suffix pointers (`.i06 .i08 .i10 .i12 .i16`) |
+
+### The next step is an instrument, not another hypothesis
+
+Two "found it" calls have already died (§33, §35) at the standard "a constant that looks
+right, in a function that touches the right global". The static search for the value is
+now provably exhausted, and the reason we cannot find the *code* is that we have never
+identified which function draws the terrain.
+
+So catch it in the act. The software renderer addresses pixels as
+`DAT_0060c191 + (DAT_0060c18c * y + x) * bpp` (§36), so a hardware write breakpoint on a
+single pixel *inside* the terrain traps in the terrain rasteriser, with `EIP` naming it
+and the stack naming its callers — and the callers are where the bound is computed.
+
+New proxy section, `[WatchFB]`:
+
+```ini
+[WatchFB]
+Delay=90     ; arm only once you are in the map at the target mode
+X=1590       ; just inside the cutoff
+X2=1610      ; just outside it -- same content, so whatever writes X but never
+             ; X2 is the bounded path
+Y=500
+Max=24       ; distinct traps before disarming
+Stack=8      ; stack words in .text logged per trap
+Rearm=180
+```
+
+It reads the live width, height, surface pointer and 8/16-bit flag out of the game's own
+globals, logs them **before** arming (a run that armed at the wrong resolution has to be
+visible as such), collects both back-buffer pointers before spending the four debug
+registers, and rounds each address down to a 4-byte boundary — an unaligned DR with LEN=4
+is silently not reported, which would have looked exactly like "no code writes here".
+
+Predictions, so the result cannot be read after the fact:
+
+* X=1590 traps and X=1610 does not -> the EIP is the bounded drawing path; go up its
+  stack. This is the expected outcome.
+* **Both** trap -> something *is* writing past 1600 and the fault is in what it writes,
+  not in whether it runs. That would overturn the reading of §30.
+* Neither traps -> the software renderer is not writing that surface at all; the world is
+  composed somewhere else first, which is a different and equally useful answer.
+
+### First `[WatchFB]` run: armed nothing, and that is itself a finding
+
+Log: `game says 1920x1080, 2 byte(s)/px, surface 00000000`, `SM_CXSCREEN 1920x1080`,
+`0 distinct EIP(s)`. The owner's run was correct — the game's own width/height globals read
+1920x1080, so the F2 climb landed — but `DAT_0060c191` was **NULL for the whole 180 s
+window**, so no breakpoint was ever set.
+
+`0x60c191` is not the framebuffer pointer. It is *one of three*, chosen by configuration.
+`0x52d085`, immediately after the surface Lock:
+
+```asm
+mov  eax,ds:0x612fe8
+mov  ecx,[eax+0x18]
+test ecx,ecx
+je   0052d09f
+mov  eax,[esp+0xb0]          ; lpSurface
+mov  ds:0x61c818,eax         ; -> 0x61c818, stride [dev+0x18]
+jmp  ...
+0052d09f:
+mov  ecx,[eax+0x38]
+test ecx,ecx
+je   0052d0b5
+mov  ds:0x61c81c,ecx         ; -> 0x61c81c, stride [dev+0x38]
+jmp  ...
+0052d0b5:
+mov  ds:0x60c191,edx         ; -> 0x60c191, stride ds:0x60c18c
+```
+
+and `0x52f172` explicitly zeroes `0x60c191` at mode-set time when `[0x612fec+0x10]` is
+non-zero. The strides are in **pixels**: `FUN_0052c5f0` addresses `0x61c81c` as
+`(stride * y + x) * 2`, the same shape as the `0x60c191` formula in §36, with
+`stride = *(DAT_00612fe8 + 0x38)`.
+
+**This weakens §36's reading.** "The software renderer computes pixel addresses as
+`DAT_0060c191 + (DAT_0060c18c * y + x) * 2` in `FUN_0046da20`, `FUN_0046e040`,
+`FUN_0044da90`, `FUN_00511c90`, `FUN_0052b750`" is true of those five functions, but if
+`0x60c191` is NULL under this configuration then **those five are not the path that draws
+the world here** — they are the overlay/cursor family (`FUN_0046e040` saves and restores
+the pixels under the mouse, which is exactly what that family does). The world is drawn
+through whichever of the other two bases is live, with a pitch that is not the screen
+width. That is a genuinely different picture of the renderer than §36 painted, and it may
+matter: a stride that is not the width is exactly the kind of quantity that can be stale.
+
+`[WatchFB]` now reads all three pointers plus `[dev+0x18]` / `[dev+0x38]`, picks the live
+one, logs the whole set every 10 s until it arms, polls at 2 ms before arming (in case the
+pointer is only valid inside a Lock/Unlock pair), and takes `Base=` / `Stride=` overrides
+from the ini so the choice can be forced without a rebuild.
+
+### Second `[WatchFB]` run: all three surface globals are NULL, and the last two EIPs are junk
+
+```
+[watchfb] surfaces: 0x60c191=00000000 0x61c818=00000000 0x61c81c=00000000
+                  | dev=0060d818 [+0x18]=0 [+0x38]=0 | width=1920
+   (x28, once every 10 s across the whole window)
+[watchfb] base(s) 0185adc9, stride 4 px, 2 byte(s)/px
+[watch] store from EIP 004f8a97 ... / 004f8aa2 ...
+```
+
+Two things, and the second is a warning about this instrument, not about the game.
+
+**The game stores a locked-surface pointer in none of the three globals that can hold
+one**, across ~280 s of 2 ms polling — so it is not a matter of catching a short
+Lock/Unlock window. `[dev+0x18]` and `[dev+0x38]` are both 0, which is the branch that
+should select `0x60c191`, and that is 0 too. Whatever this configuration draws through,
+it is not the buffer §36 assumed.
+
+**The two EIPs at the end are meaningless and must not be used.** With every pointer NULL,
+`wfb_pick` fell through to a transient value (`base=0185adc9`, `stride=4`) and armed on
+unrelated heap, which duly trapped. A pitch of 4 pixels on a 1920-wide screen is not a
+pitch. This is the §33/§35 failure mode in a new costume — an instrument producing a
+confident, specific, wrong answer — so the guard is now explicit: a base whose stride is
+below the screen width is rejected and logged as rejected.
+
+### Next instrument: execution breakpoints on the bound-setting functions
+
+Watching a pixel requires knowing where the pixels are, and two runs say we do not. A
+debug register in **execute** mode needs none of that: it breaks on a *function*, and at
+the moment it fires ESP still points at the return address and the arguments — so one
+run yields both the values and the callers, with no code patching.
+
+`[ClipLog]` breaks on the three functions that can impose a drawing bound:
+
+| addr | what | args |
+|---|---|---|
+| `0x4e6e40` | add clip rect, pixel coords | x1=ecx, y1=edx, x2, y2, which |
+| `0x4e6dd0` | add clip rect, virtual 3200x2400 coords | same shape |
+| `0x4fcd80` | Direct3D `SetViewport` | x1=ecx, y1=edx, x2, y2 |
+
+An instruction breakpoint is a fault rather than a trap, so the handler sets `EFLAGS.RF`
+before returning or it re-enters forever. Dedupe is on the **caller**, not the argument
+tuple — every sprite pushes a different rect, so tuple-dedupe would exhaust the cap in
+milliseconds — with a second budget reserved for any rect whose edge falls in 1550..1650
+(pixels) or 3100..3300 (virtual), logged with a `!!` marker even from a caller already
+seen.
+
+Predictions:
+
+* a `!!` line with x2 = 1599 (or a virtual 3199 that lands at 1600 px) -> that is the
+  bound and its caller is the code that computed it.
+* callers enumerated but no edge near 1600 -> clipping is eliminated as the mechanism and
+  the world is bounded before it ever reaches a clip rect.
+* nothing traps at all -> either these functions are not on this renderer's path, or Wine
+  did not honour the execute breakpoints, and the log distinguishes those two.
+
+### The renderer was Hardware 3D — which invalidates both runs, and is a lesson
+
+The owner confirms both `[WatchFB]` runs were made in **Hardware 3D**. In that mode the
+world is drawn by Direct3D and there is no CPU framebuffer at all, so `0x60c191`,
+`0x61c818` and `0x61c81c` are *correctly* NULL and no amount of polling would have found
+one. Both runs were spent on a question the mode could not answer.
+
+**The instrument recorded the resolution but not the renderer.** Every trap in TESTING.md
+has this shape: a variable that determines the answer, not captured, so a null result is
+indistinguishable from a wrong setup. `SM_CXSCREEN` and the width global were logged
+because §31/§32 had been burned by the resolution; the renderer had never bitten anyone
+yet, so it was not logged. It is now the first thing to check when a run comes back empty.
+
+Software is also the renderer the owner prefers (ROADMAP, Proton section), so it is the
+right target regardless.
+
+Next run: **Software**, 1920x1080, with `[WatchFB]` at 45-105 s and `[ClipLog]` at
+120-140 s, sequenced so they do not contend for the four debug registers — `[ClipLog]`
+now clears the finished flag `[WatchFB]` leaves behind, and `[WatchFB]` releases the debug
+registers when its window closes.
+
+## 38. Software mode: the framebuffer exists, clip rects are NOT the mechanism
+
+Run in **Software**, 1920x1080, both instruments sequenced.
+
+### The framebuffer is `0x60c191`, and it is stable
+
+```
+[watchfb] surfaces: 0x60c191=07d60030 0x61c818=00000000 0x61c81c=00000000
+                  | dev=0060ce18 [+0x18]=0 [+0x38]=0 | width=1920
+```
+
+Unchanged for the whole 60 s window. So in Software the third branch of `0x52d085` is the
+live one, exactly as §37 predicted, and the stride is the screen width — the game's own
+addressing (§36) assumes pitch == width, which is consistent with the absence of shear at
+1600x900.
+
+**It still armed nothing, and that was a bug in the instrument, not a fact about the game.**
+The arming test was nested inside `if (base != last)`. A single stable surface changes
+exactly once — on the first poll, before the 4 s settle timer expires — so the condition
+was evaluated once, declined, and never revisited. Fixed: the test now runs every poll.
+Third failed run from the same instrument, each for a different reason, none of them the
+game's.
+
+### `[ClipLog]` worked, and it eliminates clipping
+
+Three execute breakpoints armed across 7 threads; 20 s window; **three** distinct callers
+in the entire window:
+
+```
+   [clip-px]   x1=-175  y1=32    x2=1747  y2=863   <- caller 005166e5  FUN_00516410
+!! [clip-virt] x1=2574  y1=2240  x2=3141  y2=2248  <- caller 0052bd8d  FUN_0052bd20
+   [clip-px]   x1=1544  y1=1007  x2=1885  y2=1012  <- caller 004e6e36  FUN_004e6dd0
+```
+
+* No `[viewport]` line at all — `FUN_004fcd80` early-returns in Software, as expected.
+* The third line is the second line converted: 2574 -> 1544, 3141 -> 1885, 2240 -> 1008.
+  That is `x * 1920/3200` and `y * 1080/2400` to the pixel. **The virtual-to-pixel
+  conversion of §37 is confirmed working correctly at 1920x1080** — a useful control: the
+  scale factors are not the bug.
+* The only `!!` hit is a 567x8 virtual strip at the bottom right — a HUD widget, not the
+  world.
+
+**The world does not push a clip rect.** In 20 s of a running game only three callers
+touched the clip system, none of them the terrain. So the terrain is bounded *before*
+anything reaches a clip rect, and the "world clip rect of width 1600" hypothesis — the
+best remaining structural guess from §37 — is dead.
+
+That leaves the bound inside whatever decides which terrain to draw, which is exactly what
+the corrected `[WatchFB]` run is for. Three columns now: x=900 (well inside), x=1590 (just
+inside), x=1650 (outside).
+
+## 39. The world draw chain, caught in the act — and it is a display-object tree
+
+Corrected `[WatchFB]`, Software, 1920x1080. It armed and trapped:
+
+```
+[watchfb] DR0 = 08268938  (x=900)   DR1 = 08268e9c  (x=1590)   DR2 = 08268f14  (x=1650)
+[watch] store from EIP 00545b7c  DR0   stack: 5432f0 526c8a 526220 50b15b 52be65 4e8217 4e6659 51681d
+[watch] store from EIP 0054579b  DR0   stack: 5436b8 526c8a 526220 50b15b 52be65 4e8217 4e6659 51681d
+[watch] store from EIP 00539aa7  DR0   stack: 5022ed 527190 526b95 526d21 526220 50b15b 52be65 4e8217
+[watch] store from EIP 005399bd  DR1   stack: (same as above)
+[watch] store from EIP 00538e2c  DR1   stack: (same as above)
+```
+
+**DR2 (x=1650) never trapped.** Only 24 traps were sampled before the cap, so this is
+suggestive rather than proof, but it is the first direct confirmation that nothing writes
+past the cutoff, measured at the pixel rather than inferred from a screenshot.
+
+Resolved:
+
+| address | function | role |
+|---|---|---|
+| `0x545120`, `0x538ba0` | — | the innermost span writers (CRT-range helpers) |
+| `0x542cb0`, `0x501b90`, `0x526e30` | — | inner blit variants |
+| `0x525cf0` | `FUN_00525cf0` | the image-draw dispatcher — **and the site of §32's `0x614418` rect unpack at `0x5263e7`** |
+| `0x50b100` | `FUN_0050b100` | |
+| `0x52bdb0` | `FUN_0052bdb0` | **draw one display object** |
+| `0x4e81a0` | `FUN_004e81a0` | walks the object list: `for (o = *(p+0x61); o; o = *(o+0x62)) FUN_0052bdb0()` |
+
+### What `FUN_0052bdb0` does, and why it relocates the question
+
+```c
+(**(code **)(*param_1 + 0x50))(&DAT_0060bc3c, &DAT_0060bc38, &DAT_0060bc08,
+                               &DAT_0060bc04, 1, obj, flag);   /* object -> its rect */
+...
+for (r = FUN_004e7150(..., &x1,&y1,&x2,&y2, ...); r != 0; r = FUN_004e7150(...))
+    (**(code **)(*param_1 + 0x1c))();                          /* draw the piece */
+```
+
+Each display object is asked for its own screen rectangle through vtable slot `+0x50`,
+that rectangle is intersected with the clip regions, and the object draws. `0x60bc3c` is
+x1, `0x60bc38` y1, `0x60bc08` x2, `0x60bc04` y2 — confirmed independently by
+`DAT_0060bc08 = DAT_0060c18c - 1` elsewhere.
+
+`FUN_004e7150` clamps that rectangle to `DAT_0060c18c - 1` = 1919, correctly. So the
+intersection is not the limit; if the world stops at 1600, **the world object is reporting
+a rectangle 1600 wide**, and the question becomes what sets that object's extent.
+
+This is consistent with §38 (no world clip rect is ever pushed): there is no clip because
+the object's own bounds already do the work.
+
+### Next: `Sites=8`, an execute breakpoint at `0x52be38`
+
+That is the instruction immediately after the vtable `+0x50` call, so the four rect globals
+are live and ESI is the object. Logging ESI, `[ESI]` (the vtable, which identifies the
+*class* and is a static address we can then chase) and the rectangle enumerates every
+drawn object's extent in one run, deduped by class.
+
+Prediction: a `!!` line with `w=1600` on a 1920 screen names the world object and its
+vtable. If every object reports a full-width rect, the bound is below this level — inside
+the object's own draw, i.e. in `FUN_00525cf0` and what feeds it.
+
+## 40. The world is a display object drawn as ONE image — and the display tree lives in an 864-tall space
+
+`Sites=8`, Software, 1920x1080. 150 distinct tuples. Six object classes appeared, all
+sharing the same four bound getters:
+
+| vtable | draw method (`+0x1c`) |
+|---|---|
+| `0x57e050` | `0x502660` |
+| `0x57e0a4` | `0x503290` |
+| **`0x57e110`** | **`0x50b100`** |
+| `0x57e1b8` | `0x518430` |
+| `0x57e2b4` | `0x51df90` |
+| `0x57e35c` | `0x51ef30` |
+
+`0x50b100` is `FUN_0050b100`, which is the frame that appeared in §39's `[WatchFB]` stack
+(`0050b15b`). **So vtable `0x57e110` is the class that painted the terrain pixels at x=900
+and x=1590.** Its instance in this run was `obj=03d26f22`.
+
+And its draw method is not a tile loop:
+
+```c
+void FUN_0050b100(int obj) {
+    if (FUN_0052bbd0()) {
+        if (!*(int *)(obj + 0xba)) (*DAT_0060a63c)();
+        if (DAT_0060a628)
+            (*DAT_0060a628)(container.x + obj.x, container.y + obj.y, 0, 0, 9999, 9999);
+        ...
+    }
+}
+```
+
+**The world is blitted as a single image**, with 9999x9999 standing in for "all of it".
+That is the shape the symptom has always had: one source image, narrower than the screen,
+copied to the top-left. Terrain stops dead at its right edge; objects drawn afterwards by
+another path (Direct3D quads in Hardware) are not bounded by it and spill past — §30's
+central observation, explained.
+
+### The 864 ceiling
+
+Across all 150 samples, on a 1080-tall screen, **no rectangle ever had y2 above 864**,
+while x2 ranged freely up to 1699. A hard ceiling in one axis and not the other is the
+same signature as the 1600, and 864 is not a number the mode can explain.
+
+### Two errors in that run's instrument, both correctable
+
+1. **The rects were read one object too early.** `0x52be38` is not after a rect-filling
+   call — the seven pushes there are arguments being staged for `FUN_004e7150` at
+   `0x52be55`, and the four globals are that function's *outputs*. So each line paired one
+   object's pointer with the previous object's rectangle.
+2. **They were clipped rects, not extents** — already intersected with the clip list and a
+   damage region, which is why x2 wandered.
+
+### The getters read the size straight off the object
+
+```asm
++0x44  x1 = [obj+0x5a].originX + (int16)[obj+0x0b]
++0x48  y1 = [obj+0x5a].originY + (int16)[obj+0x0d]
++0x4c  x2 = [obj+0x5a].originX + (int16)[obj+0x0f] + (int16)[obj+0x0b] - 1
++0x50  y2 = [obj+0x5a].originY + (int16)[obj+0x11] + (int16)[obj+0x0d] - 1
+```
+
+So a display object carries its own size as two **int16** fields, `obj+0x0f` (width) and
+`obj+0x11` (height). Next run reads those directly at `0x52be55`, deduped by
+(vtable, w, h) — one line per class per size.
+
+Prediction: vtable `0x57e110` reports **w=1600** on a 1920 screen. If it does, the bound is
+this object's width field and the remaining question is only who writes it. If it reports
+1920, the bound is inside the blit callback `DAT_0060a628` instead.
+
+## 41. FOUND: the world display object is 2666 x 1920 virtual units = 1600 x 864 pixels
+
+`Sites=16` at `0x52be55`, Software, 1920x1080, reading each object's declared size straight
+off the object. 30 classes/sizes in 20 s. Every coordinate in the log is in the virtual
+3200x2400 space of §37 — the largest object is `w=3200 h=1918`, another sits at `x=3182
+w=18` (right edge exactly 3200), a top strip runs `x=18 w=3164`. Independent confirmation
+of the virtual space, from live data.
+
+The last line is the answer:
+
+```
+[objsize] w=2666  h=1920  x=0  y=0  origin=(0,0)  vtable=0057e110  obj=03d26f22
+```
+
+`vtable 0x57e110` is the class whose draw method is `FUN_0050b100` — the frame that
+appeared in §39's pixel-trap stack, i.e. **the object that painted the terrain**. Convert
+its size with the engine's own factors:
+
+```
+2666 virtual x (1920/3200) = 1599.6 px      <- the terrain cutoff, to the pixel
+1920 virtual x (1080/2400) =  864.0 px      <- the y2 ceiling of §40, exactly
+```
+
+**One number explains both anomalies.** The world is a display object 1600 x 864 pixels
+on a 1920x1080 screen, drawn as a single image blit (`(*DAT_0060a628)(x, y, 0, 0, 9999,
+9999)`), and everything to the right of it is simply never painted. That is why the cutoff
+is absolute rather than relative to the mode, why it is identical at 1680 and 1920, why no
+constant 1600 exists anywhere in the image, and why Hardware-mode objects spill past it
+while terrain does not.
+
+### Why it is 1600 and not 1920
+
+Object sizes are stored as two int16 fields, `obj+0x0f` (width) and `obj+0x11` (height),
+in virtual units, and the engine sets them by converting a PIXEL size with the *current*
+mode's ratio — the idiom is visible at `0x5180b1`:
+
+```asm
+fild  DWORD PTR [esp+0x4]        ; a pixel width
+fmul  DWORD PTR ds:0x5a0ff8      ; x (3200 / screen_width)
+call  __ftol
+mov   WORD PTR [esi+0xf],ax      ; -> the object's virtual width
+```
+
+Run that backwards on 2666 at a 1920-wide screen and the pixel width that produced it is
+**1600** — the stock slot-4 art width. Same for the height: 1920 virtual came from 864 px.
+So the world viewport is authored as a fixed 1600x864 pixel rectangle and converted into
+virtual units per mode, which pins it to 1600 px in every mode. At 1600x1200 that
+conversion gives 1600 x 2 = 3200 virtual = the full screen, which is why every stock mode
+looks correct and only wider-than-1600 modes break.
+
+### Where the 1600x864 comes from is still open
+
+`FUN_004e87c0` is a `.WIN` layout parser (it walks the name table at `0x5a02ac`:
+`MAINWIN.WIN`, `MAPSET.WIN`, `SETTINGS.WIN`, 44 entries) and it calls `FUN_0050af10`,
+the constructor that writes vtable `0x57e110`. `MAINWIN.WIN` exists in `px2.PK2` (8046
+bytes) and **there is exactly one of it — no per-resolution variants**, unlike the art.
+Its header carries 3200 and 2400, so `.WIN` files are authored in virtual units. But
+neither 2666/1920 nor 1600/864 appears in it as a 32-bit value, and the record format is
+not a flat tag/value stream, so the layout has not been decoded yet.
+
+### The test that decides it, before decoding anything
+
+`0x52be35` is the first bound-getter call in `FUN_0052bdb0`, so a write to `obj+0x0f` there
+is seen by all four getters in the same frame. `[WorldW]` rewrites the world object's width
+every frame, cycling phases so a single run tests several values:
+
+```
+phase 0  width = 3200  -> 1920 px, full screen
+phase 1  width = 1333  ->  800 px, half way
+phase 2  unchanged     -> 1600 px, the usual cutoff
+```
+
+Phase 1 is the one that matters. Raising a bound and seeing nothing is ambiguous — §33 and
+§35 both died on that — but a cutoff that moves **inward** to half the screen proves this
+field controls it. If the edge never moves in either direction, the object rect is not the
+bound and the 1600 is baked into the blitted image instead, which is a different fix and
+worth knowing.
+
+## 42. The object rect is a CLIP, not the source — VERIFIED IN BOTH DIRECTIONS
+
+`[WorldW]` rewrote the world display object's virtual width field every frame, cycling
+3200 / 1333 / unchanged at 20 s. Log confirms the writes landed (`width 2666 -> 3200`,
+`3200 -> 1333`) and that the game recomputes the field itself, so the poke was genuinely
+held rather than set once.
+
+Owner's report, unprompted and in phase order:
+
+* **1333 (=800 px): the cutoff moved INWARD to half the screen.** The strip between 800 and
+  1600 stopped updating — it held stale content rather than going black, which is what a
+  narrowed *copy* leaves behind.
+* **3200 (=1920 px): no new terrain.** The missing right side was never drawn, in any phase.
+* unchanged: back to the familiar 1600.
+
+**This is the first bound in this project to move.** §33 and §35 both died because only the
+raising direction was tested; this one was tested downward first and it moved, so the field
+genuinely controls the extent. And the pair of results is more informative than either
+alone: a bound that clips when lowered but adds nothing when raised is a **clip on a source
+that is itself only 1600 wide**.
+
+### The source, and the field that holds 1600
+
+`DAT_0060a628`, the paint callback in `FUN_0050b100`, is written once:
+
+```asm
+00459170  mov DWORD PTR ds:0x60a628,0x526220
+```
+
+`0x526220` is the frame that appeared in every §39 pixel-trap stack. Its prologue:
+
+```asm
+526220  fild [esp+0x30] / fmul ds:0x5a0ffc / call __ftol   ; virtual x -> pixels
+526246  fild [esp+0x44] / fmul ds:0x5a1004 / call __ftol   ; virtual y -> pixels
+526284  mov  eax,[esi+0x10]        ; the IMAGE's pixel width
+526287  lea  edi,[eax+edi*1-0x1]   ; right edge = x + w - 1
+5262a7  mov  ecx,[esi+0x14]        ; the IMAGE's pixel height
+```
+
+and further in, at `0x5263f9`:
+
+```asm
+mov edx,[esi+0x10]
+mov ds:0x614418,edx        ; <- §32's global, measured holding 1600 at a 1920 screen
+```
+
+So `0x614418` was never a candidate in its own right — it is a **copy** of `[image+0x10]`,
+which is why §32's repeated poke of the global changed nothing. The live field is on the
+image. The image is embedded in the object, not referenced: `FUN_0050b100` calls the
+painter with `lea ecx,[esi+0x7a]`, and the return address `0x50b15b` is exactly the stack
+value logged in §39 — so the world's own call can be told apart from every other image
+blit by its return address alone.
+
+### Next: change the source width and look at what appears
+
+`[ImgW]` breaks at `0x526220`, filters on `[esp] == 0x50b15b`, and rewrites `[ecx+0x10]`,
+cycling 1920 / 800 / unchanged.
+
+The phase-0 outcome decides how expensive the fix is, and the three cases are
+distinguishable by eye:
+
+* **correct, continuous terrain past 1600** — the buffer is already wide enough and only
+  the width field was wrong. Cheap fix.
+* **garbage, smear, or repeated content** — the buffer really is 1600 px wide and the fix
+  means enlarging an allocation, the case §29 feared. A crash here means the same thing.
+* **nothing** — the bound is elsewhere again and this whole layer is a clip too.
+
+Phase 1 (800) is the control: it must reproduce the inward clip, or the instrument is not
+reaching the code it thinks it is.
+
+## 43. THE TERRAIN RENDERS AT 1920 — and §33 was right all along
+
+`[ImgW]` rewrote `[image+0x10]`, the world viewport's pixel width, at the painter's entry,
+filtered to the world's own call by return address `0x50b15b`. The log confirms the target:
+
+```
+[imgw] world source image: x=-1559 y=1052 w=1600 h=864  (image 03d26f9c)
+```
+
+`03d26f9c` = the world object `03d26f22` + `0x7a`, exactly as `lea ecx,[esi+0x7a]` predicts.
+So the viewport is **1600 x 864 pixels**, and `x`/`y` are the camera offset into the map —
+this is a *view rectangle*, not necessarily a buffer.
+
+Owner's report, forced to 1920:
+
+* **Software: smear.** Repeated content past 1600; never rendered properly.
+* **Hardware 3D with "reduce graphical shifting" ON: the whole right side rendered
+  correctly, out to 1920.**
+
+### §33 is vindicated, and §34's verdict on it was wrong
+
+§33 reported precisely this — full-width terrain in Hardware with reduce-shifting on, after
+a blanket 1600->1920 sweep — and §34 dismissed it as an artefact of truncation damage.
+It was not. That sweep overwrote **this same field** among its hits; the renderer
+combination it needed was real, not a coincidence of partial application. Two independent
+routes, one blind and one targeted, now agree. The honest correction is that §34 threw out
+a true result because the instrument that produced it was too blunt to defend.
+
+The owner's reading of the split is the natural one: "reduce graphical shifting" is
+described in-game as rebuilding the screen on every change, so it regenerates the full
+width, while the normal path refreshes only the region it believes is dirty — a region
+still sized from the old 1600.
+
+### Why the software smear does not settle the question
+
+The override happened at **draw** time, every frame, long after the object was built and
+anything downstream was prepared from a 1600-wide size. A stale 1600-wide buffer and a
+correctly-sized buffer with a stale *refresh region* look identical from there.
+
+So the patch moved to where the size is born. `FUN_0050af10`:
+
+```asm
+0050af89  movsx ecx,WORD PTR [esi+0x11]     ; object height
+0050af8d  movsx eax,WORD PTR [esi+0x0f]     ; object width
+0050af91  mov   [esi+0x8e],ecx              ; -> image.height (px)
+0050afa9  mov   [esi+0x8a],eax              ; -> image.width  (px)
+```
+
+Eight bytes replaced by a jump to a stub that reproduces both `movsx`es, substitutes the
+width when it is the stock 1600, and jumps back — an inline detour, so no exception per
+frame and no debug registers. `[WorldFix] Enable=1`, off by default.
+
+Three outcomes to distinguish, and scrolling is required to tell them apart, because a
+stale buffer can look fine until the view moves:
+
+1. Hardware + reduce-shifting still full width -> the static patch matches the runtime one.
+2. Hardware **without** reduce-shifting now works -> that setting was only ever
+   compensating for the wrong size.
+3. Software correct -> the smear was an artefact of resizing after the fact, and the
+   software renderer is fixed too. Software smearing again -> a buffer really is 1600 wide,
+   and that is the allocation §29 feared.
+
+### The constructor patch applied and never fired
+
+```
+[+] world viewport at 0050af89: image width 1600 -> 1920 when the object is 1600 wide
+[*] done: 6 applied, 0 failed
+```
+
+Signature found, stub written, detour installed — and no behaviour change in any renderer
+or setting combination. Since the guard is `cmp eax,1600`, the constructor does not see
+1600: `FUN_0050af10` runs while the object is built, and the object is built during **map
+load, at 640x480** (the mode ladder of trap 4). The viewport size is therefore set *again*
+later, almost certainly on the F2 mode change, and `0x50af89` is simply not where the
+number is born.
+
+Worth stating plainly, because it is the fourth time in this project the same shape of
+error has appeared: *a patch that applies cleanly is not a patch that runs.* The log line
+proves installation, not execution. The clamp in §35/§36 failed the same way — applied,
+logged, irrelevant.
+
+It is **not** evidence that the earlier result was luck or memory alignment. The
+per-frame override was measured working three times in a row, in a specific renderer
+configuration, with the target confirmed by address (`03d26f9c` = object + 0x7a).
+
+### Patching where the value was measured, not where it was guessed
+
+`0x526220`, the painter's entry, is the one place the width is *known* to be 1600, because
+`[ImgW]` read it there. Seven bytes are replaced by a jump to a stub that checks the return
+address (`0x50b15b`, the world's own call, so no other image is touched), substitutes the
+width when it is the stock 1600, then reproduces the displaced `sub esp,0x2c` /
+`fild [esp+0x30]` and jumps back. Signature verified unique in the image: one match, at
+`0x526220`.
+
+This is the same change the debug-register override made, minus the debug register.
+
+### Result: the static patch reproduces the runtime override exactly
+
+Owner-observed, this run:
+
+| Renderer / setting | Terrain |
+|---|---|
+| Hardware 3D + reduce graphical shifting **on** | **full width to 1920, correct** |
+| Hardware 3D, reduce-shifting **off** | broken (smear/stale) |
+| Software | broken (smear/stale) |
+| back to Hardware + reduce | correct again |
+
+Toggled in both directions, so the correlation is with the setting, not with run order.
+
+That settles the bounded question of this session. **The terrain cutoff at x=1600 is the
+world display object's embedded image viewport width**, and it is patchable statically at
+`0x526220` with no debug registers, no VEH, and no per-frame cost. Outcome 1 of the three
+predicted above; outcomes 2 and 3 did not occur.
+
+It also kills the dirty-rect hunch as a *sufficient* explanation. If reduce-shifting merely
+forced a full-screen refresh over an already-correct 1920 buffer, the buffer would still be
+1920 with it off, and the wrong region would be stale-but-eventually-correct. It is not:
+without reduce-shifting the render never becomes correct at any scroll position. Whatever
+downstream state reduce-shifting changes is *required* for the widened viewport, not merely
+cosmetic. What that state is remains unknown — the setting's own code path has not been
+traced, and this is now the highest-value unknown for making the fix renderer-independent.
+
+### Open: the void smears even in the working configuration
+
+Scrolling the camera off the edge of the map, so the viewport covers empty space, restores
+the stale-buffer look even with Hardware + reduce-shifting on and the patch active.
+
+The obvious reading is that the terrain painter writes only pixels a tile covers and
+nothing clears the rest — a region that is never written keeps whatever it last held, which
+is exactly the smear signature. That would make it a **pre-existing engine behaviour, not a
+consequence of the patch**, and possibly not even a bug the stock game avoids so much as
+one it never exposes, since at the design resolution the HUD covers the edges.
+
+Untested either way. One cheap observation decides it, and it must be made *before* any
+more code is read:
+
+- Does the void smear cover the whole screen, or only the columns past x=1600?
+- Does stock Tropico, unpatched, at 1600x1200, smear when scrolled off the map?
+
+Whole-screen, or present unpatched, means it is the engine's and out of this session's
+scope. Confined to x>1600 and absent unpatched means the widened viewport reaches pixels
+some clear or fill still sizes at 1600 — the same class of bug as the original cutoff, one
+layer further down.
+
+### Confirmed: the void smear is confined to x>1600, and is not vanilla behaviour
+
+Owner-observed: over empty space the smear appears **only past x=1600**. Inside 1600, and
+in the stock game, the void renders as flat black with the occasional cloud. So the black
+is *painted*, by something that fills the world area, and that filler is still sized 1600
+while the terrain painter is now 1920.
+
+That splits the width into at least two consumers, only one of which is patched:
+
+| consumer | width source | state |
+|---|---|---|
+| terrain painter | `[image+0x10]` = 1600 px | patched at `0x526220` |
+| void/background fill | unknown, still 1600 | **open** |
+| present / refresh region | unknown, effectively 1600 | **open**, see below |
+
+It also explains the reduce-shifting dependency without needing a second mechanism. If the
+region copied to the screen each frame is the world's own rect, then without reduce-shifting
+only 1600 columns are ever presented no matter how wide the terrain was drawn, and with it
+the whole screen is copied and the wider draw becomes visible. One 1600 in a shared source
+would produce all three symptoms.
+
+The obvious shared source is the **object's virtual rect**, `obj+0x0f` = 2666 (= 1600 px),
+already proven in §42 to act as a clip in both directions. The image width and the object
+rect were always two separate numbers describing the same 1600; only the first was patched.
+
+### Test: widen the object rect alongside the image
+
+The painter stub already identifies the world uniquely by return address, and the object is
+reachable from the image pointer without a new signature: `obj = ecx - 0x7a`, confirmed by
+the measured pair `obj=03d26f22` / `image=03d26f9c` in §41. So the same stub now also does
+`cmp word [ecx-0x6b], 2666 / mov word [ecx-0x6b], ObjW`. Emitted encoding verified by
+disassembling a replica of the generated bytes — all three branches land on the same
+`pop eax`.
+
+`[WorldFix] ObjW=3200` (0 = leave the object alone). Prediction if the object rect is the
+shared source: the void turns black out to 1920 and the smear is gone.
+
+The control, to be run second and only after a positive: `ObjW=1333`. Since the rect clips
+in both directions, that must cut **terrain and black void alike** off at x=800. A lowering
+result cannot be produced by accident, which is why it, not the widening, is the proof.
+
+### Run A was void: the ini lost its [Resolution] block
+
+```
+[+] slot 4 -> 1600x900  (data table 005a0fa0, code chain 0052d15a)
+[+] world painter at 00526220: viewport width 1600 -> 1600 for the call at 0050b15b
+```
+
+The ini was rewritten for the WorldFix test and `[Resolution] Width=1920 / Height=1080`
+was not carried over. Without it the auto-picker cannot reach 1920 at all -- 1920 > 1600 =
+`ART_WIDTH_CAP`, so it is filtered out before it is even a candidate (`pick_mode`), and the
+1920 runs of this whole session were only ever reached *through the ini override*. Slot 4
+fell back to 1600x900, `[WorldFix] Width` defaults to the selected mode, and the patch
+substituted 1600 for 1600.
+
+Note the failure shape, which is trap 8 in everything but name: **the log reported the
+no-op as a success.** `viewport width 1600 -> 1600` is indistinguishable at a glance from a
+working line, and `6 applied, 0 failed` was printed underneath it. A patch that substitutes
+a value for itself applies perfectly.
+
+`apply_patches` now refuses `new == match`, counts it as a failure, and says which of the
+two ini keys to set. The instrument that cannot report its own no-op is the instrument that
+wastes the owner's run.
+
+## 44. SOLVED: the object's virtual rect is the shared 1600, not the image width
+
+With `[Resolution] 1920x1080`, `[WorldFix] Width=1920` and `ObjW=3200`, owner-observed:
+
+- the void smear is **gone**;
+- terrain **and** void render to the full 1920;
+- in **every** renderer configuration -- Software, Hardware 3D, reduce-shifting on *and*
+  off.
+
+The renderer dependency was never a renderer difference. `obj+0x0f` = 2666 virtual = 1600 px
+is read by at least three consumers: the terrain painter, whatever fills the world area with
+black, and the region presented to the screen each frame. "Reduce graphical shifting" forced
+a full-screen copy, which concealed the third of those; Software had no such escape hatch,
+which is why it never worked. One number, three symptoms, and the earlier
+image-width-only patch fixed exactly one of them.
+
+This retires the last of §29's fear. Nothing is allocated at 1600 -- there was no buffer to
+outgrow, only a rect describing one.
+
+### The two runs that still matter
+
+Widening produced the desired result, and by this project's own rule that is the *weaker*
+form of evidence: a widening can be a coincidence, a lowering cannot. Two ablations, one run
+each, both cheap:
+
+- **Control (`ObjW=1333`)** -- must cut terrain *and* black void alike off at x=800. If it
+  does, the rect is proven to drive both, in both directions.
+- **Minimisation (`Match=0`, `ObjW=3200`)** -- `Match=0` makes `cmp [ecx+0x10],0` fall
+  through to the object block, disabling the image-width substitution while leaving the
+  object rect patched. If the result is still correct, the image write at `[ecx+0x10]` is
+  redundant and the shipped fix is a **single 16-bit store**.
+
+### Control passed: ObjW=1333 cut terrain and void together at x=800
+
+Both consumers moved, together, in the direction the rect was moved. A narrowing cannot be
+produced by luck, so this is causation, not correlation: `obj+0x0f` **is** the width that
+bounds the world render, and the earlier 1600 was never anything else.
+
+### The bottom edge has always smeared too
+
+Owner: the bottom edge has had the same gross smearing for the whole project; it went
+unmentioned because the horizontal cutoff was the bounded question. That is almost certainly
+this bug on the other axis, and the arithmetic already predicts it: the object is 1920
+virtual tall, and `1920 x 1080/2400 = 864 px` against a 1080-tall screen. The missing 216 px
+is the smear.
+
+`obj+0x11` is the height field, reachable from the same stub as `[ecx-0x69]`. Added as
+`[WorldFix] ObjH` (0 = off, `2400` = 1080 px), with `ObjHMatch=1920`. Emitted encodings for
+both the C and D stub shapes verified by disassembling replicas -- every branch lands on the
+same `pop eax`.
+
+Held off for run C so the ablation stays attributable: one variable per run.
+
+### Run C: the minimisation is REFUTED -- both writes are needed
+
+Run verified valid before interpreting: `slot 4 -> 1920x1080`, `viewport width 0 -> 1920`
+(image never matched, so never written), `object virtual width 2666 -> 3200`. With only the
+object rect widened, terrain **and** void both reverted to stopping at 1600 with the full
+smear beyond.
+
+| patched | terrain | void past 1600 |
+|---|---|---|
+| image `[ecx+0x10]` only | draws to 1920, but only with reduce-shifting on | smears |
+| object `obj+0x0f` only | stops at 1600 | smears |
+| both | 1920 on every renderer | black to 1920 |
+
+So the two fields are not redundant descriptions of one 1600; they are **two consumers with
+distinct roles**:
+
+- `[image+0x10]` -- how many columns of terrain are **painted**.
+- `obj+0x0f`     -- the region that is **filled and presented**.
+
+Widening either alone leaves the other holding the line at 1600, which is exactly what the
+three rows above show. This also retro-explains §43: the image-only patch painted 1920
+columns, and reduce-shifting's full-screen copy was the only mechanism that ever got those
+columns onto the screen. Nothing about the renderer was ever special.
+
+The shipped fix is therefore **two writes, not one**. `[WorldFix] Match=1600 / Width=1920`
+and `ObjMatch=2666 / ObjW=3200`, both required.
+
+### Run D: the object rect alone does not fix the bottom either
+
+Sides stayed correct on all settings (the control built into the run), bottom still smeared.
+The vertical behaves exactly like the horizontal: the rect governs the presented/filled
+region, and something else governs how far the painter actually paints. Symmetry held, which
+is the first time in this investigation a prediction about an untested axis has been
+confirmed rather than corrected.
+
+### Run E: all four writes
+
+`[image+0x14]` is the painter's pixel height, the partner of `[image+0x10]`. Added as
+`[WorldFix] HMatch` / `Height`, giving the full set:
+
+| field | address in stub | stock | patched |
+|---|---|---|---|
+| image pixel width   | `[ecx+0x10]` | 1600 | 1920 |
+| image pixel height  | `[ecx+0x14]` | 864  | 1080 |
+| object virtual width  | `[ecx-0x6b]` | 2666 | 3200 |
+| object virtual height | `[ecx-0x69]` | 1920 | 2400 |
+
+Four-block chain verified by disassembling a replica: every branch lands on the same
+`pop eax`.
+
+One caveat carried into the run: **864 is predicted, not measured.** It comes from
+`1920 virtual x 1080/2400`, whereas 1600 and 2666 were both read out of the running game by
+instrument. If the log does not say `image pixel height 864 -> 1080`, that prediction is
+wrong and the number has to be measured before anything else is concluded.
+
+## 45. 1920x1080 is fully solved; the world render is now mode-shaped
+
+Run E, owner-verified: full 1920x1080 terrain and void, correct on every renderer and with
+reduce-shifting either way, top to bottom. Four writes at `0x526220`, no debug registers,
+no per-frame exception, applied at startup.
+
+The HUD is still 1600x1200 art on a 1920x1080 screen, and there is a clipping artefact when
+reduce-shifting is off. Both are art/layout problems now, not engine-geometry ones -- the
+blocker has moved up a layer.
+
+### The four values, and which of them are mode-dependent
+
+| field | meaning | value |
+|---|---|---|
+| `[image+0x10]` | pixels the painter paints, across | **= mode width** |
+| `[image+0x14]` | pixels the painter paints, down | **= mode height** |
+| `obj+0x0f` | virtual width of the filled/presented rect | **3200, always** |
+| `obj+0x11` | virtual height of the filled/presented rect | **2400, always** |
+
+The object pair is mode-independent by construction: the space is a fixed 3200x2400 and
+px = virtual x mode/3200, so "the whole screen" is always the whole virtual space. Only the
+image pair tracks the mode.
+
+That kills the hardcoded `cmp` values. 1600 and 864 were never properties of the game, only
+of a 1920-wide mode -- and 1600 came out of a 1599.6 the engine rounded, so the stock value
+at another mode cannot even be predicted reliably. `[WorldFix] Force=1` drops the compares
+and writes unconditionally; the **return-address filter**, not the compare, is what keeps
+this off every other image, and always was. Encoding verified by disassembly as before.
+
+### Run F: 2560x1440
+
+Requires `TROPICO_DISPLAY=DP-3` -- Wine measures only the primary monitor (§18), so without
+it the game still sees 1920x1080 no matter which panel the window lands on. The world-extent
+clamp (§35) is already computed as 2x the selected mode, so it should follow to 5120x2880 on
+its own; if it does not, that is the next thing to look at.
+
+Expect the HUD to look *worse*: 1600-wide art on a 2560-wide screen. The terrain and the
+void are what this run is about.
+
+## 46. 2560x1440 renders. The world is now mode-shaped, not mode-limited.
+
+Owner-verified: full 2560x1440 terrain and void on the DP-3 panel. Combined with §45, the
+world render now follows whatever mode is selected, at both axes, on every renderer. The
+engine geometry problem this project opened with is closed.
+
+What remains is art and layout: the HUD is 1600x1200 art on whatever screen it lands on.
+
+### New: the zoomed detail preview is offset to the north-west
+
+Clicking a building or citizen opens a small zoomed view of that spot in the bottom-right
+corner; it is displaced up and to the left. Owner reports it at lower resolutions too.
+
+**Ownership is untested, and that is the first thing to establish.** There is a specific
+reason to suspect this is ours rather than stock: `Force=1` drops the size comparison, and
+the return-address filter only proves the *call site* is the world's, not that the *viewport*
+is the main one. If the preview is the same painter drawing the same object into a small
+viewport, the old `cmp` guard skipped it for free -- its size is neither 1600x864 nor
+anything we match -- and `Force=1` now overwrites it with the full mode size. A viewport told
+it is far larger than it is would be displaced exactly this way.
+
+Two runs settle it, both at 1920x1080 so the known-good geometry is the backdrop:
+
+- **G1, `Enable=0`** -- the whole WorldFix patch off. If the preview is still offset, it is
+  the stock game's and predates everything here.
+- **G2, `Force=0` with `Match=1600 / HMatch=864`** -- the run E configuration, which is
+  guarded. If the preview is correct here and broken under `Force=1`, the force is the cause
+  and the fix is a guard that identifies the main viewport by something other than its size.
+
+G1 first: it is the one that can make G2 unnecessary.
+
+### G1: the preview bug is OURS, and Force=1 caused it
+
+With `Enable=0` the preview is correctly placed. So it is not the stock game's, and the
+suspicion in §46 was right: the preview is drawn through the **same call site** as the main
+world, and `Force=1` removed the only thing that told the two viewports apart.
+
+Recorded as a general lesson, because it is the mirror image of the trap that has bitten
+this project four times: those were patches that were too *narrow* and never fired. This is
+a patch that was too *broad* and fired somewhere it should not have. The return address
+proves the call site is the world's; it does not prove the viewport is the main one.
+
+Reverting to `Match=1600 / HMatch=864` would fix it and re-break 1440p, so the discriminator
+has to be mode-independent. The main viewport is always `2666/3200` = 83% of the mode width
+and the preview is a small corner panel, so **"at least half the mode width"** separates them
+at every resolution without knowing either stock value:
+
+```asm
+cmp DWORD PTR [ecx+0x10], mode_w/2
+jb  skip
+```
+
+`[WorldFix] Guard` -- `-1` (default) = auto, `0` = no gate. Encoding verified by disassembly;
+both the return-address `jne` and the gate `jb` land on the same `pop eax`.
+
+### H: gate confirmed at 1920x1080
+
+Terrain and void still full-screen on every renderer (the control held, so the gate is not
+rejecting the main viewport), and the corner preview is correctly placed again. The size
+gate is the right discriminator: one comparison, no per-mode constants, no state.
+
+### I: the same build at 2560x1440
+
+Nothing changes but `[Resolution]` and the two image dimensions -- `Guard=-1` recomputes
+itself as half the mode width (1280), and `ObjW/ObjH` are the fixed virtual space. If the
+preview is correct here too, the gate is proven mode-independent rather than merely correct
+at one resolution, which is the only reason this run exists.
+
+## 47. CLOSED: arbitrary-resolution world rendering
+
+Verified by the owner at **1920x1080 and 2560x1440**, same binary, same stub, only the ini
+differing -- full terrain and void, every renderer, reduce-shifting either way, and the
+corner detail preview correctly placed at both.
+
+The complete fix is one inline detour at `0x526220`, the world painter's entry:
+
+```asm
+push eax
+mov  eax,[esp+4]
+cmp  eax,0x50b15b            ; the world object's own call site
+jne  skip
+cmp  DWORD PTR [ecx+0x10], mode_w/2
+jb   skip                    ; leave small viewports (the corner preview) alone
+mov  DWORD PTR [ecx+0x10], mode_w    ; painter width,  px
+mov  DWORD PTR [ecx+0x14], mode_h    ; painter height, px
+mov  WORD  PTR [ecx-0x6b], 3200      ; presented rect width,  virtual
+mov  WORD  PTR [ecx-0x69], 2400      ; presented rect height, virtual
+skip:
+pop  eax
+sub  esp,0x2c                ; displaced
+fild DWORD PTR [esp+0x30]    ; displaced
+jmp  0x526227
+```
+
+Four writes, two identifications, no debug registers, no per-frame exception, no allocation.
+`ecx` is the image; the object is `ecx - 0x7a`.
+
+Why each of the four is needed, since three of them were only established by a failed run:
+
+- painter width and height (`+0x10`, `+0x14`) decide how much terrain is **drawn**;
+- rect width and height (`-0x6b`, `-0x69`) decide the region **filled and presented**;
+- widening either pair alone leaves the other holding the line -- proven in both directions
+  by run C (rect only: nothing draws past the old bound) and run D (rect only, vertically:
+  bottom still smears).
+
+And the two identifications are doing different jobs: the return address says *this is the
+world's call*, the size gate says *this is the main viewport and not the corner preview*.
+Losing the second one was §46.
+
+### What this project set out to do, and where it now stands
+
+The engine geometry problem is finished. Nothing in the world render is bounded by 1600, by
+1600x1200, or by the resolution table any more -- the world follows whatever mode is chosen,
+at both axes. The `ART_WIDTH_CAP` in the auto-picker is now the only thing keeping the
+mode selection itself at 1600, and it is a deliberate guard about **art**, not geometry.
+
+The whole remaining problem is the HUD: 1600x1200 art, unscaled and unplaced, on whatever
+screen it lands on. That is the next session's question, and it is a different kind of
+question -- a `.WIN` layout format to decode (§41: `MAINWIN.WIN`, 8046 bytes, header carries
+3200/2400) and art to author or scale, rather than a number to find.
+
+## 48. The HUD layout pipeline, end to end — `.WIN` DECODED, and the fault is ONE widget
+
+Static work plus file measurement. Nothing in this section has been run; the two claims
+that need a run are marked and a single decisive test is specified at the end.
+
+### 48.0 FIRST: the working copy of `px.PK2` is NOT stock — unrecorded, and it poisons measurement
+
+`app/data/px.PK2` has mtime **Aug 19 17:12**, five minutes after `tools/tropico-vsquash.py`
+was committed. Exactly one entry differs from stock:
+
+```
+0x6017ebbb  offset 333,391,135  size 879,671
+   .i16 sprite 0:  x=0 y=521 1600x379   (y+h = 900)   chain ends at 660,780 of 879,671
+   .i12 sprite 0:  x=0 y=593 1280x431   (y+h = 1024)  chain ends exactly       <- stock
+   .i10 / .i08 / .i06: chain ends exactly                                      <- stock
+```
+
+That is §28's row-selection rescale (1200-tall art -> 900-tall) written over the `.i16`
+entry in place and zero-padded to the original length, exactly as §28 proposed. **No
+FINDINGS section records it, no backup exists, and the operation is lossy** — three rows in
+four were kept, so it cannot be undone from the file itself.
+
+I scanned all 154 five-variant families in `px.PK2` by walking each `.i16` block chain: only
+two do not land on the entry end, and the other one (`0x7b336c8b`) is short in **all five**
+variants, so it is a native multi-section asset like `glastube` (§26), not a modification.
+**Blast radius: one entry.**
+
+`innoextract` is installed and `setup_tropico_2.1.0.14.exe` is present, so a pristine
+`px.PK2` is recoverable. **This has not been done — it is a 372 MB overwrite of the owner's
+game data and is the owner's call.** Until it is, `int_main.i16` must not be measured.
+
+Method note, and it is the §-14 lesson again: this was caught only because the parse of
+`int_main.i16` produced `y+h = 900` on a file that should read 1200. An art file that has
+been silently rescaled looks exactly like an art file that was authored that way.
+
+### 48.1 The `.WIN` wire format — DECODED AND VALIDATED
+
+Read straight out of `FUN_004e87c0` and its three stream primitives. There was no guessing
+about field offsets: the primitives name their own sizes.
+
+| addr | what it does |
+|---|---|
+| `0x4ee470` | `read(ecx = dest, edx = n)` — n raw bytes |
+| `0x4ee560` | `read(&tmp, 4)` and discard — consumes a 4-byte **tag**. The value passed in `ecx` is what the (absent) writer would emit, so the tags are literals in the file |
+| `0x4ee8f0` | `[u32 id][u32 len][len bytes]` — a variable-length **blob**; if `len == 0` nothing follows |
+
+```
+u32   0x7d0                     file begin
+b[65] window header             read verbatim into the window object at +0
+blob  0x0bbe                    window name
+u32   0x7d1
+repeat:
+    u32   0x7d2                 widget begin  (0x7d4 = end of file)
+    u32   class                 1 2 4 8 0x10 0x20 0x40 0x80 0x100 0x200
+    blob  0x0bbf                widget name
+    blob  0x0bb8                (unused in every shipped file)
+    blob  0x0bb9                ART ASSET NAME, e.g. "int_main.imm"
+    b[N]  fixed record          N per class, below
+    blob                        classes 1, 2, 8, 0x100 only
+    u32   0x7d3                 widget end
+```
+
+`N` is the literal `edx` of each class deserialiser's single `0x4ee470` call, so it is not an
+inference:
+
+| class | deserialiser | N | vtable |
+|---|---|---|---|
+| 0x001 | `FUN_00517d80` | 0x64 | 0x57e1b8 |
+| 0x002 | `FUN_00502f20` | 0x56 | 0x57e0a4 |
+| 0x004 | `FUN_00502370` | 0x4a | 0x57e050 |
+| 0x008 | `FUN_0051a280` | 0xb4 | 0x57e260 |
+| 0x010 | `FUN_0050af10` | 0x40 | 0x57e110 |
+| 0x020 | `FUN_0051d1e0` | 0x50 | 0x57e2b4 |
+| 0x040 | `FUN_005309c0` | 0x50 | 0x57e490 |
+| 0x080 | `FUN_0051eb30` | 0x5a | 0x57e35c |
+| 0x100 | `FUN_0051e300` | 0x6e | 0x57e308 |
+| 0x200 | `FUN_00519170` | 0x68 | 0x57e20c |
+
+Every deserialiser reads its N bytes into a scratch object and then calls `FUN_0052a9f0`,
+which `memcpy`s the first **0x40 bytes** to `widget + 4`. So record byte `k` is object byte
+`k + 4`, which is why every widget field sits at an odd offset:
+
+```
+record +0x07 -> obj +0x0b   int16  X   ] virtual 3200x2400 units
+record +0x09 -> obj +0x0d   int16  Y   ]
+record +0x0b -> obj +0x0f   int16  CX  ]
+record +0x0d -> obj +0x11   int16  CY  ]
+```
+
+The window header is the same idea one level up: 65 bytes at file +0x04, giving `obj+9` =
+width and `obj+0xd` = height. For `MAINWIN.WIN` those are **3200 and 2400** — §41's
+observation, now located in a decoded struct rather than a hex dump.
+
+**Validation.** `tools/tropico-win.py` parses **19 of the 27** `.WIN` files present in the
+archives and lands on **exact EOF** for every one of them, including all the large ones
+(`MAINWIN` 63 widgets, `SETTINGS` 76, `BPPAINTT` 71, `BPFILLTE` 70, `BPADDTRE` 70,
+`SETUPE` 45). A wrong record size derails the chain within two widgets, as it did while the
+class table was being built. The 8 that fail all fail on the *first* widget with a
+record-length mismatch that differs per file (2, 5 and 13 bytes) — these are legacy records
+in an older revision of the format, unreachable by this build, which reads a fixed N with no
+version check. Seven of the 44 table names are Railroad Tycoon II leftovers
+(`TRAINBUY`, `STATNDTL`, `STOCKDTL`, `PLAYRLST`, ...), consistent with that reading.
+
+**Independent live confirmation.** §41's `[objsize]` run logged, from the running game,
+`x=18 w=3164` and `x=3182 w=18` (right edge exactly 3200). Those are `MAINWIN.WIN` widgets
+55 and 56 of the border frame, read here from the file. The decode agrees with the runtime.
+
+### 48.2 The unnameable asset of §27 is `int_main.imm` — the delivery blocker is GONE
+
+Blob `0x0bb9` is the widget's art asset name, and `MAINWIN.WIN` widget 17 carries
+`int_main.imm`. Hashing it with §19's function:
+
+```
+hash("int_main.i16") = 0x6017ebbb
+```
+
+which is exactly the 1600x505 bottom-bar entry §27 found by brute-force scan and could not
+name. §27's "the name is composed at runtime or lives inside an archive entry" was right
+about *where* — it lives inside `MAINWIN.WIN`, which is itself an archive entry, which is
+why hashing every string in `Tropico.EXE` never found it.
+
+Two consequences:
+
+* §19's "43 assets" was an undercount for a reason now understood: it regexed `.imm` names
+  out of the **exe**, and the names of HUD art live in the `.WIN` files. 37 distinct assets
+  are named across the 19 parsed `.WIN` files.
+* §27's conclusion that "the loose-file route from §24 is not available for the asset that
+  matters" **no longer holds**. `data/int_main.i16` is a nameable loose override.
+  (§24's "loose files win" is still an inference from 17 files shipping both ways; it has
+  not been confirmed in code and should be verified before being relied on.)
+
+### 48.3 WHO PLACES THE HUD — two paths, and which widget takes which
+
+`FUN_005025e0` is class 4's per-frame prepare method (vtable slot 6). It is nine
+instructions and it is the whole answer:
+
+```
+if (obj.CX != 0 && obj.CY != 0)   -> keep the authored rect, done      [PATH A]
+if (obj.nameHash == 0)            -> no art, done
+obj+0x94 = (int16)obj.X ; obj+0x98 = (int16)obj.Y   ; save authored X/Y as offsets
+obj+0x90 = 1                                        ; enable sprite-derived layout
+call vtbl[0x38]  ->  FUN_00502510                                      [PATH B]
+```
+
+and `FUN_00502510`, which **only class 4 overrides** (every other class inherits the no-op
+`0x52c0a0`):
+
+```
+(sx, sy, sw, sh) = GetSpriteRect(asset, spriteIndex)     ; the art file's own PIXELS
+obj.X  = round(sx * 3200/W_live) + obj+0x94              ; 0x5a0ff8 = 3200 / screen width
+obj.Y  = round(sy * 2400/H_live) + obj+0x98              ; 0x5a1000 = 2400 / screen height
+obj.CX = round(sw * 3200/W_live + 0.5)
+obj.CY = round(sh * 2400/H_live + 0.5)
+```
+
+So:
+
+* **Path A — the rect comes from `MAINWIN.WIN`,** in virtual 3200x2400 units, and is
+  converted to pixels with the live mode's factors. **This scales to any resolution for
+  free.** It is why §12 saw corner-anchored widgets land correctly.
+* **Path B — the rect is computed from the art sprite's stored pixel coordinates,**
+  converted to virtual with the *live* mode's factors. That round-trip is the identity: a
+  sprite stored at pixel y=695 is drawn at pixel y=695 on any screen. The stored pixels are
+  treated as absolute pixels on the current display. **This is the fault.**
+
+The choice is made by one test: **are the `.WIN` record's CX and CY zero.**
+
+Class 1 (button) has the same zero-rect fallback at `0x518070`, but it derives only the
+*size* (`sx+sw`, `sy+sh`) and never touches the position. No class-1 widget in any shipped
+`.WIN` file has a zero rect, so that path is dead in practice.
+
+### 48.4 Scope: it is ONE widget, not 43 special cases
+
+Across all 19 parsed `.WIN` files, 499 widgets:
+
+| class | total | zero-rect (path B) |
+|---|---|---|
+| 0x0001 | 26 | 0 |
+| 0x0002 | 75 | 0 |
+| 0x0004 | 240 | **37** |
+| 0x0008 | 5 | 0 |
+| 0x0010 | 2 | 0 |
+| 0x0020 | 1 | 0 |
+| 0x0040 | 6 | 0 |
+| 0x0080 | 114 | 0 |
+| 0x0100 | 17 | 0 |
+| 0x0200 | 13 | 0 |
+
+All 37 path-B widgets are class 4, and they are concentrated in dialogs
+(`FILERQ` 16, `DEFAULTD` 12, `SETUPE` 4, `SETTINGS` 2, `FILEOPT` 1, `hiscore` 1).
+
+**In `MAINWIN.WIN` — the in-game HUD — there is exactly one: widget 17,
+`int_main.imm` sprite 0, rect (0, 0, 0, 0).** That is the entire bottom bar (§27). The
+other 62 widgets carry authored virtual rects and are on path A.
+
+So the answer to "the same shape as the world, or 43 special cases" is: **the same shape as
+the world.** The HUD's placement problem is one widget and one conversion.
+
+### 48.5 The `.WIN` rects were generated from the 1600x1200 art, and match it 1:1
+
+Converting each class-4 widget's virtual rect to pixels with the stock factors reproduces
+its sprite's own pixel size, at **both** stock modes:
+
+| widget | asset | rect->px @1600x1200 | sprite | rect->px @1280x1024 | sprite |
+|---|---|---|---|---|---|
+| 34 | `mwspeed` s0 | 16 x 15 | **16 x 15** | 12 x 12 | 13 x 13 |
+| 35 | `mwspeed` s2 | 10 x 23 | 11 x **23** | 8 x 19 | 9 x 20 |
+| 39 | `mwspeed` s10 | 10 x 85 | 11 x **85** | 8 x 72 | 9 x 73 |
+| 7 | `eye` s1 | 58 x 29 | 59 x 28 | 46 x 24 | **47 x 24** |
+| 23 | `edictbut` | **198** x 67 | **198** x 75 | **158** x 57 | **158** x 64 |
+| 9 | `brempty` | 280 x 280 | 277 x 279 | 224 x 238 | 222 x 238 |
+
+The rects and the five art sets were produced by the same layout pass — consistent with
+§26's finding that x/w and y/h scale on the two axes independently. **The `.WIN` rect is a
+description of the art's natural size, not an independent design.** At 1920x1080 a rect that
+was 58 px wide becomes 70 px, while the sprite still holds 58 px of art.
+
+### 48.6 The destination is always a rect — but whether the blit STRETCHES is OPEN
+
+Every branch of the class-4 draw (`0x502660`, styles 0-5) pushes the same argument shape,
+built from `obj+0x0b/0x0d/0x0f/0x11` plus the parent origin:
+
+```
+push flag=1 ; push y2 ; push x2 ; push y1 ; push x1   (virtual units)
+```
+
+and `0x5002c0` converts that to a **pixel destination rectangle** with `0x5a0ffc`
+(width/3200) and `0x5a1004` (height/2400). So the blitter is handed a destination rect
+derived from the widget's virtual rect, in every case. That much is verified by reading.
+
+What that rect *means* then forks on `ds:0x5a0f8c`:
+
+* **`0x5a0f8c != 0`** (written next door to the §16 hardware gate at `0x52df35`, so almost
+  certainly the Direct3D flag): `0x500512` divides sprite extents by texture extents to build
+  UV steps and calls `0x4fb5c0` with a full textured-quad argument list. That is a **scaling**
+  blit — the sprite is stretched onto the destination rect.
+* **`0x5a0f8c == 0`**: `0x5005ba` takes `dest_w = x2-x1+1` and `dest_h = y2-y1+1` and copies
+  from a 128x128-tiled atlas with **no ratio arithmetic anywhere** — no `fdiv`, no call to
+  the generic rescaling blit `FUN_0052c5f0`, no reference to its ratio table `0x61bb30`
+  (§37). That reads as a **1:1 copy** into a rect that may be the wrong size.
+
+**This is a code reading, not an observation, and it is the single fact that decides the
+whole fix.** It is stated here as a prediction so it cannot be reinterpreted afterwards:
+
+> If the sprite blit scales to the destination rect, then 62 of 63 HUD widgets are already
+> correct at any resolution and the whole remaining fault is `FUN_00502510`. If it does not,
+> every widget needs art regenerated at the target pixel size.
+
+### 48.7 What was NOT established
+
+* Whether the blit stretches (48.6). The one thing that matters most.
+* Whether loose `data/` files really override archive entries (§24 is an inference).
+* The `.iNN` packet control byte for sparse rows is still undecoded (§26/§28), so
+  **horizontal** art rescaling remains impossible. Vertical rescaling by row selection is
+  solved. This matters: 1920x1080 and 2560x1440 both change the width from 1600, so any
+  derived art set for them needs the packet encoding that 1600x900 did not.
+* The 8 `.WIN` files in the legacy record format, and the 16 names in the `0x5a02ac` table
+  with no archive entry at all (`MAPSET`, `BUILDBUY`, `YEAREND`, `CITYSET`, ...). Neither
+  affects the HUD; both are recorded so the next session does not re-derive them.
+
+### 48.8 Correction to §27
+
+§27 measured `int_main.i16` sprite 0 as `x=0 y=695 1600x505`, `y + h = 1200`. That is the
+**stock** file and remains correct. The working copy in `app/data/px.PK2` now reads
+`x=0 y=521 1600x379` (48.0). §27's proposed in-archive two-byte edit at file offset
+333,392,557 was superseded by a full row-selection rescale of the same entry, and neither
+was recorded at the time.
+
+§27's conclusion "the fault is arithmetic, not art" is confirmed and now has its mechanism:
+`FUN_00502510` converts the sprite's stored pixels to virtual units with the live mode's
+scale factors, which is an identity round-trip, so the stored `y=695` is honoured verbatim
+on a 900- or 1080-tall screen.
+
+### 48.9 The widget's art asset hash is at `obj+0x66` — a clean, unique gate for any patch
+
+The parser tail at `0x4e8aa9` finishes each widget:
+
+```
+obj+0x38 = blob(0x0bbf)                 ; widget name
+obj+0x34 = blob(0x0bb8)
+obj+0x3c = blob(0x0bb9)                 ; ART ASSET NAME
+if (blob(0x0bb9) != 0)
+    obj+0x66 = strhash(obj+0x3c)        ; FUN_004ef7b0 -- the SAME hash as SS19
+obj+0x44 = idhash((byte)obj+0x2f)
+FUN_004e8710(window, widget)            ; link into the window's child list
+consume tag 0x7d3
+```
+
+So `obj+0x66` is the §19 name hash of the widget's art asset, and it is what
+`FUN_005025e0` tests before taking path B. Widget 17 therefore does take path B, confirmed
+rather than assumed.
+
+It is also the identifier any future patch should use, because it names *one asset* rather
+than a call site (§46's lesson):
+
+```
+hash("int_main.imm") = 0x91c87fda        hash("int_main.i16") = 0x6017ebbb
+hash("brempty.i16")  = 0x395573cb        hash("br00.i16")     = 0x10adfcbb
+```
+
+Which of the two `int_main` forms is live depends on whether §19's extension rewrite
+(`FUN_004ef300`, over the asset table at `[0x6136d0]`) reaches this string before it is
+hashed. **Not established — a patch must accept either, and log which it saw.**
+
+
+## 49. RECOMMENDATION: one run decides everything, and it is a shrink test
+
+§48 leaves exactly one question unanswered, and it inverts the entire ranking of fix
+options. Naming the options first, then the run.
+
+### The four options, costed against §48
+
+**Option 1 — runtime layout patch on path B (`FUN_00502510`).**
+Replace the two live scale factors with the art set's own. Slot 4's art is authored for
+1600x1200, and 3200/1600 = 2400/1200 = **2.0**, so the patch is literally "use 2.0 instead
+of `[0x5a0ff8]` and `[0x5a1000]`" at one call site. The bottom bar then computes:
+
+| | stored px | -> virtual | -> px @1920x1080 | -> px @2560x1440 |
+|---|---|---|---|---|
+| Y  | 695 | 1390 | 625 | 834 |
+| CX | 1600 | 3200 | **1920** | **2560** |
+| CY | 505 | 1010 | 455 | 606 |
+
+Full width, bottom-aligned, and 42.1% of screen height at every mode — the design
+proportion, automatically, with no art work and no per-resolution table.
+
+* Cost: four constants at one site, in the shape of the §47 fix.
+* Reach: all 37 path-B widgets, which is what you want, but the dialogs (`FILERQ`,
+  `DEFAULTD`) must be looked at, not assumed.
+* **Requires the blit to stretch.** If it does not, this moves and resizes a *rectangle*
+  while the art inside it stays 1600x505, and the result is a correctly-placed frame full of
+  cropped or smeared art.
+
+**Option 2 — a derived art set at exactly the target resolution.**
+This is the *correct* fix and needs **no code change at all**: if the loaded art is authored
+for the live mode, path A's rects already match it (48.5) and path B's stored pixels are the
+live screen's pixels by construction. Generate it from the user's own `.i16`, ship no art.
+
+* **Blocked.** Vertical rescaling is solved (row selection, §28). Horizontal is not — the
+  packet control byte is undecoded (§26). 1600x900 was possible *only* because the width was
+  unchanged; 1920x1080 and 2560x1440 both change it. Making this work means decoding the
+  packet encoding first, which is a whole investigation.
+* Second cost even once unblocked: 268 five-variant families, and the font assets alias
+  badly under nearest-neighbour (§28).
+
+**Option 3 — patch stored sprite coordinates.**
+Free for moving, not for resizing (§27, §28). Now strictly dominated by Option 1, which
+does the same job for the same widgets at runtime, per-mode, without touching a 372 MB
+archive — and which also fixes the *size*, which Option 3 cannot. §27 proposed this only
+because the asset had no name; 48.2 removed that constraint, and 48.3 removed the need.
+
+**Option 4 — composite upscale (Proton / gamescope).**
+Renderer-agnostic, needs nothing decoded, already half-demonstrated (§22). Gives a soft
+upscale of a 1600x1200 image rather than a native HUD. Remains the honest fallback and the
+interim answer if Options 1 and 2 both fail.
+
+### Ranking, conditional on the one open fact
+
+* **If the sprite blit stretches to its destination rect:** Option 1, and the HUD is close to
+  finished. 62 of 63 `MAINWIN` widgets are already correct at any resolution; one patch fixes
+  the 63rd.
+* **If it does not:** Option 1 is worthless, Option 2 is the only correct fix and is blocked
+  behind the packet encoding, and Option 4 is what ships in the meantime. The next
+  investigation would be the `.iNN` packet opcodes, not the HUD.
+
+**So do not write a fix yet.** This is the same shape as §33/§35: two "found it" calls have
+already died on a mechanism that looked right and was not measured.
+
+### The run: shrink a rect at a resolution that is already correct
+
+Growing is ambiguous (a stretched sprite and a stock sprite in a bigger box can look
+similar); shrinking is not. And doing it at **1280x1024**, a fully correct stock mode, means
+the rect is the only variable — no resolution change, no `WorldFix`, no art question.
+
+Detour the class-4 draw entry `0x502660` (`ecx` = the widget). Gate on **two** properties:
+
+1. we are in the class-4 draw (the detour site itself), and
+2. `(int16)[ecx+0x0f] == 560 && (int16)[ecx+0x11] == 560`.
+
+That rect is **unique to `MAINWIN.WIN`** across all 19 parsed `.WIN` files — 10 widgets, all
+the same bottom-right building panel stack (`br00`, `brempty`, and the class-0x40 sibling).
+Nothing in any dialog can be hit by accident. Then halve both to **280**.
+
+Log, before interpreting anything: the number of widgets matched, `[ecx+0x66]` for each, and
+the renderer (`ds:0x5a0f8c`) — §37 was burned by a run whose renderer was never recorded, and
+this test's answer *is* the renderer.
+
+Predictions, written before the run:
+
+* **The panel art halves in size** -> the blit stretches to the destination rect. Option 1 is
+  the fix; write it next session.
+* **The panel art stays its stock size and is cropped to the top-left quarter** -> the blit is
+  1:1. Option 1 is dead, Option 2 is blocked, and the next investigation is the packet
+  encoding.
+* **Nothing changes on screen** -> either the patch never fired (the log will say so — a
+  match count of 0 must be refused loudly) or `obj+0x0f/0x11` are re-derived after the draw
+  entry, which would itself be worth knowing.
+* **Behaviour differs between Software and Hardware 3D** -> expected, and the most likely
+  outcome given 48.6. Run it in **both**; that is the same run twice with F2, not two runs.
+
+Second, free observation while the game is up, since it costs nothing and settles 48.6 from
+the other direction: at **1920x1080**, is the HUD art *stretched* (blurry, correctly
+proportioned, wrong only in the bottom bar) or *stock-sized* (crisp, too small, adrift)?
+Crisp-and-small means 1:1; blurry-and-proportioned means stretching.
+
+### Also needing a decision, not a run
+
+`app/data/px.PK2` is not stock (48.0). It should be restored from
+`setup_tropico_2.1.0.14.exe` with `innoextract` before any further art measurement, and the
+`int_main.i16` rescale re-derived from a backup if it is still wanted. **Not done — it is a
+372 MB overwrite of the owner's game data.** And the result of whatever run that rescale was
+made for was never recorded; if the owner remembers what it looked like, it belongs in §27.
