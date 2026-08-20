@@ -540,7 +540,8 @@ static int install_iat_hook(void)
  *                  width would live). 'all' = every committed writable page.
  */
 static DWORD g_scan_delay, g_scan_find, g_scan_repl, g_scan_bits;
-static DWORD g_scan_lo, g_scan_hi, g_scan_repeat;
+static DWORD g_scan_lo, g_scan_hi, g_scan_repeat, g_scan_groups, g_scan_dwell;
+static int g_scan_group_only;
 /* Addresses recorded by the first sweep, then rewritten on a timer. Rescanning all
  * of memory every tick would be absurd; rewriting the hits it found is cheap.
  *
@@ -763,6 +764,42 @@ static DWORD WINAPI scan_thread(LPVOID unused)
         logf_("  [!] recorded only %d of %d hits -- the rest are NOT held. Narrow with Lo/Hi.",
               g_hits, n32);
     logf_("--- scan done ---");
+    /* ---- group cycling: one run, whole search -------------------------------
+     *
+     * Replacing ALL hits fixes the terrain (§33) but tells us nothing about WHICH
+     * one matters, and the heap re-lays-out between runs so an address is not a
+     * stable unit -- ruling out one range per run is expensive in your time.
+     *
+     * So bisect WITHIN a run. Split the hits into N groups; hold one group at the
+     * replacement value while every other hit is held at its original, dwell,
+     * then advance. The terrain visibly repairs itself while the guilty group is
+     * active. Watch the screen, note when it happens, read the group off the log.
+     *
+     * Holding the others at the ORIGINAL value matters: otherwise a group tested
+     * early stays patched and every later group looks like it works too.
+     */
+    if (g_scan_groups > 1 && g_hits) {
+        int per = (g_hits + (int)g_scan_groups - 1) / (int)g_scan_groups;
+        logf_("--- cycling %d hits in %d group(s) of <=%d, %us each ---",
+              g_hits, (int)g_scan_groups, per, (unsigned)g_scan_dwell);
+        for (int round = 0; ; round++) {
+            for (int g = 0; g < (int)g_scan_groups; g++) {
+                if (g_scan_group_only >= 0 && g != g_scan_group_only) continue;
+                int lo = g * per, hi = lo + per; if (hi > g_hits) hi = g_hits;
+                if (lo >= g_hits) continue;
+                logf_("[cycle] round %d, GROUP %d  (hits %d..%d)  VA %08x..%08x  -- watch now",
+                      round, g, lo, hi - 1,
+                      (unsigned)g_hit_addr[lo], (unsigned)g_hit_addr[hi - 1]);
+                for (DWORD t = 0; t < g_scan_dwell * 5; t++) {
+                    for (int i = 0; i < g_hits; i++)
+                        *g_hit[i] = (i >= lo && i < hi) ? g_scan_repl : g_scan_find;
+                    Sleep(200);
+                }
+            }
+            logf_("[cycle] round %d complete", round);
+        }
+    }
+
     if (g_watch_auto && g_hits) {
         AddVectoredExceptionHandler(1, watch_veh);
         watch_arm_all((DWORD *)(void *)g_hit_addr, g_hits);
@@ -797,6 +834,10 @@ static void maybe_start_scan(void)
     g_scan_repl = GetPrivateProfileIntA("Scan", "Replace", 0, path);
     g_scan_bits = GetPrivateProfileIntA("Scan", "Bits", 0, path);
     g_scan_repeat = GetPrivateProfileIntA("Scan", "Repeat", 0, path);
+    g_scan_groups = GetPrivateProfileIntA("Scan", "Groups", 0, path);
+    g_scan_dwell  = GetPrivateProfileIntA("Scan", "Dwell", 15, path);
+    g_scan_group_only = (int)GetPrivateProfileIntA("Scan", "GroupOnly", 0xffff, path);
+    if (g_scan_group_only == 0xffff) g_scan_group_only = -1;
     g_watch_auto = GetPrivateProfileIntA("Watch", "Auto", 0, path);
     g_watch_max  = GetPrivateProfileIntA("Watch", "Max", 60, path);
     g_scan_lo = (DWORD)GetPrivateProfileIntA("Scan", "Lo", 0, path);
