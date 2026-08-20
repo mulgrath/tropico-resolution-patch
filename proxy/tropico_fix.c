@@ -86,7 +86,9 @@ static int locate_sections(void)
  */
 static int patch_world_viewport(UINT match_w, UINT new_w);
 static int patch_hud_probe(void);
-static DWORD g_hud_mw, g_hud_mh, g_hud_nw, g_hud_nh;
+static DWORD g_hud_mw, g_hud_mh;
+static DWORD g_hud_ph_style[8], g_hud_ph_size[8];
+static int g_hud_nph;
 static DWORD g_hud_table_va;
 static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
                             UINT objm, UINT objw, UINT objhm, UINT objh, int force, UINT guard);
@@ -563,12 +565,16 @@ static void apply_patches(void)
         if (GetPrivateProfileIntA("HudProbe", "Enable", 0, ip)) {
             g_hud_mw = (DWORD)GetPrivateProfileIntA("HudProbe", "MatchW", 560, ip);
             g_hud_mh = (DWORD)GetPrivateProfileIntA("HudProbe", "MatchH", 560, ip);
-            g_hud_nw = (DWORD)GetPrivateProfileIntA("HudProbe", "NewW", 280, ip);
-            g_hud_nh = (DWORD)GetPrivateProfileIntA("HudProbe", "NewH", 280, ip);
-            if (g_hud_nw == g_hud_mw && g_hud_nh == g_hud_mh) {
-                logf_("[x] [hudprobe] %ux%u -> %ux%u is a NO-OP.  Refusing.",
-                      (unsigned)g_hud_mw, (unsigned)g_hud_mh,
-                      (unsigned)g_hud_nw, (unsigned)g_hud_nh);
+            for (int k = 0; k < 8; k++) {
+                char key[8], buf[32]; unsigned st, sz;
+                snprintf(key, sizeof key, "P%d", k);
+                GetPrivateProfileStringA("HudProbe", key, "", buf, sizeof buf, ip);
+                if (sscanf(buf, "%u,%u", &st, &sz) != 2) break;
+                g_hud_ph_style[g_hud_nph] = st; g_hud_ph_size[g_hud_nph] = sz; g_hud_nph++;
+            }
+            if (!g_hud_nph) {
+                logf_("[x] [hudprobe] no phases given (P0=style,size).  Refusing --"
+                      " a probe with nothing to cycle would apply cleanly and do nothing.");
                 fail++;
             } else if (patch_hud_probe()) ok++; else fail++;
         }
@@ -1756,120 +1762,143 @@ static const BYTE HUD_MASK[] = {
        1,0,0,0,0,    1,   1,    1,   1 };
 
 static volatile DWORD g_hud_calls, g_hud_hits;
-static volatile DWORD g_hud_hash[4];
-static DWORD g_hud_delay, g_hud_every;
+static volatile DWORD g_hud_hash[4], g_hud_live[4];
+/* written by the phase thread, read by the stub every draw */
+static volatile DWORD g_hud_style = 0, g_hud_cx = 0, g_hud_cy = 0;
+static DWORD g_hud_delay, g_hud_every, g_hud_dwell;
 
+/* s50.7 / s50.8: does class-4 STYLE 1 stretch the sprite onto the widget rect?
+ *
+ * Style 1 hands FUN_005002c0 a full destination rectangle built from the widget's
+ * virtual rect; style 0 -- which every shipped widget with art uses -- hands
+ * FUN_00501b90 a bare position.  If style 1 stretches, a HUD that scales needs no
+ * new art at all.  No shipped widget uses style 1, so this runs a path PopTop
+ * never ran; that is the whole risk, and it is why this is gated to six widgets
+ * in one panel.
+ *
+ * THE HAZARD, and why the third gate condition is not optional:
+ *   style 0, 0x502ac6:  mov eax,[esi+0x66] ; test eax,eax ; je   <- guarded
+ *   style 1, 0x5026c5:  mov eax,[esi+0x66] ; mov ecx,[eax]       <- NOT guarded
+ * Four of the nine 560x560 class-4 widgets in MAINWIN.WIN carry no art, so
+ * forcing style 1 on them dereferences NULL.  The stub refuses any widget whose
+ * obj+0x66 is zero.
+ *
+ * The gate matches the AUTHORED rect at obj+0x50/0x52 (saved by FUN_0052a9f0),
+ * not the live rect at obj+0x0f/0x11 -- otherwise the probe's own writes would
+ * move the target out from under it and the phases could not cycle.
+ */
 static int patch_hud_probe(void)
 {
     BYTE *at = find_unique_masked(HUD_SIG, HUD_MASK, sizeof HUD_SIG,
                                   g_text, g_textlen, "class-4 draw");
     if (!at) { logf_("[x] [hudprobe] class-4 draw signature not found"); return 0; }
-    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 128, MEM_COMMIT | MEM_RESERVE,
+    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 192, MEM_COMMIT | MEM_RESERVE,
                                       PAGE_EXECUTE_READWRITE);
     if (!stub) { logf_("[x] [hudprobe] VirtualAlloc failed"); return 0; }
 
-    DWORD a_calls = (DWORD)(SIZE_T)&g_hud_calls;
-    DWORD a_hits  = (DWORD)(SIZE_T)&g_hud_hits;
-    DWORD a_hash  = (DWORD)(SIZE_T)&g_hud_hash[0];
-    WORD  nw = (WORD)g_hud_nw, nh = (WORD)g_hud_nh;
-    int i = 0, f1, f2, f3;
+    DWORD a_calls=(DWORD)(SIZE_T)&g_hud_calls, a_hits=(DWORD)(SIZE_T)&g_hud_hits;
+    DWORD a_hash=(DWORD)(SIZE_T)&g_hud_hash[0], a_live=(DWORD)(SIZE_T)&g_hud_live[0];
+    DWORD a_style=(DWORD)(SIZE_T)&g_hud_style;
+    DWORD a_cx=(DWORD)(SIZE_T)&g_hud_cx, a_cy=(DWORD)(SIZE_T)&g_hud_cy;
+    int i=0, f1, f2, f3, f4;
 
-    stub[i++]=0x50;                                                  /* push eax            */
-    stub[i++]=0x52;                                                  /* push edx            */
-    stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_calls,4); i+=4; /* inc [g_hud_calls]   */
+    stub[i++]=0x50;                                                   /* push eax             */
+    stub[i++]=0x52;                                                   /* push edx             */
+    stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_calls,4); i+=4;  /* inc [g_hud_calls]    */
 
-    stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x41; stub[i++]=0x0f;  /* movsx eax,w[ecx+0xf]*/
-    stub[i++]=0x3d; memcpy(stub+i,&g_hud_mw,4); i+=4;                /* cmp eax,MatchW      */
-    stub[i++]=0x75; f1=i++;                                          /* jne skip            */
-    stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x41; stub[i++]=0x11;  /* movsx eax,w[ecx+0x11]*/
-    stub[i++]=0x3d; memcpy(stub+i,&g_hud_mh,4); i+=4;                /* cmp eax,MatchH      */
-    stub[i++]=0x75; f2=i++;                                          /* jne skip            */
+    stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x41; stub[i++]=0x50;   /* movsx eax,w[ecx+0x50]*/
+    stub[i++]=0x3d; memcpy(stub+i,&g_hud_mw,4); i+=4;                 /* cmp eax,MatchW       */
+    stub[i++]=0x75; f1=i++;                                           /* jne skip             */
+    stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x41; stub[i++]=0x52;   /* movsx eax,w[ecx+0x52]*/
+    stub[i++]=0x3d; memcpy(stub+i,&g_hud_mh,4); i+=4;                 /* cmp eax,MatchH       */
+    stub[i++]=0x75; f2=i++;                                           /* jne skip             */
+    stub[i++]=0x83; stub[i++]=0x79; stub[i++]=0x66; stub[i++]=0x00;   /* cmp d[ecx+0x66],0    */
+    stub[i++]=0x74; f3=i++;                                           /* je  skip  (NO ART)   */
 
-    /* record the first four matched widgets' ART ASSET name hashes (obj+0x66,
-     * s48.9) so the log proves WHICH widgets were hit, not merely how many. */
-    stub[i++]=0xa1; memcpy(stub+i,&a_hits,4); i+=4;                  /* mov eax,[g_hud_hits]*/
-    stub[i++]=0x83; stub[i++]=0xf8; stub[i++]=0x04;                  /* cmp eax,4           */
-    stub[i++]=0x73; f3=i++;                                          /* jae nostore         */
-    stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x66;                  /* mov edx,[ecx+0x66]  */
+    /* record the first four: resource pointer, and the LIVE rect as seen on entry
+     * (obj+0x0f and obj+0x11 are adjacent WORDs, so one dword is CX | CY<<16) --
+     * which shows the previous phase's write actually persisted. */
+    stub[i++]=0xa1; memcpy(stub+i,&a_hits,4); i+=4;                   /* mov eax,[g_hud_hits] */
+    stub[i++]=0x83; stub[i++]=0xf8; stub[i++]=0x04;                   /* cmp eax,4            */
+    stub[i++]=0x73; f4=i++;                                           /* jae nostore          */
+    stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x66;                   /* mov edx,[ecx+0x66]   */
     stub[i++]=0x89; stub[i++]=0x14; stub[i++]=0x85;
-    memcpy(stub+i,&a_hash,4); i+=4;                                  /* mov [hash+eax*4],edx*/
-    stub[f3] = (BYTE)(i - f3 - 1);                                   /* nostore:            */
-    stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_hits,4); i+=4;  /* inc [g_hud_hits]    */
+    memcpy(stub+i,&a_hash,4); i+=4;                                   /* mov [hash+eax*4],edx */
+    stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x0f;                   /* mov edx,[ecx+0x0f]   */
+    stub[i++]=0x89; stub[i++]=0x14; stub[i++]=0x85;
+    memcpy(stub+i,&a_live,4); i+=4;                                   /* mov [live+eax*4],edx */
+    stub[f4] = (BYTE)(i - f4 - 1);                                    /* nostore:             */
+    stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_hits,4); i+=4;   /* inc [g_hud_hits]     */
 
-    if (g_hud_nw) {
-        stub[i++]=0x66; stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x0f;
-        memcpy(stub+i,&nw,2); i+=2;                                  /* mov w[ecx+0xf],NewW */
-        stub[i++]=0x66; stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x11;
-        memcpy(stub+i,&nh,2); i+=2;                                  /* mov w[ecx+0x11],NewH*/
-    }
+    stub[i++]=0xa1; memcpy(stub+i,&a_cx,4); i+=4;                     /* mov eax,[g_hud_cx]   */
+    stub[i++]=0x66; stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x0f;   /* mov w[ecx+0x0f],ax   */
+    stub[i++]=0xa1; memcpy(stub+i,&a_cy,4); i+=4;                     /* mov eax,[g_hud_cy]   */
+    stub[i++]=0x66; stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x11;   /* mov w[ecx+0x11],ax   */
+    stub[i++]=0xa1; memcpy(stub+i,&a_style,4); i+=4;                  /* mov eax,[g_hud_style]*/
+    stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x7c;                   /* mov [ecx+0x7c],eax   */
 
-    stub[f1] = (BYTE)(i - f1 - 1);                                   /* skip:               */
-    stub[f2] = (BYTE)(i - f2 - 1);
-    stub[i++]=0x5a;                                                  /* pop edx             */
-    stub[i++]=0x58;                                                  /* pop eax             */
-    stub[i++]=0x51; stub[i++]=0x53; stub[i++]=0x56;                  /* push ecx/ebx/esi    */
-    stub[i++]=0x8b; stub[i++]=0xf1;                                  /* mov esi,ecx         */
+    stub[f1]=(BYTE)(i-f1-1); stub[f2]=(BYTE)(i-f2-1); stub[f3]=(BYTE)(i-f3-1);  /* skip: */
+    stub[i++]=0x5a;                                                   /* pop edx              */
+    stub[i++]=0x58;                                                   /* pop eax              */
+    stub[i++]=0x51; stub[i++]=0x53; stub[i++]=0x56;                   /* push ecx/ebx/esi     */
+    stub[i++]=0x8b; stub[i++]=0xf1;                                   /* mov esi,ecx          */
     stub[i++]=0xe9;
-    { LONG back = (LONG)(SIZE_T)(at + 5) - (LONG)(SIZE_T)(stub + i + 4);
-      memcpy(stub+i,&back,4); i+=4; }
+    { LONG back=(LONG)(SIZE_T)(at+5)-(LONG)(SIZE_T)(stub+i+4); memcpy(stub+i,&back,4); i+=4; }
 
     DWORD old;
     if (!VirtualProtect(at, 5, PAGE_EXECUTE_READWRITE, &old)) {
-        logf_("[x] [hudprobe] VirtualProtect failed"); return 0;
-    }
-    at[0] = 0xe9;
-    { LONG rel = (LONG)(SIZE_T)stub - (LONG)(SIZE_T)(at + 5);
-      memcpy(at + 1, &rel, 4); }
+        logf_("[x] [hudprobe] VirtualProtect failed"); return 0; }
+    at[0]=0xe9;
+    { LONG rel=(LONG)(SIZE_T)stub-(LONG)(SIZE_T)(at+5); memcpy(at+1,&rel,4); }
     VirtualProtect(at, 5, old, &old);
 
-    if (g_hud_nw)
-        logf_("[+] [hudprobe] class-4 draw at %p (stub %p): rect %ux%u -> %ux%u,"
-              " virtual units", at, stub,
-              (unsigned)g_hud_mw, (unsigned)g_hud_mh, (unsigned)g_hud_nw, (unsigned)g_hud_nh);
-    else
-        logf_("[+] [hudprobe] class-4 draw at %p (stub %p): DRY RUN, counting %ux%u"
-              " widgets only, no writes", at, stub,
-              (unsigned)g_hud_mw, (unsigned)g_hud_mh);
+    logf_("[+] [hudprobe] class-4 draw at %p (stub %p, %d bytes): targeting widgets whose"
+          " AUTHORED rect is %ux%u and which HAVE art (obj+0x66 != 0)",
+          at, stub, i, (unsigned)g_hud_mw, (unsigned)g_hud_mh);
+    for (int k = 0; k < g_hud_nph; k++)
+        logf_("[+]   phase %d: style %lu, rect %lux%lu virtual", k,
+              (unsigned long)g_hud_ph_style[k],
+              (unsigned long)g_hud_ph_size[k], (unsigned long)g_hud_ph_size[k]);
     return 1;
 }
 
-/* The renderer and the art set are what this run's answer depends on, so they are
- * logged every tick and not merely at startup.  s37 lost two runs to an instrument
- * that recorded the resolution but not the renderer, and a run that lands on slot
- * 4 instead of slot 3 answers a different question while looking identical. */
 static DWORD WINAPI hudprobe_thread(LPVOID unused)
 {
     (void)unused;
     Sleep(g_hud_delay * 1000);
-    DWORD last_calls = 0xffffffff, last_hits = 0xffffffff;
+    int ph = -1; DWORD next = 0;
     for (int t = 0;; t++) {
+        if (GetTickCount() >= next) {
+            ph = (ph + 1) % g_hud_nph;
+            g_hud_style = g_hud_ph_style[ph];
+            g_hud_cx = g_hud_cy = g_hud_ph_size[ph];
+            next = GetTickCount() + g_hud_dwell * 1000;
+            logf_("  [hudprobe] ===> PHASE %d: style %lu, rect %lux%lu  (%s)", ph,
+                  (unsigned long)g_hud_style, (unsigned long)g_hud_cx, (unsigned long)g_hud_cy,
+                  g_hud_style == 0 && g_hud_cx == g_hud_mw ? "BASELINE, should look stock"
+                : g_hud_style == 0 ? "s50: expect a CLIPPED corner at full scale"
+                : g_hud_cx == g_hud_mw ? "style 1 at natural size"
+                : "DISCRIMINATOR: whole image at half size = IT STRETCHES");
+        }
         DWORD w = wfb_read16(0x60c18c), h = wfb_read16(0x60c18e);
-        DWORD hw = wfb_read32(g_hud_table_va - 0x14);        /* 0x5a0f8c */
+        DWORD hw = wfb_read32(g_hud_table_va - 0x14);
         DWORD cfg = wfb_read32(0x612fec), slot = 0xffffffff;
         if (cfg && !IsBadReadPtr((void *)(SIZE_T)cfg, 0x1c))
             memcpy(&slot, (BYTE *)(SIZE_T)(cfg + 0x18), 4);
         static const char *suf[5] = { ".i06", ".i08", ".i10", ".i12", ".i16" };
-        logf_("  [hudprobe] t=%us  screen %ux%u  slot %ld art %s  renderer %s (0x5a0f8c=%lu)"
-              "  class4 draws=%lu  matches=%lu",
-              (unsigned)(g_hud_delay + t * g_hud_every), (unsigned)w, (unsigned)h,
-              (long)(int)slot, (slot < 5 ? suf[slot] : "?"),
-              hw ? "HARDWARE 3D" : "SOFTWARE", (unsigned long)hw,
-              (unsigned long)g_hud_calls, (unsigned long)g_hud_hits);
-        if (g_hud_hits && g_hud_hits != last_hits)
-            logf_("  [hudprobe]   matched asset hashes: %08lx %08lx %08lx %08lx"
-                  "  (br00.i16=10adfcbb brempty.i16=395573cb, 0=widget has no art)",
-                  (unsigned long)g_hud_hash[0], (unsigned long)g_hud_hash[1],
-                  (unsigned long)g_hud_hash[2], (unsigned long)g_hud_hash[3]);
-        /* A probe that fired zero times must say so loudly rather than let a
-         * blank screenshot be read as "no change, therefore 1:1". */
-        if (g_hud_calls == last_calls && g_hud_calls == 0)
-            logf_("  [hudprobe]   *** ZERO class-4 draws seen -- the detour is NOT"
-                  " running.  Do not interpret the screen. ***");
-        else if (g_hud_calls && !g_hud_hits)
-            logf_("  [hudprobe]   *** detour IS running but NOTHING matched %ux%u."
-                  "  Wrong window, or the rect is not what MAINWIN.WIN says. ***",
+        logf_("  [hudprobe] ph=%d  screen %ux%u  slot %ld art %s  renderer %s  "
+              "class4 draws=%lu  matches=%lu  live rect on entry: %lu x %lu",
+              ph, (unsigned)w, (unsigned)h, (long)(int)slot,
+              (slot < 5 ? suf[slot] : "?"), hw ? "HARDWARE 3D" : "SOFTWARE",
+              (unsigned long)g_hud_calls, (unsigned long)g_hud_hits,
+              (unsigned long)(g_hud_live[0] & 0xffff), (unsigned long)(g_hud_live[0] >> 16));
+        if (g_hud_calls == 0)
+            logf_("  [hudprobe]   *** ZERO class-4 draws -- the detour is NOT running."
+                  "  Do not interpret the screen. ***");
+        else if (!g_hud_hits)
+            logf_("  [hudprobe]   *** detour runs but NOTHING matched an authored %ux%u"
+                  " rect with art.  obj+0x50/0x52 is not the saved rect. ***",
                   (unsigned)g_hud_mw, (unsigned)g_hud_mh);
-        last_calls = g_hud_calls; last_hits = g_hud_hits;
         Sleep(g_hud_every * 1000);
     }
 }
@@ -1884,8 +1913,11 @@ static void maybe_start_hudprobe(void)
         return;
     }
     g_hud_delay = GetPrivateProfileIntA("HudProbe", "Delay", 20, path);
-    g_hud_every = GetPrivateProfileIntA("HudProbe", "Every", 10, path);
-    if (!g_hud_every) g_hud_every = 10;
+    g_hud_every = GetPrivateProfileIntA("HudProbe", "Every", 5, path);
+    if (!g_hud_every) g_hud_every = 5;
+    g_hud_dwell = GetPrivateProfileIntA("HudProbe", "Dwell", 15, path);
+    if (!g_hud_dwell) g_hud_dwell = 15;
+    if (!g_hud_nph) { logf_("[x] [hudprobe] no phases -- thread not started"); return; }
     CreateThread(NULL, 0, hudprobe_thread, NULL, 0, NULL);
 }
 
