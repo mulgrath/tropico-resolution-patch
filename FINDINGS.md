@@ -3855,3 +3855,66 @@ a real partial improvement over a bar hanging off the bottom of the screen.
 
 It also means the remaining gap is precisely the one style 1 was supposed to close: the art is
 1600x505 and the slot wants 1920x455.
+
+## 58. Run Q: the fifth mutation of a write-once field — fixing the class, not the instance
+
+Owner: "the chrome vanished again and didn't come back."
+
+### 58.1 Diagnosis
+
+Run Q's phase 1 zeroed `obj+0x0b`/`obj+0x0d` to test whether the style-1 blit adds the
+sprite's own offset. Those fields are **write-once**: `FUN_005025e0` reaches the path-B branch
+only while the live rect is zero, so after `FUN_00502510` has run they are never rewritten
+(§53.2). Zeroing the position was therefore permanent:
+
+```
+draw y = obj+0x0d + obj+0x8c = 0 + (-1390) = -1390 virtual = -626 px
+clip   = 625..1079 px
+```
+
+No intersection, so the bar is invisible — and nothing recomputes it, so it stays invisible
+through every later phase. "Didn't come back" is precisely that.
+
+### 58.2 The pattern, stated plainly
+
+This is the fifth failure of one shape in this session:
+
+| run | what I did | why it failed |
+|---|---|---|
+| §50.4 | measured a field consumed by class-4 **style 1** | no shipped widget uses style 1 |
+| §51.1 | tested the stretch under **Software** | only the D3D branch can stretch |
+| §53 | multiplied the rect **every draw** | the engine computes it once — it compounded |
+| §55 | read a factor logged **20 s later** | it was the initialiser when consumed |
+| §58 | zeroed a **write-once** field | permanent, unrecoverable |
+
+§53.2 already wrote the rule — "before writing a field every frame, establish how often the
+engine writes it" — and run Q broke it anyway. Restating the rule a sixth time is not a fix.
+
+### 58.3 The fix is structural: make the field no longer write-once
+
+`FUN_005025e0` chooses path A or path B by testing the **live** rect:
+
+```asm
+5025e3:  cmp WORD PTR [esi+0x0f],0     ; live CX
+5025e8:  je  5025f1                    ; -> path B
+5025ea:  cmp WORD PTR [esi+0x11],0     ; live CY
+5025ef:  jne 502638                    ; -> path A
+```
+
+Pointing those two tests at the **authored** rect at `+0x50`/`+0x52` — the copy `FUN_0052a9f0`
+saves at construction — changes the semantics exactly where it should:
+
+* path-A widgets (authored rect non-zero) still take path A, untouched;
+* path-B widgets (authored rect `0x0`) take path B **every frame**.
+
+Two displacement bytes, `0x0f -> 0x50` and `0x11 -> 0x52`, verified offline to disassemble as
+intended. The guard pattern also occurs at `0x518076` in class 1's pre-draw, so it is located
+from the verified-unique `FUN_00502510` anchor at `+0xd3` rather than by searching.
+
+The consequence is what matters: **every edit made in the draw is now transient by
+construction.** It cannot accumulate (§53) and it cannot persist (§58). The instrument stops
+being able to damage the thing it measures, which is the actual lesson of the five rows above.
+
+It is also more faithful to the design: a widget with no authored rect means "derive my rect
+from the art", and deriving it once and keeping it forever is what made the stock bar rigid
+across mode changes in the first place.

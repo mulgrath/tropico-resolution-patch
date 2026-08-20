@@ -86,6 +86,7 @@ static int locate_sections(void)
  */
 static int patch_world_viewport(UINT match_w, UINT new_w);
 static int patch_hud_probe(void);
+static int patch_pathb_recompute(BYTE *layout_fn);
 static int patch_chrome_scale(DWORD table_va);
 static DWORD g_hud_mw, g_hud_mh;
 static int g_chr_enable;
@@ -1817,7 +1818,7 @@ static DWORD WINAPI chrome_factor_thread(LPVOID unused)
             if (sl != last) {
                 g_chr_fx = 3200.0f / (float)CHR_ART_W[sl];
                 g_chr_fy = 2400.0f / (float)CHR_ART_H[sl];
-                g_chr_dirty = 1;
+                g_chr_dirty = 0;  /* superseded by patch_pathb_recompute */
                 clear_at = GetTickCount() + 500;
                 logf_("  [chrome] slot %lu (art %ux%u) -> factors %.4f / %.4f;"
                       " path-B rects invalidated for 500 ms so they recompute",
@@ -1890,6 +1891,47 @@ static int fix_short(BYTE *stub, int f, int i, const char *what)
 static const BYTE CSCALE_SIG[] = { 0x83,0xec,0x14, 0x56, 0x8b,0xf1,
                                    0x8b,0x86,0x90,0x00,0x00,0x00, 0x85,0xc0, 0x0f,0x84 };
 
+/* s58: make the path-B rect RECOMPUTE every frame.
+ *
+ * FUN_005025e0 decides path A vs path B by testing the LIVE rect:
+ *      cmp WORD [esi+0x0f],0 ; je pathB ; cmp WORD [esi+0x11],0 ; jne pathA
+ * so once FUN_00502510 has written a non-zero rect the widget never revisits
+ * path B and the rect is write-once (s53.2).  Every destructive edit this project
+ * has made -- run M's compounding multiply, run Q's zeroed position -- has been a
+ * mutation of a write-once field, and each one was permanent because nothing
+ * recomputes.  That is five failures of one shape.
+ *
+ * Testing the AUTHORED rect at +0x50/+0x52 instead of the live one at +0x0f/+0x11
+ * fixes the class rather than the instance:
+ *   - path-A widgets (authored rect non-zero) still take path A, unchanged;
+ *   - path-B widgets (authored rect 0x0) take path B EVERY FRAME.
+ * The rect is then recomputed from the sprite each frame, so any edit made in the
+ * draw is transient by construction and cannot accumulate or persist.  It is also
+ * closer to what a path-B widget means: "derive my rect from the art", not
+ * "derive it once and keep it forever".
+ *
+ * Two displacement bytes.  The guard pattern also occurs at 0x518076 in class 1's
+ * pre-draw, so it is located from the verified-unique FUN_00502510 anchor rather
+ * than by searching for it. */
+static int patch_pathb_recompute(BYTE *layout_fn)
+{
+    static const BYTE G[13] = { 0x66,0x83,0x7e,0x0f,0x00, 0x74,0x07,
+                                0x66,0x83,0x7e,0x11,0x00, 0x75 };
+    BYTE *g = layout_fn + 0xd3;
+    if (memcmp(g, G, sizeof G) != 0) {
+        logf_("[x] [chrome] path-A/B guard not where expected (%p) -- REFUSING", g);
+        return 0;
+    }
+    BYTE lo = 0x50, hi = 0x52;
+    if (!poke(g + 3, &lo, 1) || !poke(g + 10, &hi, 1)) {
+        logf_("[x] [chrome] path-A/B guard not writable"); return 0;
+    }
+    logf_("[+] [chrome] path-A/B guard at %p now tests the AUTHORED rect (+0x50/+0x52)"
+          " instead of the live one -- path-B widgets recompute every frame, so edits"
+          " cannot persist", g);
+    return 1;
+}
+
 static int patch_chrome_scale(DWORD table_va)
 {
     BYTE *fn = find_unique(CSCALE_SIG, sizeof CSCALE_SIG, g_text, g_textlen,
@@ -1916,7 +1958,7 @@ static int patch_chrome_scale(DWORD table_va)
     }
     logf_("[+] [chrome] path-B layout at %p: all 6 scale operands repointed from the"
           " live mode to the art set's design space", fn);
-    return 1;
+    return patch_pathb_recompute(fn);
 }
 
 static int patch_hud_probe(void)
