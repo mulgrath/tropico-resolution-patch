@@ -3219,3 +3219,137 @@ the bottom-right panel stack, the speed buttons, the border frame — and ignore
 art suffix in use alongside the renderer. §37 lost two runs to an instrument that recorded
 the resolution but not the renderer; here a run that lands on slot 4 instead of slot 3 would
 answer a different question while looking identical in the log.
+
+## 50. The rect is a CLIP, not a destination — the engine never scales HUD art
+
+Owner ran the §49 probe. The run is valid on every axis the log records, the result is
+decisive, and **the test I designed was the wrong instrument for the widgets it targeted.**
+Both of those matter, so both are below.
+
+### 50.1 The run was clean
+
+```
+[+] [hudprobe] class-4 draw at 00502660 (stub 014e0000): rect 560x560 -> 280x280
+[*] done: 6 applied, 0 failed
+  [hudprobe] t=30s  screen 1280x1024  slot 3 art .i12  renderer SOFTWARE (0x5a0f8c=0)   matches=9
+  [hudprobe] t=50s  screen 1280x1024  slot 3 art .i12  renderer HARDWARE 3D (0x5a0f8c=1) matches=9
+```
+
+* **slot 3, art `.i12`** for the whole measured window — the mode under test was reached and
+  the stock art set was in use, so nothing here depends on §48.0's archive question.
+* **`matches` = 9 and never climbed.** Ten widgets in `MAINWIN.WIN` carry a 560x560 rect but
+  one of them (w8) is class 0x40, which this detour does not touch — so 9 is exactly right,
+  and the plateau confirms the rect persists in the object as predicted.
+* **`0x5a0f8c` is confirmed to be the renderer flag**, reading 0 under Software and 1 under
+  Hardware 3D and tracking the F2 toggle. That much of §48.6 was right.
+
+### 50.2 What the owner saw
+
+| configuration | the `brempty` placeholder circle |
+|---|---|
+| Software | **top-left quarter** of the circle, at full size; the rest of the panel showed stale render data |
+| Hardware 3D, reduce-shifting **off** | identical — top-left quarter, stale surroundings |
+| Hardware 3D, reduce-shifting **on** | the **whole** circle, at normal size; stale data gone |
+
+The zoomed detail preview itself (widget 3, class 0x10) was correct throughout — it is not
+class 4 and the detour does not touch it, which is the control working.
+
+### 50.3 The answer: the widget rect is a clip rectangle
+
+`FUN_0052c1e0` converts the widget's rect into a clip/invalidation rectangle in virtual
+units and hands it to `FUN_004e6dd0`, §37's virtual-coordinate clip setter:
+
+```c
+FUN_004e6dd0(obj->CX + obj->X - 1 + parent_x,
+             obj->CY + obj->Y - 1 + parent_y, 0);
+```
+
+And the draw the MAINWIN widgets actually take — class 4, **style 0** (`obj+0x7c == 0`,
+measured off every one of them in `MAINWIN.WIN`) — ends at `0x502ac6` and calls
+`FUN_00501b90` with a **position and nothing else**:
+
+```
+x = (int16)obj+0x0b + parent_x + obj+0x88
+y = (int16)obj+0x0d + parent_y + obj+0x8c
+```
+
+`FUN_00501b90` converts those two numbers from virtual to pixels (`*0x5a0ffc`, `*0x5a1004`)
+and adds the viewport origin. **It takes no width, no height and no ratio.** The sprite is
+blitted at its own stored pixel size, always.
+
+So halving `obj+0x0f/0x11` halved the *clip*, not a destination — which is precisely the
+observation: a full-scale sprite showing through a quarter-size hole, with everything outside
+the shrunken invalidation rect left stale.
+
+**Reduce-shifting is the confirming leg, not an anomaly.** §44 established that it forces a
+full-screen copy. With the whole screen repainted, the per-widget dirty rect stops mattering,
+so the shrink has no visible effect and the circle comes back whole *at full size*. A
+destination rect could not behave that way — shrinking a destination would still shrink the
+image no matter how the frame was presented. Two independent legs, one conclusion.
+
+### 50.4 THE ANSWER TO §49, and it is the unwelcome one
+
+> **The engine does not scale HUD art. The `.WIN` rect only clips.**
+
+This holds in both renderers, and §48.6's reading — "the D3D branch stretches, the software
+branch is 1:1" — was about `FUN_005002c0`, which is reached only from class-4 **style 1**.
+No widget in any shipped `.WIN` file uses style 1 (149 are style 0, 91 are style 5, and that
+is all of them). I traced the branch the widgets do not take, noted in §48.6 that style 0
+"falls through to `0x502a0b`", and then designed a test around the branch I had read rather
+than the branch that runs.
+
+That is the §33/§35 shape once more, and worth naming precisely: the error was not a wrong
+reading, it was building an instrument on a path I had explicitly noticed was not the live
+one. **The rule this adds: before measuring a field, prove the code that consumes it is the
+code that runs — the same standard §46 already applies to call sites.**
+
+The run was still decisive, because a clip and a destination are distinguishable by exactly
+this experiment. It answered a better question than the one it was aimed at.
+
+### 50.5 Correction to §48.9 — `obj+0x66` is a pointer, not the §19 hash
+
+§48.9 claimed `FUN_004ef7b0` was "the SAME hash as §19". It is not, and the probe caught it:
+the logged values were `072f5b99` (both `br00` widgets), `00000000` (the widget with no art)
+and `072f5cb9` (`brempty`), which match **none** of `br00.imm/.i06/.i12/.i16` under the §19
+hash.
+
+`FUN_004ef7b0(s)` is a two-instruction thunk to `FUN_004ef4b0(0, s)`, a resource-intern
+function. `obj+0x66` is a **pointer to an interned resource object**, and `[obj+0x66]` is the
+sprite container base — which is exactly how `FUN_00502510` and the draws use it
+(`mov eax,[esi+0x66]; mov ecx,[eax]`). Two widgets naming the same asset share the pointer,
+which is why `br00`'s two widgets logged identically.
+
+It is still a good runtime identifier for a patch — just not a compile-time constant. A patch
+must intern the name itself or compare `[obj+0x66]` against a container base, not against a
+hash. §48.9's "which of the two `int_main` forms is live" question is void: neither.
+
+### 50.6 Revised options
+
+* **Option 1, the runtime layout patch on `FUN_00502510` — DEAD as a general fix.** There is
+  no scaling to exploit. Applied to the bottom bar it would still fix *placement* (bottom
+  aligned, correct proportion of the screen height) while leaving the art 1600 px wide on a
+  1920 screen, i.e. 320 px of bare edge. That is a real partial improvement and cheap, but it
+  is not the fix and must not be sold as one.
+* **Option 2, a derived art set at the target resolution — now the ONLY correct fix**, and
+  unchanged in cost: vertical rescaling is solved (§28), horizontal is not (§26's packet
+  control byte). 1920x1080 and 2560x1440 both change the width from 1600.
+* **Option 4, composite upscale (Proton/gamescope) — the fallback**, and the only thing that
+  works today at an arbitrary mode.
+
+**So the next investigation is the `.iNN` packet encoding, not the HUD.** The HUD pipeline is
+now fully mapped and holds no more surprises; what stands between here and a native
+widescreen HUD is one undecoded byte-level format.
+
+### 50.7 One lead, recorded and NOT recommended yet
+
+Class-4 **style 1** (`obj+0x7c = 1`, from `.WIN` record +0x42) passes a full destination
+rectangle to `FUN_005002c0`, whose Direct3D branch builds texture-coordinate steps from
+source/destination ratios — i.e. it appears to stretch. Style 1 is **never used by any
+shipped widget**, so forcing it would be running a path PopTop never ran, and its software
+branch showed no ratio arithmetic at all, so it would likely be Hardware-3D-only — a renderer
+the owner does not prefer and which §23 shows is already fragile.
+
+It is cheap to test (one `.WIN` record byte, or one store in the class-4 deserialiser) and it
+is the only route to a scaled HUD that needs no art. But it is a long shot on an unexercised
+path, and it should be tried only after the packet encoding is understood, so that failing at
+it does not leave the project with nothing.

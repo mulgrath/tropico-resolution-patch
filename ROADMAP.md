@@ -93,6 +93,14 @@ XWayland emulates rather than switches modes, so the game sits top-left with bla
 
 ## Priority 3 — the HUD mod (tier 3)
 
+**§50 — ANSWERED: the engine never scales HUD art.** The `.WIN` rect is a *clip*
+rectangle (`FUN_0052c1e0` -> `FUN_004e6dd0`), and the class-4 style-0 draw that every HUD
+widget uses passes a **position only** to `FUN_00501b90` — no width, no height, no ratio.
+Confirmed by the §49 shrink run in both renderers, and cross-confirmed by reduce-shifting
+restoring the whole image at full size. So a runtime layout patch cannot fix the HUD, and a
+**derived art set at the target resolution is the only correct route** — which makes the
+`.iNN` packet control byte (§26) the next investigation, not the HUD itself.
+
 **§48/§49 — the layout pipeline is now decoded.** `.WIN` files are a tagged stream of
 widget records carrying x/y/w/h in the virtual 3200x2400 space; `tools/tropico-win.py`
 parses 19 of 27 archived files to exact EOF. Widgets whose stored rect is non-zero scale to
