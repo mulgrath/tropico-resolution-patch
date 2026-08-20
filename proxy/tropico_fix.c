@@ -328,6 +328,47 @@ static int ini_override(mode_t *m)
     return 1;
 }
 
+/* ------------------------------------------------- the world-extent clamp (FINDINGS 35)
+ *
+ * Found by decompiling, after byte-searching for 1600 failed six different ways:
+ * the clamp is not ON 1600. It is on 0xC80 = 3200 and 0x960 = 2400 -- exactly
+ * TWICE the stock slot-4 mode, because the coordinates here are doubled (the very
+ * next instructions are `sub eax,[0x599ff0]` then `shl eax,1`).
+ *
+ *   46b146  3d 80 0c 00 00     cmp eax,0xc80      ; width  > 3200 ?
+ *   46b14e  7e 05              jle +5
+ *   46b150  b8 80 0c 00 00     mov eax,0xc80      ; ...clamp to 3200  (= 1600 px)
+ *   46b167  81 fe 60 09 00 00  cmp esi,0x960      ; height > 2400 ?
+ *   46b170  7e 05              jle +5
+ *   46b172  be 60 09 00 00     mov esi,0x960      ; ...clamp to 2400  (= 1200 px)
+ *
+ * That is why the terrain stopped at exactly 1600 on both a 1680- and a 1920-wide
+ * screen (FINDINGS 31): the clamp is absolute, not relative to the mode.
+ *
+ * Raise both to twice the mode actually selected -- computed, not hardcoded, so it
+ * stays correct for any slot-4 geometry.
+ */
+static const BYTE VCLAMP_SIG[] = {
+    0x0f,0x9c,0xc1,0x49,0x23,0xc1,0x3d, 0,0,0,0,
+    0x89,0x45,0x18,0x7e,0x05,0xb8,      0,0,0,0,
+    0x8b,0x4d,0x1c,0x33,0xd2,0x85,0xc9,0x0f,0x9c,0xc2,0x89,0x45,0x18,
+    0x4a,0x23,0xd1,0x8b,0xf2,0x81,0xfe, 0,0,0,0,
+    0x89,0x75,0x1c,0x7e,0x05,0xbe,      0,0,0,0,
+    0x89,0x75,0x1c
+};
+static const BYTE VCLAMP_MASK[] = {
+    1,1,1,1,1,1,1, 0,0,0,0,
+    1,1,1,1,1,1,   0,0,0,0,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1, 0,0,0,0,
+    1,1,1,1,1,1,   0,0,0,0,
+    1,1,1
+};
+#define VCLAMP_W1 7
+#define VCLAMP_W2 17
+#define VCLAMP_H1 41
+#define VCLAMP_H2 51
+
 /* ----------------------------------------------------------------- the patcher */
 
 static LONG g_done = 0;
@@ -428,6 +469,21 @@ static void apply_patches(void)
             int b = poke(chain + CHAIN_W_OFF, &m.w, 4) && poke(chain + CHAIN_H_OFF, &m.h, 4);
             if (a && b) { logf_("[+] slot 4 -> %lux%lu  (data table %p, code chain %p)", m.w, m.h, tbl, chain); ok++; }
             else { logf_("[x] slot 4: VirtualProtect failed"); fail++; }
+            /* The world-extent clamp must move with the mode or the terrain still
+             * stops at 1600 no matter how wide the screen is (FINDINGS 29-35). */
+            BYTE *vc = find_unique_masked(VCLAMP_SIG, VCLAMP_MASK, sizeof VCLAMP_SIG,
+                                          g_text, g_textlen, "world-extent clamp");
+            if (vc) {
+                DWORD dw = m.w * 2, dh = m.h * 2;
+                if (poke(vc + VCLAMP_W1, &dw, 4) && poke(vc + VCLAMP_W2, &dw, 4)
+                 && poke(vc + VCLAMP_H1, &dh, 4) && poke(vc + VCLAMP_H2, &dh, 4)) {
+                    logf_("[+] world-extent clamp at %p: 3200x2400 -> %lux%lu (2x the mode)",
+                          vc, dw, dh);
+                    ok++;
+                } else { logf_("[x] world-extent clamp found but not writable"); fail++; }
+            } else {
+                logf_("[-] world-extent clamp signature not found -- terrain will still stop at 1600");
+            }
         } else {
             logf_("[-] slot 4: code compare-chain not found -- NOT patching the data table"
                   " either, they must move together (FINDINGS s8)");

@@ -1564,3 +1564,62 @@ unlike a heap address.
 DR7 per slot i: local-enable at bit 2i, RW at 16+4i = 01 (write), LEN at 18+4i = 11 (4 bytes).
 Wine implements debug registers through ptrace; the arming path logs failure explicitly
 rather than silently watching nothing.
+
+
+## 35. FOUND IT: the world-extent clamp is 0xC80/0x960, not 1600 — VERIFIED STATICALLY
+
+Ghidra 12.1.3, headless, full decompilation of all 3276 functions. `FUN_0046b020` — one of
+the 39 functions that reference the screen-width global `0x60c18c`:
+
+```c
+uVar8 = max(param_1[6], 0);
+if (0xc80 < (int)uVar8) uVar8 = 0xc80;   /* clamp width  to 3200 */
+param_1[6] = uVar8;
+uVar8 = max(param_1[7], 0);
+if (0x960 < (int)uVar8) uVar8 = 0x960;   /* clamp height to 2400 */
+param_1[7] = uVar8;
+local_290 = (int)DAT_0060c18c;           /* then reads the screen width */
+```
+
+**The clamp is not on 1600. It is on 3200 x 2400 — exactly twice the stock slot-4 mode**,
+because the coordinates here are doubled. The instructions immediately after confirm it:
+
+```asm
+46b17a  2b 05 f0 9f 59 00   sub eax,DWORD PTR ds:0x599ff0
+46b180  d1 e0               shl eax,1
+```
+
+That single fact explains six failed searches. §31 eliminated 1600 as a stored value,
+correctly — it was never stored. Searching for `0x640`, for `1600.0f`, for `1600*1200`, for
+derived arrays, and scanning live memory for the u32 1600 could not have found a clamp
+written as `0xC80`. The decompiler found it in one pass because it reads the arithmetic
+rather than the bytes.
+
+It also explains §31's other puzzle: the cutoff was at 1600 on a 1680-wide screen *and* on a
+1920-wide screen because **the clamp is absolute, not relative to the mode**.
+
+### The patch site
+
+```asm
+46b146  3d 80 0c 00 00      cmp eax,0xc80      ; width  > 3200 ?
+46b14e  7e 05               jle +5
+46b150  b8 80 0c 00 00      mov eax,0xc80      ; clamp to 3200 (= 1600 px)
+46b167  81 fe 60 09 00 00   cmp esi,0x960      ; height > 2400 ?
+46b170  7e 05               jle +5
+46b172  be 60 09 00 00      mov esi,0x960      ; clamp to 2400 (= 1200 px)
+```
+
+Four 32-bit immediates. The proxy now finds this with a masked signature and writes
+`2 * m.w` / `2 * m.h` — **computed from the mode actually selected**, not hardcoded, so it
+stays correct for any slot-4 geometry.
+
+### Retiring the memory-scanner theory
+
+§33's "terrain rendered at full 1920 after overwriting 256 heap dwords" was almost certainly
+an artefact: none of those addresses was this clamp, the result never reproduced, and it
+needed a renderer-toggle sequence that later proved to be truncation damage. The scanner
+work was not wasted — it eliminated the entire "stored value" hypothesis space, which is
+what sent us to the decompiler — but §33 should not be read as a real fix.
+
+**Untested in-game.** Everything above is static. The claim that raising the clamp makes the
+terrain draw at 1920 is a prediction until it is run.
