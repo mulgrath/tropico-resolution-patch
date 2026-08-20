@@ -3353,3 +3353,55 @@ It is cheap to test (one `.WIN` record byte, or one store in the class-4 deseria
 is the only route to a scaled HUD that needs no art. But it is a long shot on an unexercised
 path, and it should be tried only after the packet encoding is understood, so that failing at
 it does not leave the project with nothing.
+
+### 50.8 "Cannot stretch" is about availability, not quality — and the draw style tracks art exactly
+
+Asked by the owner: can it stretch and merely look bad, or can it not stretch at all? For the
+path that runs, **not at all** — and the distinction is worth stating precisely, because
+"looks bad" implies a quality knob that does not exist here.
+
+`FUN_00501b90` is handed an x, a y and a sprite descriptor. There is no destination width,
+no destination height and no ratio anywhere in the call. There is no scale factor set badly;
+there is no scale factor. The sprite lands at its own pixel count.
+
+**But "the engine cannot stretch" would be too strong.** Three stretching mechanisms exist in
+the binary, and none of them is on the HUD art path:
+
+| mechanism | what it is | used by HUD art? |
+|---|---|---|
+| class-4 **style 1** -> `FUN_005002c0` | takes a destination rect; the D3D branch builds UV steps from source/destination ratios | **no** — zero shipped widgets use style 1 |
+| `FUN_0052c5f0` | a real rescaling blit with the 800-entry ratio table at `0x61bb30`; one caller, `FUN_0052cab0`, which is a `WM_PAINT` handler (`BeginPaint`/`EndPaint`) | **no** — whole-frame presentation rescale, not per-sprite |
+| class-4 **style 5** -> `FUN_004ff890` | passes a full rect `(x1,y1,x2,y2)` plus a colour and flags | **no art to stretch** — see below |
+
+### The style flag correlates PERFECTLY with whether a widget has art
+
+Across all 240 class-4 widgets in the 19 parsed `.WIN` files:
+
+```
+style 0   art=True    123        style 5   art=True     0
+style 0   art=False    26        style 5   art=False   91
+```
+
+**Every style-5 widget is artless, and every widget with art is style 0.** So style is not an
+arbitrary rendering flag: style 5 draws a procedural rectangle (panel fills, gradients) and
+style 0 blits a sprite. The engine hands over a destination rectangle exactly when there is
+nothing to stretch, and hands over a bare position exactly when there is.
+
+Two consequences, one good and one not:
+
+* **Good:** 91 of the UI's rectangles are not art at all and already scale to any resolution
+  for free, on top of the position-scaling every widget gets. The art problem is smaller than
+  the widget count suggests. `MAINWIN.WIN` has no style-5 widgets (25 class-4, all style 0,
+  20 with art), but the dialogs lean on them heavily.
+* **Not good:** the correlation is strong evidence that style 1 was *designed out*, not merely
+  unused. A path that takes a rect for sprites exists and PopTop shipped nothing through it.
+
+### On quality, since that was the question behind the question
+
+If stretching were available it would look **fine, not bad**. 1600 -> 1920 is a 1.2x upscale
+and 1200 -> 1080 a 0.9x downscale; on a D3D textured quad that is bilinear and mildly soft,
+nowhere near the aliasing §28 predicted for nearest-neighbour row-dropping on font glyphs.
+So quality is not the reason to rule stretching out. **Availability is.** That distinction
+matters for the style-1 lead (§50.7): if that path can be made to fire, the result would look
+acceptable — the risk is entirely that it is an unexercised path in a 2001 engine, not that
+its output would be ugly.
