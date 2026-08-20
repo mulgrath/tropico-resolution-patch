@@ -4065,3 +4065,59 @@ This was diagnosed from two screenshots by the owner, after I had spent runs K t
 building increasingly elaborate instruments around the wrong model. The repeat was visible in
 the first image of it; I was reading log numbers and did not look at what the picture was
 actually showing.
+
+## 61. No, pieces cannot be scaled — but the question narrowed the real blocker
+
+### 61.1 The direct answer
+
+`FUN_00501b90`, the style-0 blit that draws every piece, was scanned in full (696 instructions):
+**no `fdiv`, no `fmul` on anything but the two virtual->pixel viewport constants
+(`0x5a0ffc`, `0x5a1004`), no call to the rescaling blit `FUN_0052c5f0`, no reference to its
+ratio table `0x61bb30`.** There is no scaling arithmetic on that path in any form.
+
+Each piece is copied 1:1. Editing a piece's `w`/`h` in its 0x15-byte record changes how much
+source is **read**, not how large it lands — so "scale each piece a little" has nothing to act
+on. Repositioning pieces is possible (their x/y are plain integers, like §26's sprite coords),
+but that spreads them apart and opens gaps rather than enlarging them.
+
+### 61.2 What the question did open up
+
+§60 concluded the `.iNN` packet encoding is unavoidable. That framing was too pessimistic:
+producing wider art does not need the pixels **decoded**, only the packets **walked** — the
+same insight that made §28's vertical rescale a row-selection problem rather than a codec
+problem, applied one level down.
+
+Progress on that, measured the §26 way (an encoding is right only if it accounts for every row
+of every sprite exactly):
+
+* **Literal runs are solved.** `c < 0x80` is a literal run of `c` palette indices, and the
+  count is capped at 127. `mwspeed.i16` parses **555 / 555** rows on that rule alone, and its
+  first opcode is always 11 or 16 — exactly its sprite widths. `brempty.i16` confirms the cap:
+  its opaque rows begin `0x7f` and 277 = 127 + 127 + 23.
+* **High-bit opcodes cluster on `0xC0`** — the byte §28 already identified as the
+  end-of-sprite marker. Treating `c >= 0xc0` as a transparent skip of `c & 0x3f` lifts whole-row
+  parsing from ~11% to **1947 / 4337 rows (45%)** across four assets. Partially right,
+  demonstrably incomplete.
+* The `0x80..0xbf` range appears in the data but three different readings of it
+  (`rle6`, `rle5`, `rle6+2`) all score identically, which means none of them is being
+  exercised — so that range does something else again.
+
+### 61.3 Method note: stop guessing, read the decoder
+
+Enumerating opcode models is the shape of failure this project keeps repeating. The decoder
+exists in the exe and reading it is deterministic. Starting points for that work:
+
+* the piece loop in `FUN_00501b90` from `0x501dd1` (piece count at `[esi+0x4]`, records at
+  `[desc+0x1a]`, 0x15 bytes each);
+* the dispatch is **not** a plain `cmp reg,0xc0` — no such site exists in the blit — so it is
+  likely a jump table on the opcode byte or a sign/shift test;
+* ground truth to validate against, already established: row framing (§28, 5494/5494), literal
+  runs capped at 127 (above), and total row width must equal the sprite width.
+
+### 61.4 Where the project stands
+
+The engine will not scale HUD art: not per widget (§50), not per sprite (§60), not per piece
+(§61.1). A derived art set at the target resolution remains the only complete route, and the
+work it needs is now scoped much more tightly than "decode the codec" — it needs enough of the
+packet format to *walk* it, so that a horizontal span can be duplicated or dropped the way §28
+duplicates and drops rows.
