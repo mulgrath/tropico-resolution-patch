@@ -4380,3 +4380,80 @@ tall-narrow widgets across 7 files**, of 877 widgets in 32 parseable files. Two 
 entries still do not parse to exact EOF, so they could not be rewritten safely. Growing a
 widget's height can also overlap its neighbours. Not started; not recommended before the
 packaging work.
+
+## 64. `.WIN` files are writable and loose-overridable — but the tab geometry lever is a dead end
+
+Spike, at the owner's request: is there an avenue to manipulate `.WIN` layouts the way §62/§63
+manipulate art? **Yes for the format. No for the fix it was wanted for.**
+
+### 64.1 The format is now writable, and validated the same way as everything else
+
+`tools/tropico-winpatch.py` adds a SERIALISER to §48's parser. Rebuilding every archived `.WIN`
+unchanged reproduces the original bytes: **32 of 32** parseable entries byte-identical.
+
+A geometry edit changes **no file length** — x/y/cx/cy are int16 at fixed offsets inside a
+fixed-size record — so patching is in-place and the only risk is the values.
+
+**13 of the 45 entries use a second record revision** and are refused: class 0x40 measures 71
+bytes rather than 80, and they carry **no `0x7d4` end tag at all**. This is §48's long-standing
+"19 of 27" gap, now characterised. None of them holds a tall-narrow widget, so nothing was lost.
+
+`.WIN` names resolve from the exe: `almanac.win` = `0x24fe7d6b`, `SETTINGS.WIN` = `0x525a3aab`.
+Only those two carry the `88 x 256` widgets; `bldgdtl.win` carries `46x180`/`46x189`, which is
+the "Owner"/"Wages" panel.
+
+### 64.2 CONFIRMED: loose `.WIN` overrides take effect
+
+Established by positive control, not inference. §24's "loose files win" was confirmed for `.i16`
+art in §63.1; carrying it to `.WIN` was an assumption until an **exaggerated** edit
+(`88x256 -> 250x250`) visibly changed the game. Shipped in both letter cases at once, since the
+filesystem is case-sensitive and the exe names the file `SETTINGS.WIN` while the archive is
+addressed by a case-insensitive hash.
+
+This is a genuinely new delivery channel: **any** `.WIN` layout can be replaced without touching
+an archive.
+
+### 64.3 What `cy` actually does — and why it cannot fix the overhang
+
+The clip is pushed by `FUN_0052c1e0` -> `FUN_004e6dd0` -> `FUN_004e6e40`, with the bottom-right
+computed as `x + cx - 1 + parent_x`, `y + cy - 1 + parent_y`. So `cy` sets the clip bottom.
+
+Measured, four runs, one variable at a time:
+
+| `cy` | box (px) | result |
+|---|---|---|
+| 256 (stock) | 52 x 115 | full text, **hangs below the tab** |
+| 250 (with cx 250) | 150 x 112 | text gone entirely |
+| 500 | 52 x 225 | text starts **lower**, only the first letter visible |
+| 180 | 52 x 81 | text sits in the tab, **tab bottom clipped**, last letter cut |
+| 230 | 52 x 103 | text between stock and 180; **tab bottom still clipped** |
+
+`cy` moves the text position AND the clip bottom **together**, monotonically. Every value
+therefore trades text-overhang against tab-cropping, and no tested value avoids both. Stock 256
+is arguably the least-bad point on that curve — `cy=180` only *looks* better because it hides
+the overhang by cutting the tab off.
+
+**REFUTED: the tab graphic is not drawn from these widgets.** The `250x250` control left the tab
+visual completely unchanged while moving the text. So §63.6's reading — that the fat tab *is*
+that rect — is **wrong**, and the "tabs are too wide" half of the complaint has no lever here.
+
+### 64.4 Open lead, and a wrong turn recorded
+
+Owner, unprompted: **enabling the Reduce setting restores the clipped bottom.** That is the
+§30/§47 shape — a value consumed in the wrong coordinate space — and it is the one real thread
+left.
+
+**A wrong answer, recorded because it was one message from being acted on.** `FUN_0052c1e0`
+skips the clip push entirely when `DAT_00612fd8 != 0`, which looked exactly like the Reduce
+gate. It is not. Its only writer is `FUN_004e9b30`, which loads a cursor, formats a string and
+raises a MessageBox: it is the **fatal-error handler**, called from ~30 error paths, and the
+flag means "already crashed, stop drawing". Checking the writer refuted it; the tidy story did
+not survive one grep. Whatever Reduce changes, it is not this.
+
+### 64.5 State
+
+Both `.WIN` overrides were **reverted to stock**. The §63 art set is untouched and intact. The
+tooling and §64.2 stand on their own and cost nothing to keep.
+
+Not recommended before packaging: chasing what Reduce changes. It is a real lead, but it is an
+engine investigation with no bounded end, spent on one cosmetic panel.

@@ -157,9 +157,17 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
    (§24 now CONFIRMED by observation, §63.1), so the set ships as plain `.i16` files and is
    undone by deleting them. `px.PK2` is never written.
 
-7. **NEXT:** packaging. Generate the set at install time from the user's own archives, pick
-   the mode automatically, and ship it as one step. Optional polish, costed in §63.7: patch
-   `.WIN` rects so rotated-text widgets stop overhanging.
+7. ~~Optional polish: patch `.WIN` rects so rotated-text widgets stop overhanging.~~
+   **TRIED AND REVERTED — §64.** The format is writable (32/32 byte-identical round-trip) and
+   loose `.WIN` overrides are CONFIRMED to work (§64.2), but `cy` moves the text and the clip
+   bottom together, so every value trades overhang against cropping the tab. The tab graphic
+   is not drawn from those widgets at all (§64.3, refuting §63.6). Open lead: the owner found
+   that the **Reduce** setting restores the clipped bottom (§64.4).
+
+8. **NEXT:** packaging. Generate the set at install time from the user's own archives, pick
+   the mode automatically, and ship it as one step. This is the last thing between the project
+   and the brief: "give someone a working version on Linux that doesn't require any awkward
+   setups on their part".
 
 ## Ground rules
 
