@@ -3553,3 +3553,80 @@ The honest way to find out is to stop reasoning about widget counts and look. Fo
 it against stock every 15 s at 1920x1080 in Hardware 3D. Two things become visible at once:
 how much of the chrome snaps into proportion, and how much of it is left behind by classes
 that have no style field.
+
+## 53. Run M: the chrome correction COMPOUNDED — a mutation where a computation was needed
+
+Owner: "the chrome seemed to completely vanish and never return." Correct, and the log
+diagnoses it precisely.
+
+### 53.1 The evidence
+
+```
+[chrome] bar RESCALED to design space, style 1, kx=1.2000 ky=0.9000
+[hudprobe] ph=2 ... live rect on entry: 89 x 74
+[hudprobe] ph=2 ... live rect on entry: 33488 x 39
+[hudprobe] ph=2 ... live rect on entry: 32561 x 0
+[hudprobe] ph=0 ... live rect on entry: 32233 x 0      <- correction OFF, still broken
+```
+
+CX running away toward the int16 ceiling at x1.2 per frame, CY collapsing at x0.9, and the
+damage persisting into the phase that switched the correction off.
+
+### 53.2 The cause: `FUN_00502510` runs ONCE, not per frame
+
+The stub multiplied the widget's live rect on every draw, on the stated assumption that the
+pre-draw recomputed it from the sprite each frame. It does not:
+
+```asm
+5025e3:  cmp  WORD PTR [esi+0xf],0x0     ; live CX
+5025e8:  je   0x5025f1                   ; -> path B
+5025ea:  cmp  WORD PTR [esi+0x11],0x0    ; live CY
+5025ef:  jne  0x502638                   ; both non-zero -> path A, done
+```
+
+`FUN_00502510` is reached only while CX and CY are **zero**. It writes them non-zero, so from
+the second frame onward the pre-draw takes path A and nothing ever recomputes them. A
+per-draw multiply therefore compounds without limit, and because nothing recomputes, turning
+the correction off cannot undo it — hence "never return".
+
+**This guard is quoted verbatim in §48.3.** Having the fact recorded and not applying it is
+the §50.4 failure again, now three times: §50.4 measured a field consumed by a branch that
+does not run, §51.1 ran a renderer that cannot answer, and §53 mutated a value that is
+computed once. The common shape is **acting on a mechanism I had already written down**.
+
+The rule that follows, and it is narrower and more useful than "read more carefully":
+**before writing to a field every frame, establish how often the engine writes it.** A field
+the engine computes once tolerates no accumulating edit; a field it recomputes tolerates
+nothing else.
+
+### 53.3 The fix: correct the computation, not its result
+
+The six `fmul` operands inside `FUN_00502510` now point at our own pair of floats,
+`3200/art_w` and `2400/art_h`, instead of the live mode's `3200/W` (`0x5a0ff8`) and `2400/H`
+(`0x5a1000`):
+
+```
++0x35 fmul [0x5a0ff8]   -> X        +0x52 fmul [0x5a1000]   -> Y
++0x67 fmul [0x5a0ff8]   -> obj+0x88 +0x7e fmul [0x5a1000]   -> obj+0x8c
++0x95 fmul [0x5a0ff8]   -> CX       +0xae fmul [0x5a1000]   -> CY
+```
+
+That is idempotent by construction — it is a computation, not a mutation — and it cannot
+compound however many times it runs. It also states the truth about the data: the sprite's
+stored coordinates are pixels **in the art set's space**, not in the live screen's.
+
+Two guards on it:
+
+* **Exactly 3 and 3, or refuse.** A partial patch would mix two coordinate spaces inside one
+  rectangle, which would look plausible and be wrong. Dry-run offline against this exact
+  `.text`: 3 width and 3 height operands, at the six addresses above.
+* **The stock mode is the identity.** At slot 4, `art_w = 1600`; at a 1600-wide screen the
+  replacement constant *equals* the constant it replaced. So the patch provably does nothing
+  at a stock mode, and that is the first control to run.
+
+### 53.4 A note on the instrument
+
+`live rect on entry` is a single global written by every art-bearing class-4 widget, so it
+interleaves the bar with `mwspeed` (`32 x 30`), `mwextra` (`5 x 11`) and the rest. The
+runaway values are unambiguous against that background, but the readout is not
+bar-specific and should not be read as if it were.

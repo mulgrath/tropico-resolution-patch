@@ -86,6 +86,7 @@ static int locate_sections(void)
  */
 static int patch_world_viewport(UINT match_w, UINT new_w);
 static int patch_hud_probe(void);
+static int patch_chrome_scale(DWORD table_va);
 static DWORD g_hud_mw, g_hud_mh;
 static int g_chr_enable;
 static DWORD g_hud_ph_style[8], g_hud_ph_size[8];
@@ -579,6 +580,7 @@ static void apply_patches(void)
                       " a probe with nothing to cycle would apply cleanly and do nothing.");
                 fail++;
             } else if (patch_hud_probe()) ok++; else fail++;
+            if (g_chr_enable) { if (patch_chrome_scale(table_va)) ok++; else fail++; }
         }
     }
 
@@ -1819,6 +1821,54 @@ static int fix_short(BYTE *stub, int f, int i, const char *what)
     stub[f] = (BYTE)d; return 1;
 }
 
+/* s53: correct the path-B conversion at its source.
+ *
+ * FUN_00502510 turns the art sprite's stored PIXEL coordinates into the widget's
+ * virtual rect by multiplying with the LIVE mode's factors (3200/W at 0x5a0ff8 and
+ * 2400/H at 0x5a1000).  That round-trip is the identity, which is why a 1200-tall
+ * design lands at its stored pixel row on any screen (s48.3).
+ *
+ * Repointing all six fmul operands at our own pair of floats -- 3200/art_w and
+ * 2400/art_h, the ART SET's design size rather than the live mode -- makes the
+ * conversion say "these pixels are in the art's space", which is what they are.
+ *
+ * At a stock mode art_w == W, so the constant equals the one it replaced and the
+ * patch is the exact identity.  That control is built in: if 1600x1200 changes
+ * appearance, this is wrong.
+ */
+static float g_chr_fx = 2.0f, g_chr_fy = 2.0f;
+static const BYTE CSCALE_SIG[] = { 0x83,0xec,0x14, 0x56, 0x8b,0xf1,
+                                   0x8b,0x86,0x90,0x00,0x00,0x00, 0x85,0xc0, 0x0f,0x84 };
+
+static int patch_chrome_scale(DWORD table_va)
+{
+    BYTE *fn = find_unique(CSCALE_SIG, sizeof CSCALE_SIG, g_text, g_textlen,
+                           "path-B layout (FUN_00502510)");
+    if (!fn) return 0;
+    DWORD fx_va = table_va + 0x58;      /* 0x5a0ff8 = 3200 / screen width  */
+    DWORD fy_va = table_va + 0x60;      /* 0x5a1000 = 2400 / screen height */
+    DWORD our_x = (DWORD)(SIZE_T)&g_chr_fx, our_y = (DWORD)(SIZE_T)&g_chr_fy;
+    int nx = 0, ny = 0;
+    for (int k = 0; k + 6 <= 0xd0; k++) {
+        if (fn[k] != 0xd8 || fn[k+1] != 0x0d) continue;       /* fmul dword [imm32] */
+        DWORD op = rd32(fn + k + 2);
+        if      (op == fx_va) { if (poke(fn+k+2, &our_x, 4)) nx++; }
+        else if (op == fy_va) { if (poke(fn+k+2, &our_y, 4)) ny++; }
+    }
+    /* Three of each, every time.  Anything else means this is not the function we
+     * read, and a partial patch would mix two coordinate spaces inside one rect --
+     * which would look plausible and be wrong. */
+    if (nx != 3 || ny != 3) {
+        logf_("[x] [chrome] FUN_00502510 at %p: patched %d width and %d height"
+              " multiplies, expected 3 and 3 -- REFUSING (a partial patch would mix"
+              " coordinate spaces)", fn, nx, ny);
+        return 0;
+    }
+    logf_("[+] [chrome] path-B layout at %p: all 6 scale operands repointed from the"
+          " live mode to the art set's design space", fn);
+    return 1;
+}
+
 static int patch_hud_probe(void)
 {
     BYTE *at = find_unique_masked(HUD_SIG, HUD_MASK, sizeof HUD_SIG,
@@ -1875,24 +1925,32 @@ static int patch_hud_probe(void)
      * space into the art set's design space.  Idempotent: the pre-draw recomputes
      * them from the sprite every frame, so this always operates on fresh values. */
     if (g_chr_enable) {
-        DWORD a_kx=(DWORD)(SIZE_T)&g_chr_kx, a_ky=(DWORD)(SIZE_T)&g_chr_ky;
         DWORD a_on=(DWORD)(SIZE_T)&g_chr_on, a_cs=(DWORD)(SIZE_T)&g_chr_style;
         int b1, b2, b3;
+        (void)0;
         stub[i++]=0x66; stub[i++]=0x83; stub[i++]=0x79; stub[i++]=0x50; stub[i++]=0x00;
         J_NEAR_NE(stub, i, b1);                                       /* cmp w[+0x50],0; jne  */
         stub[i++]=0x66; stub[i++]=0x83; stub[i++]=0x79; stub[i++]=0x52; stub[i++]=0x00;
         J_NEAR_NE(stub, i, b2);                                       /* cmp w[+0x52],0; jne  */
         stub[i++]=0x83; stub[i++]=0x3d; memcpy(stub+i,&a_on,4); i+=4; stub[i++]=0x00;
         J_NEAR_EQ(stub, i, b3);                                       /* cmp [g_chr_on],0; je */
-        static const BYTE FLD[4] = { 0x0b, 0x0d, 0x0f, 0x11 };
-        for (int k = 0; k < 4; k++) {
-            DWORD kf = (k & 1) ? a_ky : a_kx;                         /* X,CX use kx; Y,CY ky */
-            stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x41; stub[i++]=FLD[k];
-            stub[i++]=0x0f; stub[i++]=0xaf; stub[i++]=0x05;
-            memcpy(stub+i,&kf,4); i+=4;                               /* imul eax,[k]         */
-            stub[i++]=0xc1; stub[i++]=0xf8; stub[i++]=0x10;           /* sar eax,16           */
-            stub[i++]=0x66; stub[i++]=0x89; stub[i++]=0x41; stub[i++]=FLD[k];
-        }
+        /* NO ARITHMETIC HERE.  Run M multiplied the live rect by the correction
+         * factor on every draw, on the assumption that FUN_00502510 recomputed it
+         * from the sprite each frame.  It does not: FUN_005025e0 takes the path-B
+         * branch only while CX and CY are ZERO, so FUN_00502510 runs ONCE and the
+         * pre-draw takes path A forever after.  The multiply therefore compounded
+         * -- CX x1.2 and CY x0.9 per frame -- and the log caught it exactly:
+         *     live rect on entry: 33488 x 39  ->  32561 x 0  ->  32233 x 0
+         * CX ran into the int16 ceiling, CY collapsed, the rect went degenerate and
+         * the bar vanished permanently, surviving even the phase that turned the
+         * correction off, because nothing recomputes it.
+         *
+         * The guard that says so is quoted verbatim in s48.3.  Having the fact and
+         * not applying it is the same failure as s50.4.
+         *
+         * The correction now happens where the value is COMPUTED -- the six fmul
+         * operands inside FUN_00502510 (see patch_chrome_scale) -- which is
+         * idempotent by construction because it is a computation, not a mutation. */
         stub[i++]=0xa1; memcpy(stub+i,&a_cs,4); i+=4;                 /* mov eax,[g_chr_style]*/
         stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x7c;               /* mov [ecx+0x7c],eax   */
         fix_near(stub,b1,i); fix_near(stub,b2,i); fix_near(stub,b3,i);
@@ -1966,9 +2024,11 @@ static DWORD WINAPI hudprobe_thread(LPVOID unused)
             if (cfg0 && !IsBadReadPtr((void *)(SIZE_T)cfg0, 0x1c))
                 memcpy(&sl, (BYTE *)(SIZE_T)(cfg0 + 0x18), 4);
             DWORD lw = wfb_read16(0x60c18c), lh = wfb_read16(0x60c18e);
-            if (sl < 5 && lw && lh) {
-                g_chr_kx = (DWORD)((65536.0 * lw) / ART_W[sl]);
-                g_chr_ky = (DWORD)((65536.0 * lh) / ART_H[sl]);
+            if (sl < 5) {
+                g_chr_fx = 3200.0f / (float)ART_W[sl];
+                g_chr_fy = 2400.0f / (float)ART_H[sl];
+                g_chr_kx = (DWORD)((65536.0 * (lw ? lw : ART_W[sl])) / ART_W[sl]);
+                g_chr_ky = (DWORD)((65536.0 * (lh ? lh : ART_H[sl])) / ART_H[sl]);
             }
         }
         if (GetTickCount() >= next) {
@@ -1981,10 +2041,11 @@ static DWORD WINAPI hudprobe_thread(LPVOID unused)
                  * non-zero = rescale it into the art set's design space. */
                 g_chr_on    = g_hud_ph_size[ph] ? 1 : 0;
                 g_chr_style = (g_hud_style_want && hw3d) ? g_hud_style_want : 0;
-                logf_("  [chrome] bar %s, style %lu, kx=%.4f ky=%.4f",
-                      g_chr_on ? "RESCALED to design space" : "stock",
-                      (unsigned long)g_chr_style,
-                      g_chr_kx / 65536.0, g_chr_ky / 65536.0);
+                logf_("  [chrome] style %lu; design-space factors now %.4f / %.4f"
+                      " (live mode would be %.4f / %.4f)",
+                      (unsigned long)g_chr_style, g_chr_fx, g_chr_fy,
+                      3200.0 / (wfb_read16(0x60c18c) ? wfb_read16(0x60c18c) : 1),
+                      2400.0 / (wfb_read16(0x60c18e) ? wfb_read16(0x60c18e) : 1));
             }
             next = GetTickCount() + g_hud_dwell * 1000;
             logf_("  [hudprobe] ===> PHASE %d: style %lu, rect %lux%lu  (%s)", ph,
