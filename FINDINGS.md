@@ -2773,6 +2773,46 @@ variants, so it is a native multi-section asset like `glastube` (§26), not a mo
 `px.PK2` is recoverable. **This has not been done — it is a 372 MB overwrite of the owner's
 game data and is the owner's call.** Until it is, `int_main.i16` must not be measured.
 
+#### CONFIRMED by byte-diff against the pristine archive, not by inference
+
+`innoextract -s -I app/data/px.PK2` recovers the stock file in nine seconds (same length,
+372,402,107). Diffing it against the working copy:
+
+```
+PK2 index (8 + 13*count bytes)        BYTE-IDENTICAL
+differing byte runs                   2 (gap > 64), spanning 333,392,063 .. 334,270,805
+archive entries touched               1     0x6017ebbb  off 333,391,135  size 879,671
+                                            878,549 differing bytes
+```
+
+**Exactly one entry, and the index is untouched.** `px2.PK2`, `px3.PK2` and `px4.PK2` still
+carry their 2001 mtimes, so `MAINWIN.WIN` and every other `.WIN` file is stock. The blast
+radius is now proved rather than argued.
+
+#### A broken instrument, recorded because it nearly passed
+
+The chain-end scan above only catches modifications that change block *sizes*. §27's
+originally-proposed two-byte coordinate edit would have been invisible to it. So a second
+scan was written to compare every `.i16` sprite's x/y/w/h against its `.i12` sibling scaled
+by (1.25, 1.171875).
+
+It reported **0 anomalous families out of 154** — while the one known-modified family sat
+right there in the input. The cause: the index was stored as `(size, offset)` and passed to
+a function taking `(offset, size)`, so every family parsed as `None` and was skipped by a
+`if not a or not b: continue` guard. **A scan that compared nothing reported that nothing
+was wrong**, and the number 154 in the output made it look like it had done the work.
+
+Fixed, and with an assertion that the known-modified entry must be flagged or the run is
+refused, it finds 20 families. Nineteen are font atlases (224 one- and two-pixel glyph
+sprites, hand-kerned) where a 2 px + 2% tolerance is simply too tight, and each has only
+1-35 of 224 sprites outside it. `0x6017ebbb` is the only one with **33 of 33** sprites
+outside, with the signature of a vertical squash: width preserved exactly (1600 = 1600)
+while y and h scale by 0.75 (695 -> 521, 505 -> 379).
+
+The lesson is TESTING.md's, in a new costume: an instrument that can only return "clean"
+has not told you anything. Any scan of this kind needs a positive control in its own input,
+and this one now asserts on it.
+
 Method note, and it is the §-14 lesson again: this was caught only because the parse of
 `int_main.i16` produced `y+h = 900` on a file that should read 1200. An art file that has
 been silently rescaled looks exactly like an art file that was authored that way.
@@ -3154,3 +3194,28 @@ Crisp-and-small means 1:1; blurry-and-proportioned means stretching.
 `int_main.i16` rescale re-derived from a backup if it is still wanted. **Not done — it is a
 372 MB overwrite of the owner's game data.** And the result of whatever run that rescale was
 made for was never recorded; if the owner remembers what it looked like, it belongs in §27.
+
+### 49.1 Does the modified `px.PK2` interfere with the §49 shrink test? — NO, if it runs at 1280x1024
+
+Asked by the owner, and worth answering precisely rather than "probably not".
+
+**The primary test is unaffected, for three independent reasons:**
+
+1. **Different asset.** The test shrinks the 560x560 widgets, whose art is `br00.imm`,
+   `brempty.imm` and the class-0x40 sibling. The only modified entry is `int_main.i16`.
+2. **Different art set.** 1280x1024 is resolution slot 3, so §19's extension rewrite loads
+   `.i12`. `int_main.i16` is never opened, and its bytes are never read.
+3. **Different archive.** `MAINWIN.WIN`, which supplies the 560x560 rects, lives in
+   `px2.PK2` — byte-untouched (48.0).
+
+**The secondary 1920x1080 observation IS contaminated,** because that is slot 4 and does
+load `.i16`. The bar will draw at pixel y=521, 379 tall, ending at y=900 on a 1080-tall
+screen with ~180 px of world visible beneath it. That is neither the stock fault nor the
+correct result, and it is exactly the sort of unfamiliar-looking output that invites a wrong
+story. Either restore `px.PK2` first, or judge crisp-vs-blurry on the **other** widgets —
+the bottom-right panel stack, the speed buttons, the border frame — and ignore the bar.
+
+**Required guard on the run:** log the resolution slot index (`[[0x612fec]+0x18]`) and the
+art suffix in use alongside the renderer. §37 lost two runs to an instrument that recorded
+the resolution but not the renderer; here a run that lands on slot 4 instead of slot 3 would
+answer a different question while looking identical in the log.
