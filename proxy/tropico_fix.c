@@ -1787,6 +1787,7 @@ static volatile DWORD g_chr_kx = 65536, g_chr_ky = 65536;
 static volatile DWORD g_chr_on = 0, g_chr_style = 0;
 static volatile DWORD g_chr_hits;
 static volatile DWORD g_chr_rect, g_chr_pos;
+static volatile DWORD g_chr_ox, g_chr_oy;
 static volatile DWORD g_chr_zero;
 static volatile DWORD g_chr_dirty;
 static float g_chr_fx = 2.0f, g_chr_fy = 2.0f;
@@ -2033,6 +2034,16 @@ static int patch_hud_probe(void)
             stub[i++]=0x89; stub[i++]=0x15; memcpy(stub+i,&a_rc,4); i+=4;  /* rect  = [+0x0f] */
             stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x0b;
             stub[i++]=0x89; stub[i++]=0x15; memcpy(stub+i,&a_ps,4); i+=4;  /* pos   = [+0x0b] */
+            /* obj+0x88 / obj+0x8c -- the origin pair the style-0 draw ADDS to the
+             * position.  s54.3 predicted they cancel the scale factor exactly; the
+             * owner's report that the bar moved says otherwise.  Logging both ends
+             * of the sum settles it by arithmetic instead of by another guess. */
+            {   DWORD a_ox=(DWORD)(SIZE_T)&g_chr_ox, a_oy=(DWORD)(SIZE_T)&g_chr_oy;
+                stub[i++]=0x8b; stub[i++]=0x91; memcpy(stub+i,"\x88\x00\x00\x00",4); i+=4;
+                stub[i++]=0x89; stub[i++]=0x15; memcpy(stub+i,&a_ox,4); i+=4;
+                stub[i++]=0x8b; stub[i++]=0x91; memcpy(stub+i,"\x8c\x00\x00\x00",4); i+=4;
+                stub[i++]=0x89; stub[i++]=0x15; memcpy(stub+i,&a_oy,4); i+=4;
+            }
         }
         stub[i++]=0xa1; memcpy(stub+i,&a_cs,4); i+=4;                 /* mov eax,[g_chr_style]*/
         stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x7c;               /* mov [ecx+0x7c],eax   */
@@ -2157,6 +2168,17 @@ static DWORD WINAPI hudprobe_thread(LPVOID unused)
                   (long)px * (long)lw2 / 3200, (long)py * (long)lh2 / 2400,
                   (long)cx * (long)lw2 / 3200, (long)cy * (long)lh2 / 2400,
                   g_chr_zero ? "   [position ZEROED this phase]" : "");
+            /* the style-0 draw hands the blit (X + origin), so this IS the number
+             * that decides where the bar lands -- print it, do not infer it */
+            logf_("  [chrome]   origin +0x88=%ld +0x8c=%ld  ->  style-0 draw position"
+                  " = (%ld, %ld) virtual = (%ld, %ld) px%s",
+                  (long)(int)g_chr_ox, (long)(int)g_chr_oy,
+                  (long)px + (long)(int)g_chr_ox, (long)py + (long)(int)g_chr_oy,
+                  ((long)px + (long)(int)g_chr_ox) * (long)lw2 / 3200,
+                  ((long)py + (long)(int)g_chr_oy) * (long)lh2 / 2400,
+                  (px + (int)g_chr_ox == 0 && py + (int)g_chr_oy == 0)
+                      ? "   <- CANCELS, so s54.3 was right and only the clip moved"
+                      : "   <- does NOT cancel, so s54.3 was wrong");
         }
         if (g_hud_style_want && !hw3d)
             logf_("  [hudprobe]   (this phase is INCONCLUSIVE while the renderer is"

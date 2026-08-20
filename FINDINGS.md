@@ -3813,3 +3813,45 @@ If that holds, mechanism 1 moves only the clip rectangle, and phase 0 at 1920x10
 bottom — rather than a corrected full-width bottom-aligned bar. The owner's "positioned
 correctly" is consistent with either reading, and the difference decides whether mechanism 1
 is a fix or only a prerequisite for style 1. Asked rather than assumed.
+
+## 57. §54.3 REFUTED by observation: the scale factor does not cancel
+
+Owner, on run P phase 0 at 1920x1080: "not full width, simply sitting on the bottom edge
+aligned to the left side. It didn't reach all the way over, and it wasn't quite tall enough,
+but it wasn't floating at the 900 mark like it used to."
+
+That is the bar **moved to the bottom edge** — so mechanism 1 changes where it is drawn, not
+only how it is clipped, and §54.3's cancellation argument is wrong as an account of the
+result. The argument was:
+
+```
+X        =  round(sx * f) + authored_X
+obj+0x88 = -round(sx * f)
+draw x   =  X + parent_x + obj+0x88   ->  authored_X, independent of f
+```
+
+Every step of that reads correctly off `FUN_00502510` and the style-0 draw at `0x502b4c`, and
+it still does not describe what happened. Rather than construct a third story, the stub now
+records **both ends of the sum** — `obj+0x88` and `obj+0x8c` alongside `X` and `Y` — and the
+log prints the resulting draw position in virtual units and pixels, with an explicit verdict
+line:
+
+```
+[chrome]   origin +0x88=.. +0x8c=..  ->  style-0 draw position = (..,..) virtual = (..,..) px
+                                          <- CANCELS / does NOT cancel
+```
+
+Whatever the mechanism turns out to be, the number that decides where the bar lands is now
+printed rather than derived. This is the same correction as §56.3 applied one level deeper:
+the previous instrument could say what the *rect* was but not what the *draw* did with it.
+
+### 57.1 What the geometry says the bar currently is
+
+"Bottom edge, left aligned, doesn't reach the right, not quite tall enough" at 1920x1080 is
+consistent with the 1600x505 art drawn bottom-anchored: 1600 of 1920 across (320 px bare on
+the right) and 505 of the 455 px the design proportion calls for. That is exactly what §50.6
+predicted mechanism 1 alone would achieve — **correct placement, stock art size** — and it is
+a real partial improvement over a bar hanging off the bottom of the screen.
+
+It also means the remaining gap is precisely the one style 1 was supposed to close: the art is
+1600x505 and the slot wants 1920x455.
