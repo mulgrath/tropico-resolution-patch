@@ -4121,3 +4121,262 @@ The engine will not scale HUD art: not per widget (§50), not per sprite (§60),
 work it needs is now scoped much more tightly than "decode the codec" — it needs enough of the
 packet format to *walk* it, so that a horizontal span can be duplicated or dropped the way §28
 duplicates and drops rows.
+
+## 62. SOLVED: the `.iNN` packet format, decoded from the blitter and validated byte-exact
+
+§61.4 scoped the last blocker as "enough of the packet format to *walk* it". It is now fully
+decoded — not walked, decoded — and the horizontal rescaler exists and round-trips.
+
+### 62.1 The decoder is not where §61.3 said to look
+
+`FUN_00501b90` is a **dispatcher**, not a decoder. It resolves a piece record and tail-calls
+one of ~16 leaf blitters (`FUN_00538ba0`, `FUN_0053e9d0`, `FUN_0053bb20`, `FUN_00535c60`, …),
+selected by three flags: `DAT_005a0f88`, `param_11 & 0x20`, and the container's format byte at
+`param_1+0x17`. That is why §61.1 found no scaling arithmetic and why §61.3 found no
+`cmp reg,0xc0` — neither is in that function, because the pixels are not in that function.
+
+The packet walk is in the leaves. `FUN_00538ba0 @ 0x538ba0` is the plain case and was read in
+full. Two structural facts fall straight out of it:
+
+* the source pointer is at **piece record +9** (`*(byte **)((int)param_1 + 9)`), and the piece
+  record's `x,y,w,h` are the int16s at +0,+2,+4,+6 that §60 already identified;
+* the leaf walks **compressed bytes at draw time**. Nothing is unpacked at load. So there is no
+  decoded bitmap anywhere in the process to intercept, which retires the last idea in that
+  family.
+
+### 62.2 The opcode table, read out of `FUN_00538ba0`
+
+| opcode | meaning | count | payload |
+|---|---|---|---|
+| `0x00` | **end of row** — the remainder of the row is transparent | — | none |
+| `0x01..0x7f` | literal run of palette indices | `op` | `op` bytes |
+| `0x80..0x9f` | recolour run; bits 3-4 select one of four tables at `DAT_00612fbc` | `op & 7`, or the next byte if that is 0 | **none** |
+| `0xa0..0xaf` | alpha run — one alpha per pixel, blended against a constant colour | `op & 15`, or next byte if 0 | `count` bytes |
+| `0xb0..0xbf` | index + alpha run | `op & 15`, or next byte if 0 | `count * 2` bytes |
+| `0xc0` | **end of sprite** (`(op & 0x3f) == 0` -> `return`) | — | none |
+| `0xc1..0xff` | transparent skip | `op & 0x3f` | none |
+
+§61.2's two live guesses were both right as far as they went (`c < 0x80` literal, `c >= 0xc0`
+skip of `c & 0x3f`). The reason the three `0x80..0xbf` readings scored identically is now
+plain: **that range is not one opcode class, it is three**, split on bits 5 and 4, and two of
+the three carry per-pixel payloads of different widths. No single-rule model could have scored
+anything but noise.
+
+### 62.3 Row framing, corrected in one detail
+
+§28's framing stands unchanged and is what makes rows addressable. Two refinements:
+
+* The blit never reads the length. It **skips** the header — 1 byte if `< 0x80`, else 2 — in
+  the prologue at `0x538d5f`, and skips the next row's header inside the `0x00` handler. Row
+  advance is driven entirely by the `0x00` opcode. The stored length is for seeking, not
+  decoding.
+* **Every one of 447643 non-final rows ends with opcode `0x00`, no exceptions.** The *final*
+  row is the special case: it may end with `0x00`, with `0xC0`, or with nothing at all
+  (a fully transparent row is a bare length-1 header, e.g. a 1x1 transparent sprite is the two
+  bytes `01 c0`). There is no rule to infer here, and inferring one costs exactly one byte per
+  asset — which is how it was caught.
+
+### 62.4 Validation — the §26 way, and then harder
+
+Byte-extent walking, all archived UI art:
+
+```
+23246 / 23246 sprites      214 / 214 assets      469349 rows
+```
+
+every row's declared byte extent consumed exactly, every opcode class exercised
+(`0x80`:53528  `0x90`:14305  `0xa0`:362602  `0xb0`:160909  `0xc0`:324638  `0xd0`:27829
+ `0xe0`:5884  `0xf0`:15546  literal:751933).
+
+That alone is not proof, because only **41.8%** of rows decode to exactly `w` pixels. The
+deficit is legitimate: the last packet on a short row is `0x00` in essentially every case, and
+`0x00` means "the rest is transparent". Confirmed on `int_main.i16` sprite 0 (the bottom bar):
+440 of 505 rows reach exactly 1600, and all 65 that do not end with an explicit `0x00`.
+
+**The decisive test is stronger than the oracle §26 asked for.** Decoding every sprite to
+per-pixel columns and re-encoding it reproduces PopTop's byte stream **exactly**:
+
+```
+IDENTITY ROUND-TRIP: 214 / 214 assets byte-identical, 0 failed
+  covering 23246 sprites, 469349 rows
+```
+
+A wrong length, a wrong count field, a missed opcode class or a mis-set high bit anywhere in
+1.75 million packets would desync a row and change a byte. None does.
+
+**And the picture was looked at**, per §60.4. `int_main.i16` sprite 0 rendered as an opcode
+class map is the Tropico HUD bar: the rotated portrait diamond, the scrollwork panel, the wall,
+the circular minimap and its button strip, coherent across all 1600 columns and 505 rows. A
+wrong opcode length shears the image diagonally. It does not shear.
+
+### 62.5 The rescaler
+
+`tools/tropico-hsquash.py`. It is not a packet-span duplicator — decoding turned out to be
+complete enough to do better. Columns are selected nearest-neighbour, exactly as §28 selects
+rows, and **every surviving pixel's payload byte is copied verbatim**. Only opcode headers are
+re-synthesised, which is unavoidable in any approach because the counts change; and each row's
+own terminator byte is carried through rather than regenerated.
+
+Container fields rewritten: block `packed_size`/`x`/`w`, the 15-byte table entry's two size
+copies, and `region_end[0..6]`. `region_start` and the 921-byte pre-table region are untouched.
+
+Every sprite is re-walked against its claimed new width before the function returns
+(`check()`), so the tool cannot emit a stream it cannot itself parse.
+
+Results across all 42 `.i16` UI assets (4646 sprites, 137704 rows):
+
+| target | assets OK | failed | size |
+|---|---|---|---|
+| 1600 -> 1920 | 42 | 0 | 1.18x |
+| 1600 -> 2560 | 42 | 0 | 1.54x |
+| 1600 -> 1280 | 42 | 0 | 0.81x |
+
+**Positive control, per TESTING.md.** Downscaling `.i16` to 1280 and comparing against PopTop's
+own `.i12` art: **3639 / 4646 sprite widths match exactly (78.3%)**, and 878 of the 1007
+mismatches are +/-1. That is the rounding disagreement expected from §26's separate-axis layout
+pass, and it confirms the `w` field semantics and the scale factor against art we did not
+generate. It confirms *geometry*, not pixels — PopTop resampled with a real image tool, we
+select columns.
+
+### 62.6 Scope, stated honestly
+
+The format is validated on **single-level containers**, which is all UI art and the entire
+target of this work. Across non-UI assets the split is clean and is a **container** issue, not
+a packet issue:
+
+```
+non-UI, single-level containers : 4978 ok / 20 fail
+non-UI, mipped containers       : 150 ok / 1785 fail
+```
+
+Mipped building `.imb` art puts real `[start, end)` pairs in the seven-entry arrays (§26), so
+the sprite chain from `region_start[0]` does not describe the whole file — the same shape as
+§26's `glastube` exception. Extending the container walk per mip level is separate work and the
+HUD does not need it.
+
+### 62.7 Where the project stands
+
+The blocker named in §61.4 is gone. The route the project has been converging on since §50 —
+a derived art set generated from the user's own `.i16` files — is now mechanically possible at
+any width, and the vertical axis was already solved in §28. `.i09` sets can be generated.
+
+**Not yet done, and none of it is format work:** combining `tropico-hsquash.py` with
+`tropico-vsquash.py` into one two-axis generator, repointing slot 4 at a new suffix from the
+proxy DLL (one pointer write at `0x5a12d8`, §11/ROADMAP), and looking at the result in game.
+Quality is nearest-neighbour on both axes and the font assets will suffer most (§28); that is
+now a tuning question with a working pipeline behind it, not a blocker.
+
+## 63. The art set works in game — 1920x1080 HUD is correct, and the residual is 16:9 geometry
+
+The §62 codec was turned into a pipeline and run. **The HUD at 1920x1080 is correct.** Owner,
+first look: "It looks perfect... I didn't see any other UI problems, nothing stood out."
+
+### 63.1 §24 is CONFIRMED — loose files really do override the archives
+
+§24 inferred this from 17 files shipping both ways and flagged it as unverified; §48.2 repeated
+the caveat. The art set is delivered as loose `data/*.i16` and it visibly changed the game, so
+the inference is now **confirmed by observation**. `px.PK2` was never opened for writing.
+
+Consequence: `.WIN` layout files can be overridden the same way, which is what makes §63.5
+possible at all.
+
+### 63.2 `tools/tropico-artset.py`
+
+One decode/re-encode pass per sprite, combining §28's row selection with §62's column
+selection. It does **not** chain `tropico-vsquash.py` into `tropico-hsquash.py`, because
+vsquash copies row spans verbatim *including their terminator*, and §62.3 established that a
+row may end with `0x00`, with `0xC0`, or with nothing. A `0xC0`-terminated row copied into a
+non-final position kills every row after it — 500 of the 23246 archived sprites end that way.
+Re-encoding assigns terminators instead: non-final positions always get `0x00`; the final
+position inherits the source row's terminator, except a `0x00` becomes nothing.
+
+Validated by identity: regenerating at 1600x1200 is **byte-identical for 78/78 assets**. That
+oracle caught the terminator bug before it ever reached the game.
+
+### 63.3 The asset list was half missing, and the missing half was the important half
+
+Harvesting `.imm` names from `Tropico.EXE` yields 42 assets. §48.2 recorded that HUD art names
+live inside the `.WIN` files instead — so the exe-only regex misses `int_main.imm`, the bottom
+bar, i.e. the ONE widget §48.4 proved takes the broken placement path. Harvesting both sources
+yields **79**. An exe-only set would have left the single most important asset stock and the
+run would have looked like a failure of the codec.
+
+`glastube.i16` is skipped and left stock: §26's known exception, sections outside the sprite
+chain.
+
+### 63.4 Fonts: measured twice, and both answers were counter-intuitive
+
+**Fonts must not be scaled per-axis.** PopTop scaled their own fonts uniformly — their `.i12`
+screen is 2.000x wider but its glyphs are 2.089x wide, and the mean aspect change across all 17
+font assets is 0.960 (`.i12`) and 1.024 (`.i16`). Glyph width never follows screen width.
+Applying the chrome's 1.20 x 0.90 distorts every glyph by 1.33.
+
+**Font pixels are 100% alpha-run class** — 922150 of 922150 across all 17 assets, against 99%
+palettised literals for the chrome, and *no* asset anywhere is partially alpha. An alpha is a
+number, so fonts can be area-averaged; palette indices cannot. The tool detects fonts by opcode
+class, not by a filename list.
+
+The alpha convention matters and is not the obvious one. From the blend at the end of
+`FUN_00538ba0`, `result = (255 - a) * dst + a * src`, and the `a == 0` case is handled
+separately by writing the constant colour **outright**. So a stored 0 means FULLY OPAQUE, a
+sentinel for 256. Transparency is only ever an *absent* pixel. Averaging raw bytes would punch
+holes through solid text.
+
+**But the final answer is to leave fonts alone entirely.** Default font scale is **1.0**, which
+emits files byte-identical to PopTop's. Reason in §63.5.
+
+### 63.5 The residual is 16:9 geometry, and no font size can fix it
+
+At 1920x1080 off 1600x1200 art the horizontal axis **grew 20%** and the vertical **shrank 10%**.
+Text drawn horizontally therefore has 20% slack; text drawn **rotated** runs along the axis that
+shrank. One uniform font size cannot satisfy both.
+
+Measured, length of "OVERVIEW" against its widget's long axis:
+
+| set | ratio |
+|---|---|
+| `.i06` | 1.23 |
+| `.i10` | 1.17 |
+| `.i12` | **1.07** |
+| `.i16` (our parent) | 1.15 |
+| ours, font 0.90 | 1.14 |
+| ours, font 1.00 | ~1.28 |
+
+So font 0.90 reproduces stock `.i16` proportions exactly, and the overhang the owner noticed
+against a 1280x1024 screenshot is because `.i12` is the tightest of PopTop's five sets — not
+because the pipeline is wrong.
+
+Owner's verdict on both, in game: 1.00 is better. Nearly all text is horizontal, and sizing
+every glyph in the game for the rotated minority makes everything soft to fix a handful of
+labels. **Rotated text overhangs by ~11% and that is accepted.**
+
+### 63.6 The too-wide tabs are the ENGINE, not the art
+
+Owner: "the tabs themselves also look a lot wider than they probably should." Measured — they
+are not sprites. `WIN 525a3aab` holds six widgets at `w=88 h=256` in virtual 3200x2400:
+
+| | on screen |
+|---|---|
+| 1280x1024 | 35 x 109 px |
+| 1920x1080 | 52 x 115 px — **1.49x wider**, 1.06x taller |
+
+That is the engine scaling its own widget rect per-axis. It is the same 16:9 distortion as the
+fonts, one level up: PopTop never met it because all five of their sets are ~4:3 and 1280x1024,
+their only outlier, is 6.7% off.
+
+**A refuted hypothesis, recorded because it was nearly acted on.** `butrot.imm` ("button
+rotated") looked like a sprite drawn rotated, which would need its axes transposed. PopTop's own
+sets refute it: `butrot` scales *normally* (`.i12` w 1.976 -> 2.000, h 2.101 -> 2.133), exactly
+like `almanac` and `brempty`. Transposing it would have broken working art. PopTop's five sets
+are a free oracle for this class of question and should be used before any axis-convention
+change.
+
+### 63.7 Open, and honestly costed
+
+Fixing the rotated-text overhang properly means giving those widgets more room, i.e. patching
+`.WIN` rects and shipping them as loose overrides (§63.1 makes that possible). Scope: **51
+tall-narrow widgets across 7 files**, of 877 widgets in 32 parseable files. Two real risks —
+`h > 2w` is a proxy for "hosts vertical text" rather than proof, and 13 of the 45 `.WIN`
+entries still do not parse to exact EOF, so they could not be rewritten safely. Growing a
+widget's height can also overlap its neighbours. Not started; not recommended before the
+packaging work.

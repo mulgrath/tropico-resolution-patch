@@ -21,9 +21,9 @@ hand to another person.
 | 1600x900 world render | correct, true 16:9, full screen, no shear — confirmed on both a 1080p and a 1440p panel |
 | 1600x900 HUD chrome | broken — art authored for a 1200-tall screen |
 | 1920x1080 world render | **works** (§44) — full-width terrain and void on Software and Hardware, reduce-shifting either way. Needs `[Resolution] 1920x1080` + `[WorldFix] ObjW=3200`; the auto-picker still will not choose it because `ART_WIDTH_CAP` is 1600 |
-| 1920x1080 HUD chrome | still authored for 1600x1200 — the art mod is now the blocker, not the engine |
+| 1920x1080 HUD chrome | **WORKS — confirmed in game (§63).** `tools/tropico-artset.py` generates the full 79-asset set from the user's own `px.PK2`; delivered as loose `data/*.i16`. Residual: rotated text overhangs ~11%, which is 16:9 geometry, not the pipeline (§63.5). |
 | Arbitrary-resolution world render | **works** (§47) — verified at 1920x1080 and 2560x1440, same binary, every renderer. Four writes at `0x526220`. Known-good build archived in `known-good/` |
-| HUD / UI at any non-stock mode | broken — 1600x1200 art, unscaled and misplaced. **This is now the whole remaining problem**. Mechanism mapped in §48: two placement paths, and in `MAINWIN.WIN` only **one** widget takes the broken one |
+| HUD / UI at any non-stock mode | broken in game, but **no longer blocked**. The engine will not scale HUD art by any route (§50/§60/§61), so a derived art set is required — and §62 decoded the `.iNN` packet format, so that set can now be generated at any width from the user's own files. Remaining work is pipeline and verification, not research. |
 | Zoomed detail preview (bottom right) | **fixed** (§47) — was ours, caused by an unguarded write; a size gate separates it from the main viewport at any mode |
 | Centring / upscaling | **not started** — game paints top-left, rest black (§15) |
 
@@ -145,10 +145,21 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
 3. ~~Confirm whether five per-resolution sets exist.~~ **Done — they do.** §11 stands.
 4. Positions vs art: §12 already shows corner-anchored widgets land correctly from the real
    resolution while fixed art spans do not, so the gap is the **art**, not a position table.
-5. **NEXT, and the blocker:** decode the `.iNN` image format. The blobs carry no header or
-   magic (`defd_scr.i06` begins `7e 79 b1 79 22 00 41 e0`), so they are palettised and/or
-   compressed. Nothing can be authored until this is understood. Start from the smallest
-   assets (`defd_scr.i06`, 505 bytes) and from the loader that consumes them.
+5. ~~**NEXT, and the blocker:** decode the `.iNN` image format.~~ **DONE — §62.** The packet
+   format was read out of the leaf blitter `FUN_00538ba0` (not `FUN_00501b90`, which is only a
+   dispatcher) and validated byte-exact: decoding and re-encoding every archived UI asset
+   reproduces PopTop's bytes identically (214/214 assets, 23246 sprites, 469349 rows).
+   `tools/tropico-hsquash.py` rescales horizontally at any width; all 42 `.i16` assets convert
+   cleanly to 1920, 2560 and 1280.
+
+6. ~~**NEXT:** combine into one two-axis generator and look at it in game.~~ **DONE — §63.**
+   `tools/tropico-artset.py`. No suffix repoint was needed: loose `data/` overrides win
+   (§24 now CONFIRMED by observation, §63.1), so the set ships as plain `.i16` files and is
+   undone by deleting them. `px.PK2` is never written.
+
+7. **NEXT:** packaging. Generate the set at install time from the user's own archives, pick
+   the mode automatically, and ship it as one step. Optional polish, costed in §63.7: patch
+   `.WIN` rects so rotated-text widgets stop overhanging.
 
 ## Ground rules
 
