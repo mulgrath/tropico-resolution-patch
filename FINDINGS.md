@@ -3405,3 +3405,67 @@ So quality is not the reason to rule stretching out. **Availability is.** That d
 matters for the style-1 lead (§50.7): if that path can be made to fire, the result would look
 acceptable — the risk is entirely that it is an unexercised path in a 2001 engine, not that
 its output would be ugly.
+
+## 51. Run K: style 1 corrupts under Software — and the question was never actually put
+
+Owner ran the §50.7 phase probe. Observed, in phase order:
+
+| phase | forced | seen |
+|---|---|---|
+| 0 | style 0, rect 560 | fine — stock |
+| 1 | style 0, rect 280 | **quarter** circle at full scale — §50 reproduced exactly |
+| 2 | style 1, rect 280 | **corruption** — not a half-size circle, not a quarter |
+| 3 | style 1, rect 560 | **full size + corruption** |
+
+### 51.1 The run was Software from beginning to end, so the stretch question was not asked
+
+```
+[hudprobe] ph=2 ... renderer SOFTWARE ...
+[hudprobe] ph=3 ... renderer SOFTWARE ...     (every tick of the entire run)
+```
+
+`FUN_005002c0` forks on `ds:0x5a0f8c`: Direct3D goes to `0x500512`, which builds texture
+coordinate steps from source/destination ratios — **the only branch that can stretch** —
+while Software goes to `0x5005ba`, a 128-tile 1:1 copy with no ratio arithmetic at all. The
+owner never left Software, so `0x500512` never executed.
+
+**This is my error, and the same one as §50.4 in a new place.** §50.8's own table says the
+stretch lives in the D3D branch; the run instructions then required reduce-shifting to be off
+and said nothing about the renderer. The probe logged the renderer because §37 made that
+mandatory, which is the only reason this is a diagnosis rather than a wrong conclusion.
+
+**Fixed structurally, not by instruction:** the phase thread now reads `0x5a0f8c` itself and
+**refuses to apply style 1 while the renderer is Software**, logging
+`*** style 1 SUPPRESSED: renderer is SOFTWARE, which cannot stretch ***`, and re-applying it
+the moment Hardware 3D goes live. An operator can no longer spend a run on a question the
+configuration cannot answer.
+
+### 51.2 What run K DID establish: style 1 is unusable under Software
+
+At both rect sizes — including phase 3, where the destination equals the art's natural size
+and no scaling is even implied — style 1 produced corruption. So the software branch of
+`FUN_005002c0` is not merely un-scaling for these sprites, it is **wrong**: it reads the
+sprite through 128-tile atlas addressing that the style-0 path never uses, and produces
+garbage. Consistent with §50.8's reading that style 1 was designed out rather than left idle.
+
+Since the owner prefers Software (ROADMAP), this on its own removes style 1 as a *default*
+route even if the D3D branch turns out to stretch. The most style 1 could ever be is a
+Hardware-3D-only option.
+
+### 51.3 A second broken instrument, caught by the screen disagreeing with it
+
+Every tick logged `live rect on entry: 560 x 560`, in all four phases — including phases
+where the owner could *see* the 280 write taking effect. The recording sat inside the
+`cmp eax,4 / jae nostore` first-four-samples gate, so it captured frame one and then froze.
+An instrument printing a constant across varied inputs is TESTING.md's own signal, and here
+it would have supported exactly the wrong conclusion ("the writes never landed") had the
+screen not contradicted it. The live rect is now recorded on every match, outside the gate.
+
+Note what saved it: the phase-1 quarter circle *requires* the 280 write to have landed, so
+the screen and the log could not both be right. Keep at least one channel that a broken
+counter cannot fake.
+
+### 51.4 Still open, and now answerable in one run
+
+Does the Direct3D branch at `0x500512` stretch a style-1 sprite onto its destination rect?
+Same build, same ini, **Hardware 3D**. The probe now enforces it.

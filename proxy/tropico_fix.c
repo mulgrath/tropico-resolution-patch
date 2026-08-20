@@ -1765,6 +1765,7 @@ static volatile DWORD g_hud_calls, g_hud_hits;
 static volatile DWORD g_hud_hash[4], g_hud_live[4];
 /* written by the phase thread, read by the stub every draw */
 static volatile DWORD g_hud_style = 0, g_hud_cx = 0, g_hud_cy = 0;
+static volatile DWORD g_hud_style_want = 0;
 static DWORD g_hud_delay, g_hud_every, g_hud_dwell;
 
 /* s50.7 / s50.8: does class-4 STYLE 1 stretch the sprite onto the widget rect?
@@ -1824,10 +1825,14 @@ static int patch_hud_probe(void)
     stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x66;                   /* mov edx,[ecx+0x66]   */
     stub[i++]=0x89; stub[i++]=0x14; stub[i++]=0x85;
     memcpy(stub+i,&a_hash,4); i+=4;                                   /* mov [hash+eax*4],edx */
-    stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x0f;                   /* mov edx,[ecx+0x0f]   */
-    stub[i++]=0x89; stub[i++]=0x14; stub[i++]=0x85;
-    memcpy(stub+i,&a_live,4); i+=4;                                   /* mov [live+eax*4],edx */
     stub[f4] = (BYTE)(i - f4 - 1);                                    /* nostore:             */
+    /* The live rect is recorded on EVERY match, not only the first four.  In run K
+     * it sat inside the first-four gate, froze on frame one and read "560 x 560"
+     * for the whole run -- an instrument reporting a constant, which is the shape
+     * of a broken one (s48.0).  The screen disagreed with it and the screen was
+     * right. */
+    stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x0f;                   /* mov edx,[ecx+0x0f]   */
+    stub[i++]=0x89; stub[i++]=0x15; memcpy(stub+i,&a_live,4); i+=4;   /* mov [g_hud_live],edx */
     stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_hits,4); i+=4;   /* inc [g_hud_hits]     */
 
     stub[i++]=0xa1; memcpy(stub+i,&a_cx,4); i+=4;                     /* mov eax,[g_hud_cx]   */
@@ -1868,9 +1873,26 @@ static DWORD WINAPI hudprobe_thread(LPVOID unused)
     Sleep(g_hud_delay * 1000);
     int ph = -1; DWORD next = 0;
     for (int t = 0;; t++) {
+        DWORD hw3d = wfb_read32(g_hud_table_va - 0x14);   /* 0x5a0f8c */
+        /* Run K spent its whole life in Software, where style 1 takes the tiled
+         * 1:1 branch of FUN_005002c0 and never reaches the ratio arithmetic at
+         * 0x500512 -- so the question could not have been answered, and the
+         * corruption on screen was the wrong branch failing.  Rather than rely on
+         * the operator remembering, suppress style 1 unless the renderer that can
+         * stretch is actually live, and say so. */
+        if (g_hud_style_want && !hw3d && g_hud_style) {
+            g_hud_style = 0;
+            logf_("  [hudprobe]   *** style 1 SUPPRESSED: renderer is SOFTWARE, which"
+                  " cannot stretch.  Press F2 and switch to Hardware 3D. ***");
+        } else if (g_hud_style_want && hw3d && !g_hud_style) {
+            g_hud_style = g_hud_style_want;
+            logf_("  [hudprobe]   Hardware 3D is live -- style %lu now applied",
+                  (unsigned long)g_hud_style);
+        }
         if (GetTickCount() >= next) {
             ph = (ph + 1) % g_hud_nph;
-            g_hud_style = g_hud_ph_style[ph];
+            g_hud_style_want = g_hud_ph_style[ph];
+            g_hud_style = (g_hud_style_want && !hw3d) ? 0 : g_hud_style_want;
             g_hud_cx = g_hud_cy = g_hud_ph_size[ph];
             next = GetTickCount() + g_hud_dwell * 1000;
             logf_("  [hudprobe] ===> PHASE %d: style %lu, rect %lux%lu  (%s)", ph,
@@ -1881,7 +1903,7 @@ static DWORD WINAPI hudprobe_thread(LPVOID unused)
                 : "DISCRIMINATOR: whole image at half size = IT STRETCHES");
         }
         DWORD w = wfb_read16(0x60c18c), h = wfb_read16(0x60c18e);
-        DWORD hw = wfb_read32(g_hud_table_va - 0x14);
+        DWORD hw = hw3d;
         DWORD cfg = wfb_read32(0x612fec), slot = 0xffffffff;
         if (cfg && !IsBadReadPtr((void *)(SIZE_T)cfg, 0x1c))
             memcpy(&slot, (BYTE *)(SIZE_T)(cfg + 0x18), 4);
@@ -1892,6 +1914,9 @@ static DWORD WINAPI hudprobe_thread(LPVOID unused)
               (slot < 5 ? suf[slot] : "?"), hw ? "HARDWARE 3D" : "SOFTWARE",
               (unsigned long)g_hud_calls, (unsigned long)g_hud_hits,
               (unsigned long)(g_hud_live[0] & 0xffff), (unsigned long)(g_hud_live[0] >> 16));
+        if (g_hud_style_want && !hw3d)
+            logf_("  [hudprobe]   (this phase is INCONCLUSIVE while the renderer is"
+                  " Software -- the branch that can stretch is never reached)");
         if (g_hud_calls == 0)
             logf_("  [hudprobe]   *** ZERO class-4 draws -- the detour is NOT running."
                   "  Do not interpret the screen. ***");
