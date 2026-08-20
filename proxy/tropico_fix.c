@@ -33,6 +33,7 @@
 
 #include <windows.h>
 #include <stdio.h>
+#include <tlhelp32.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <math.h>
@@ -547,8 +548,8 @@ static DWORD g_scan_lo, g_scan_hi, g_scan_repeat;
  * 1920 -- and then the game recomputed the rect on the next camera move and put
  * 1600 back, which read as "finnicky" rather than as "correct but not held". A
  * derived value has to be held, not set. Same lesson as trap 2 in TESTING.md. */
-#define SCAN_MAX_HITS 256
-static DWORD *g_hit[SCAN_MAX_HITS]; static int g_hits;
+#define SCAN_MAX_HITS 4096
+static DWORD *g_hit[SCAN_MAX_HITS]; static DWORD g_hit_addr[SCAN_MAX_HITS]; static int g_hits;
 static char  g_scan_scope[16];
 
 static void scan_report(BYTE *base, SIZE_T len, const char *what, int *n32, int *n16)
@@ -564,7 +565,7 @@ static void scan_report(BYTE *base, SIZE_T len, const char *what, int *n32, int 
             (*n32)++;
             if (g_scan_repl) {
                 DWORD r = g_scan_repl; memcpy(at, &r, 4);
-                if (g_hits < SCAN_MAX_HITS) g_hit[g_hits++] = (DWORD *)at;
+                if (g_hits < SCAN_MAX_HITS) { g_hit_addr[g_hits] = va; g_hit[g_hits++] = (DWORD *)at; }
             }
         }
     }
@@ -631,6 +632,86 @@ static void maybe_load_pokes(void)
     if (g_poke_n) logf_("[*] %d poke(s) loaded, repeat=%d", g_poke_n, g_poke_repeat);
 }
 
+/* --------------------------------------------------------------- write watch
+ *
+ * FINDINGS 33/34. Bisecting a heap that re-lays-out between runs is slow and the
+ * address is not stable, so stop chasing the VALUE and catch the CODE. x86 debug
+ * registers give a hardware write breakpoint: arm DR0..DR3 on addresses that hold
+ * 1600, and every store to them traps with EIP pointing at the instruction that
+ * did it. That is the "find what writes to this address" of a memory scanner, and
+ * it yields a code address -- which, unlike a heap address, is stable and
+ * patchable.
+ *
+ *   [Watch]
+ *   Auto=1     arm on the first up-to-4 addresses the scan found
+ *   Max=60     stop logging after this many traps (they can be per-frame)
+ *
+ * Wine implements debug registers via ptrace; if the arming fails it says so
+ * rather than silently watching nothing.
+ */
+static int g_watch_auto, g_watch_max, g_watch_seen;
+static DWORD g_watch_eip[32]; static int g_watch_neip;
+
+static LONG CALLBACK watch_veh(EXCEPTION_POINTERS *ep)
+{
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP)
+        return EXCEPTION_CONTINUE_SEARCH;
+    DWORD eip = ep->ContextRecord->Eip;
+    int known = 0;
+    for (int i = 0; i < g_watch_neip; i++) if (g_watch_eip[i] == eip) { known = 1; break; }
+    if (!known && g_watch_neip < 32) {
+        g_watch_eip[g_watch_neip++] = eip;
+        logf_("  [watch] store from EIP %08x   (module+0x%x)",
+              (unsigned)eip, (unsigned)(eip - (DWORD)(SIZE_T)g_base));
+    }
+    if (++g_watch_seen > g_watch_max) {           /* disarm to stop flooding */
+        ep->ContextRecord->Dr7 = 0;
+        logf_("  [watch] limit reached, disarmed");
+    }
+    ep->ContextRecord->Dr6 = 0;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+/* DR7 for slot i: local-enable bit (2i), RW bits at 16+4i (01 = write only),
+ * LEN bits at 18+4i (11 = four bytes). */
+static void watch_arm_thread(HANDLE th, DWORD *addrs, int n)
+{
+    CONTEXT c; memset(&c, 0, sizeof c);
+    c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    if (!GetThreadContext(th, &c)) { logf_("  [watch] GetThreadContext failed"); return; }
+    DWORD dr7 = 0;
+    for (int i = 0; i < n && i < 4; i++) {
+        (&c.Dr0)[i] = addrs[i];
+        dr7 |= (DWORD)1 << (2 * i);
+        dr7 |= (DWORD)0x1 << (16 + 4 * i);
+        dr7 |= (DWORD)0x3 << (18 + 4 * i);
+    }
+    c.Dr7 = dr7; c.Dr6 = 0;
+    c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    if (!SetThreadContext(th, &c)) logf_("  [watch] SetThreadContext failed (err %lu)", GetLastError());
+}
+
+static void watch_arm_all(DWORD *addrs, int n)
+{
+    logf_("--- arming write watch on %d address(es) ---", n < 4 ? n : 4);
+    for (int i = 0; i < n && i < 4; i++) logf_("    DR%d = %08x", i, (unsigned)addrs[i]);
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) { logf_("  [watch] no thread snapshot"); return; }
+    THREADENTRY32 te; te.dwSize = sizeof te;
+    DWORD pid = GetCurrentProcessId(), me = GetCurrentThreadId();
+    int armed = 0;
+    if (Thread32First(snap, &te)) do {
+        if (te.th32OwnerProcessID != pid || te.th32ThreadID == me) continue;
+        HANDLE th = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME,
+                               FALSE, te.th32ThreadID);
+        if (!th) continue;
+        SuspendThread(th); watch_arm_thread(th, addrs, n); ResumeThread(th);
+        CloseHandle(th); armed++;
+    } while (Thread32Next(snap, &te));
+    CloseHandle(snap);
+    logf_("  [watch] armed on %d thread(s)", armed);
+}
+
 static DWORD WINAPI scan_thread(LPVOID unused)
 {
     (void)unused;
@@ -668,7 +749,14 @@ static DWORD WINAPI scan_thread(LPVOID unused)
     }
     logf_("  %d u32 hit(s), %d u16 hit(s)%s", n32, n16,
           g_scan_repl ? " -- ALL OVERWRITTEN" : "");
+    if (g_scan_repl && n32 > g_hits)
+        logf_("  [!] recorded only %d of %d hits -- the rest are NOT held. Narrow with Lo/Hi.",
+              g_hits, n32);
     logf_("--- scan done ---");
+    if (g_watch_auto && g_hits) {
+        AddVectoredExceptionHandler(1, watch_veh);
+        watch_arm_all((DWORD *)(void *)g_hit_addr, g_hits);
+    }
     if (g_scan_repeat && g_hits) {
         logf_("--- holding %d scan hit(s) at %u, rewriting every 200ms ---",
               g_hits, (unsigned)g_scan_repl);
@@ -699,6 +787,8 @@ static void maybe_start_scan(void)
     g_scan_repl = GetPrivateProfileIntA("Scan", "Replace", 0, path);
     g_scan_bits = GetPrivateProfileIntA("Scan", "Bits", 0, path);
     g_scan_repeat = GetPrivateProfileIntA("Scan", "Repeat", 0, path);
+    g_watch_auto = GetPrivateProfileIntA("Watch", "Auto", 0, path);
+    g_watch_max  = GetPrivateProfileIntA("Watch", "Max", 60, path);
     g_scan_lo = (DWORD)GetPrivateProfileIntA("Scan", "Lo", 0, path);
     g_scan_hi = (DWORD)GetPrivateProfileIntA("Scan", "Hi", 0, path);
     GetPrivateProfileStringA("Scan", "Scope", "image", g_scan_scope, sizeof g_scan_scope, path);

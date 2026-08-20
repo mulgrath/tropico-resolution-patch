@@ -1532,3 +1532,35 @@ are evenly spaced, which is what an array of view or layer descriptors looks lik
 Why the fix only takes in Hardware 3D with "reduce graphical shifting" on. That option is
 described in-game as affecting Hardware 3D only. It may select a different draw path that
 reads the patched value, while the others read a second copy we have not found.
+
+
+## 34. Bisect: the 0x018e/0x018f group is NOT the bound; switch to catching the writer
+
+Held `0x018e121c`, `0x018e144c`, `0x018e167c`, `0x018f8014`, `0x018f8018`, `0x018f8230` at
+1920, rewritten every 200ms. Log confirms `6 u32 hit(s) -- ALL OVERWRITTEN` and
+`holding 6 scan hit(s)`. Terrain still clipped at 1600. **Range eliminated.**
+
+### Correcting §33's hit list
+
+§33 recorded 23 hits. The next run at the same settings found **498**, of which only 256
+were held — the `SCAN_MAX_HITS` cap, silently. So the "works only if you toggle Software ->
+Hardware(reduce off) -> reduce on" behaviour was measured with roughly half the values held
+and ~250 unrelated dwords overwritten. That sequence-dependence is an artefact of partial
+application and collateral damage, **not** a property of the engine. Cap raised to 4096 and
+the log now warns when it truncates.
+
+The hit count varying 23 -> 498 -> 6 between runs also shows the heap is laid out
+differently each time, so an absolute heap address is not a stable unit and blind bisection
+is expensive.
+
+### The right tool: catch the store, not the value
+
+x86 debug registers give a hardware write breakpoint. `[Watch] Auto=1` arms DR0..DR3 on the
+first four addresses holding 1600, across every thread, via a vectored exception handler.
+Each store traps with `EIP` pointing at the instruction responsible, logged as
+`module+0xNNNN` — a **code** address, which is stable across runs and directly patchable,
+unlike a heap address.
+
+DR7 per slot i: local-enable at bit 2i, RW at 16+4i = 01 (write), LEN at 18+4i = 11 (4 bytes).
+Wine implements debug registers through ptrace; the arming path logs failure explicitly
+rather than silently watching nothing.
