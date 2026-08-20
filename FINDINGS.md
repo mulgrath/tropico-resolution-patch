@@ -3469,3 +3469,87 @@ counter cannot fake.
 
 Does the Direct3D branch at `0x500512` stretch a style-1 sprite onto its destination rect?
 Same build, same ini, **Hardware 3D**. The probe now enforces it.
+
+## 52. CONFIRMED: class-4 style 1 stretches under Direct3D — and it removes the packet-encoding blocker
+
+Owner re-ran §51.4 in Hardware 3D. The probe applied style 1 (no `SUPPRESSED` lines), the
+fixed live-rect readout tracked the phases correctly (`280 x 280` in phase 2, `560 x 560` in
+phase 3), and the placeholder circle appeared **stretched and visibly blurrier**.
+
+```
+[hudprobe] ph=2  screen 1600x900  slot 4 art .i16  renderer HARDWARE 3D  live rect on entry: 280 x 280
+[hudprobe] ph=3  screen 1600x900  slot 4 art .i16  renderer HARDWARE 3D  live rect on entry: 560 x 560
+```
+
+So the Direct3D branch at `0x500512` does what reading it suggested: it builds texture
+coordinate steps from source/destination ratios and **stretches the sprite onto the widget's
+destination rectangle**, with bilinear filtering — hence "more blurry", which is the
+signature of a filtered rescale rather than a crop.
+
+### 52.1 The "stretch" the owner saw is the LAYOUT being obeyed, not a defect
+
+The run was at **1600x900 with `.i16` art**, and the arithmetic explains the distortion
+exactly:
+
+```
+rect 560 virtual  ->  560 * 1600/3200 = 280 px wide
+                      560 *  900/2400 = 210 px tall
+brempty.i16 sprite                      277 x 279 px
+```
+
+The art is authored for a **1200**-tall screen; the layout says the widget is 210 px tall on a
+**900**-tall screen. Style 1 makes the art conform to the layout, so a circle becomes an
+ellipse at 75% height. That is not style 1 misbehaving — it is what "the layout scales and
+the art does not" looks like once the art is finally forced to follow.
+
+### 52.2 The important consequence: this is the SAME geometry a derived art set would give
+
+§28's plan for the bottom bar was to resample 1600x505 down to **1600x379** — a 0.75 vertical
+squash. Style 1 applies that same 0.75 at runtime, to every class-4 widget with art, on both
+axes at once. Worked through for any path-A widget the two routes are geometrically identical:
+
+| | derived `.iNN` set at 1600x900 | style 1 with stock `.i16` |
+|---|---|---|
+| sprite drawn | 277 x 209 (pre-squashed offline), blitted 1:1 | 277 x 279 stretched to 280 x 210 |
+| result on screen | 280 x 210 | 280 x 210 |
+
+So **the distortion is not a cost of style 1.** It is inherent to a 4:3 virtual design space
+(3200x2400) displayed on a 16:9 screen, and it is PopTop's own idiom — §26 measured their
+1280x1024 set as x2.000 horizontally and x2.133 vertically off the 640x480 set. The two
+routes differ only in *how* the same pixels are produced:
+
+| | derived art set | style 1 |
+|---|---|---|
+| when | offline, per target resolution | runtime, any resolution |
+| **horizontal rescale** | **needs the undecoded packet encoding (§26)** | **free — the GPU does it** |
+| renderer | any | **Direct3D only** — Software corrupts (§51.2) |
+| filtering | nearest-neighbour row selection: sharp, aliases badly on fonts (§28) | bilinear: smooth, blurry |
+| delivery | modified archive or a sixth suffix | one field per widget, from the proxy |
+
+**The blocker is gone.** The `.iNN` packet control byte was the critical path only because a
+width change needed it. Style 1 makes width free, so 1920x1080 and 2560x1440 stop depending
+on a format that has never been decoded.
+
+### 52.3 What style 1 does NOT fix
+
+* **Software.** §51.2: corruption at any rect size. This is the owner's preferred renderer,
+  and it makes the whole route Direct3D-only. That is the real cost, and it interacts with
+  §23 (Hardware 3D smears under Proton) and §17 (alt-tab `DDERR_INVALIDRECT`).
+* **The bottom bar.** `int_main` widget 17 is **path B** (zero rect, §48.3), so its rect is
+  derived from the art's own pixels — an identity round-trip. Style 1 would stretch it onto
+  exactly the rect it already occupies, i.e. change nothing. The bar needs Option 1 (patch
+  `FUN_00502510` to convert with the art set's design resolution instead of the live mode) in
+  addition. The two compose: Option 1 gives the bar a full-width, correctly-proportioned rect;
+  style 1 then makes the art fill it.
+* **Classes other than 4.** Only class 4 has a style field. The 26 class-1 buttons, 114
+  class-0x80 frames and the rest draw through their own methods; whether any of them scales
+  is **not established** — a coarse scan for rect reads cannot distinguish a destination from
+  a clip, which is exactly the §50.4 mistake, so it is not being guessed at here.
+
+### 52.4 Next run: how much of the HUD does this actually fix?
+
+The honest way to find out is to stop reasoning about widget counts and look. Force style 1 on
+**every class-4 widget that has art** (the same null-asset guard, §51's hazard) and alternate
+it against stock every 15 s at 1920x1080 in Hardware 3D. Two things become visible at once:
+how much of the chrome snaps into proportion, and how much of it is left behind by classes
+that have no style field.
