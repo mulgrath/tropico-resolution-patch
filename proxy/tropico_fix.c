@@ -1786,6 +1786,48 @@ static volatile DWORD g_hud_style_want = 0;
 static volatile DWORD g_chr_kx = 65536, g_chr_ky = 65536;
 static volatile DWORD g_chr_on = 0, g_chr_style = 0;
 static volatile DWORD g_chr_hits;
+static volatile DWORD g_chr_dirty;
+static float g_chr_fx = 2.0f, g_chr_fy = 2.0f;
+static const DWORD CHR_ART_W[5] = { 640, 800, 1024, 1280, 1600 };
+static const DWORD CHR_ART_H[5] = { 480, 600,  768, 1024, 1200 };
+
+/* The factors MUST be correct before the game first builds a window, and run O
+ * proves a delayed poll is not good enough: hudprobe_thread sleeps Delay seconds
+ * before its first update, the map loaded inside that window, and FUN_00502510 --
+ * which runs ONCE (s53.2) -- consumed the 2.0f static initialiser at slot 0 where
+ * the right value is 5.0.  The bar's rect came out 1280x404 instead of 3200x1010,
+ * the log printed that verbatim, and it then persisted through every F2.
+ *
+ * So: start at DLL load, poll at 50 ms, and on a slot change raise a dirty flag
+ * that makes the stub zero the path-B rect for half a second -- which forces the
+ * pre-draw back down the path-B branch so the rect is recomputed with the new art
+ * set's factors instead of keeping one computed for the old one. */
+static DWORD WINAPI chrome_factor_thread(LPVOID unused)
+{
+    (void)unused;
+    DWORD last = 0xffffffff, clear_at = 0;
+    for (;;) {
+        DWORD cfg = wfb_read32(0x612fec), sl = 0xffffffff;
+        if (cfg && !IsBadReadPtr((void *)(SIZE_T)cfg, 0x1c))
+            memcpy(&sl, (BYTE *)(SIZE_T)(cfg + 0x18), 4);
+        if (sl < 5) {
+            if (sl != last) {
+                g_chr_fx = 3200.0f / (float)CHR_ART_W[sl];
+                g_chr_fy = 2400.0f / (float)CHR_ART_H[sl];
+                g_chr_dirty = 1;
+                clear_at = GetTickCount() + 500;
+                logf_("  [chrome] slot %lu (art %ux%u) -> factors %.4f / %.4f;"
+                      " path-B rects invalidated for 500 ms so they recompute",
+                      (unsigned long)sl, (unsigned)CHR_ART_W[sl], (unsigned)CHR_ART_H[sl],
+                      g_chr_fx, g_chr_fy);
+                last = sl;
+            } else if (g_chr_dirty && GetTickCount() >= clear_at) {
+                g_chr_dirty = 0;
+            }
+        }
+        Sleep(50);
+    }
+}
 static DWORD g_hud_delay, g_hud_every, g_hud_dwell;
 
 /* s50.7 / s50.8: does class-4 STYLE 1 stretch the sprite onto the widget rect?
@@ -1842,7 +1884,6 @@ static int fix_short(BYTE *stub, int f, int i, const char *what)
  * patch is the exact identity.  That control is built in: if 1600x1200 changes
  * appearance, this is wrong.
  */
-static float g_chr_fx = 2.0f, g_chr_fy = 2.0f;
 static const BYTE CSCALE_SIG[] = { 0x83,0xec,0x14, 0x56, 0x8b,0xf1,
                                    0x8b,0x86,0x90,0x00,0x00,0x00, 0x85,0xc0, 0x0f,0x84 };
 
@@ -1957,6 +1998,15 @@ static int patch_hud_probe(void)
          * The correction now happens where the value is COMPUTED -- the six fmul
          * operands inside FUN_00502510 (see patch_chrome_scale) -- which is
          * idempotent by construction because it is a computation, not a mutation. */
+        {   DWORD a_dy=(DWORD)(SIZE_T)&g_chr_dirty; int d1;
+            stub[i++]=0x83; stub[i++]=0x3d; memcpy(stub+i,&a_dy,4); i+=4; stub[i++]=0x00;
+            stub[i++]=0x74; d1=i++;                                   /* cmp dirty,0; je    */
+            stub[i++]=0x66; stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x0f;
+            stub[i++]=0x00; stub[i++]=0x00;                           /* mov w[ecx+0x0f],0  */
+            stub[i++]=0x66; stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x11;
+            stub[i++]=0x00; stub[i++]=0x00;                           /* mov w[ecx+0x11],0  */
+            if (!fix_short(stub, d1, i, "dirty")) return 0;
+        }
         {   DWORD a_ch=(DWORD)(SIZE_T)&g_chr_hits;
             stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_ch,4); i+=4; } /* inc [g_chr_hits]*/
         stub[i++]=0xa1; memcpy(stub+i,&a_cs,4); i+=4;                 /* mov eax,[g_chr_style]*/
@@ -2032,12 +2082,8 @@ static DWORD WINAPI hudprobe_thread(LPVOID unused)
             if (cfg0 && !IsBadReadPtr((void *)(SIZE_T)cfg0, 0x1c))
                 memcpy(&sl, (BYTE *)(SIZE_T)(cfg0 + 0x18), 4);
             DWORD lw = wfb_read16(0x60c18c), lh = wfb_read16(0x60c18e);
-            if (sl < 5) {
-                g_chr_fx = 3200.0f / (float)ART_W[sl];
-                g_chr_fy = 2400.0f / (float)ART_H[sl];
-                g_chr_kx = (DWORD)((65536.0 * (lw ? lw : ART_W[sl])) / ART_W[sl]);
-                g_chr_ky = (DWORD)((65536.0 * (lh ? lh : ART_H[sl])) / ART_H[sl]);
-            }
+            (void)ART_W; (void)ART_H; (void)sl; (void)lw; (void)lh;
+            /* factors are owned by chrome_factor_thread, which starts at DLL load */
         }
         if (GetTickCount() >= next) {
             ph = (ph + 1) % g_hud_nph;
@@ -2106,6 +2152,7 @@ static void maybe_start_hudprobe(void)
     if (!g_hud_every) g_hud_every = 5;
     g_hud_dwell = GetPrivateProfileIntA("HudProbe", "Dwell", 15, path);
     if (!g_hud_dwell) g_hud_dwell = 15;
+    if (g_chr_enable) CreateThread(NULL, 0, chrome_factor_thread, NULL, 0, NULL);
     if (!g_hud_nph) { logf_("[x] [hudprobe] no phases -- thread not started"); return; }
     CreateThread(NULL, 0, hudprobe_thread, NULL, 0, NULL);
 }

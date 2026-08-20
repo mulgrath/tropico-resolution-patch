@@ -3689,3 +3689,60 @@ pixel-identical to stock at every resolution.
 Run N counted gate A (which `MatchW=0` had reduced to "any class-4 widget with art", hence
 the hundreds of thousands) but had **no counter at all for the path-B gate**, so "how many
 widgets did this touch" was unanswerable from the log. There is one now.
+
+## 55. Run O: the scale factors were consumed before they were ever set — and §54 misread its own log
+
+Owner, run O: at 1920x1080 phase 0, "only the very top left corner of the chrome remains...
+way too large and positioned too high"; at 1280x1024 phase 0 the identity control **failed**;
+phase 1 (style 1) at 1280x1024 was "too large, not bottom-aligned".
+
+### 55.1 The number was in the log all along
+
+```
+[hudprobe] ... live rect on entry: 1280 x 404
+```
+
+`int_main.i06` sprite 0 is `640x202`, and `640 x 2.0 = 1280`, `202 x 2.0 = 404`. Those are the
+bar's fields computed with **2.0f — the static initialiser of `g_chr_fx`/`g_chr_fy`** — at
+slot 0, where the correct factor is 5.0. `hudprobe_thread` sleeps `Delay` (20 s) before its
+first update, and the map loads inside that window.
+
+Because `FUN_00502510` runs **once** (§53.2), the wrong rect was then permanent, which is why
+every resolution was affected. In pixels at 640x480 the resulting clip is `(0,111)-(256,192)`
+— the top-left corner, exactly as reported.
+
+### 55.2 CORRECTION to §54.1
+
+§54.1 exonerated the scale patch because the log showed the replacement constants equal to the
+originals at the stock modes. **That reasoning was wrong.** The log line is printed by the
+reporting thread twenty seconds in; it records what the factor was *then*, not what it was
+when `FUN_00502510` consumed it. A timestamped observation was read as if it described an
+earlier moment.
+
+So §54.1's conclusion — "the breakage at stock modes came from style 1" — is **retracted**.
+Run O had style 1 off in phase 0 and the chrome was still broken; the cause was the stale
+factor in both runs. Style 1's contribution to run N is now unmeasured, not established.
+
+This is the fourth consecutive failure of the same shape and the first that the instrument
+*did* catch — the `1280 x 404` was printed on every tick of run N as well, and I did not read
+it because I had already decided the constants were fine.
+
+### 55.3 The fix
+
+The factors are now owned by a thread started at **DLL load**, polling the slot every 50 ms,
+so they are correct before the first window is built. On a slot change it raises a dirty flag
+for 500 ms; the stub zeroes the path-B rect while it is set, which sends the pre-draw back
+down the path-B branch so the rect is recomputed with the **new art set's** factors rather
+than keeping one computed for the old set. Without that, even a correct factor at map load
+goes stale at the first F2, because the sprite dimensions change with the art set and nothing
+recomputes.
+
+A startup line — `[chrome] slot N (art WxH) -> factors F / F` — must appear **before** the map
+finishes loading, and again at every F2. Its absence is the same bug.
+
+### 55.4 Still unknown
+
+* Whether the factor cancels between position and origin under style 0 (§54.3). Run O could
+  not test it, because the factor it cancelled was the wrong one.
+* Whether style 1 can draw this sprite correctly at all. Both observations of it so far were
+  contaminated by the stale factor.
