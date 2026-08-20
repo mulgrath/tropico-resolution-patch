@@ -23,7 +23,7 @@ hand to another person.
 | 1920x1080 world render | **works** (§44) — full-width terrain and void on Software and Hardware, reduce-shifting either way. Needs `[Resolution] 1920x1080` + `[WorldFix] ObjW=3200`; the auto-picker still will not choose it because `ART_WIDTH_CAP` is 1600 |
 | 1920x1080 HUD chrome | still authored for 1600x1200 — the art mod is now the blocker, not the engine |
 | Arbitrary-resolution world render | **works** (§47) — verified at 1920x1080 and 2560x1440, same binary, every renderer. Four writes at `0x526220`. Known-good build archived in `known-good/` |
-| HUD / UI at any non-stock mode | broken — 1600x1200 art, unscaled and misplaced. **This is now the whole remaining problem** |
+| HUD / UI at any non-stock mode | broken — 1600x1200 art, unscaled and misplaced. **This is now the whole remaining problem**. Mechanism mapped in §48: two placement paths, and in `MAINWIN.WIN` only **one** widget takes the broken one |
 | Zoomed detail preview (bottom right) | **fixed** (§47) — was ours, caused by an unguarded write; a size gate separates it from the main viewport at any mode |
 | Centring / upscaling | **not started** — game paints top-left, rest black (§15) |
 
@@ -92,6 +92,24 @@ XWayland emulates rather than switches modes, so the game sits top-left with bla
 - Worth testing whether Wine can be made to switch modes for real rather than emulate.
 
 ## Priority 3 — the HUD mod (tier 3)
+
+**§48/§49 — the layout pipeline is now decoded.** `.WIN` files are a tagged stream of
+widget records carrying x/y/w/h in the virtual 3200x2400 space; `tools/tropico-win.py`
+parses 19 of 27 archived files to exact EOF. Widgets whose stored rect is non-zero scale to
+any resolution for free; widgets whose rect is **zero** have it recomputed every frame from
+the art sprite's own stored PIXEL coordinates, which pins them to the mode the art was
+authored for. Of 499 widgets, 37 take that path, and in the in-game HUD exactly **one**
+does: `MAINWIN.WIN` widget 17, `int_main.imm` sprite 0 — the whole bottom bar.
+
+Two things follow. §27's unnameable asset is `int_main.imm` (`hash("int_main.i16") =
+0x6017ebbb`), so the loose-file route is open again. And the fix ranking now turns on a
+single unmeasured fact — **does the sprite blit stretch to its destination rect** — with a
+one-run shrink test specified in §49. **Do not write a patch before that run.**
+
+**Note: `app/data/px.PK2` is not stock** — `int_main.i16` was rescaled in place on
+Aug 19 and never recorded (§48.0). Restore it from the GOG installer with `innoextract`
+before measuring any art.
+
 
 **§11 is now VERIFIED — see §19.** Art really is per-resolution: 43 assets exist in all five
 variants, zero exist as `.imm`, and the loader picks the set by rewriting the extension from a
