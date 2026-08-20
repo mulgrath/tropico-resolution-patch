@@ -85,6 +85,9 @@ static int locate_sections(void)
  * refuse rather than patch the wrong site.
  */
 static int patch_world_viewport(UINT match_w, UINT new_w);
+static int patch_hud_probe(void);
+static DWORD g_hud_mw, g_hud_mh, g_hud_nw, g_hud_nh;
+static DWORD g_hud_table_va;
 static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
                             UINT objm, UINT objw, UINT objhm, UINT objh, int force, UINT guard);
 static BYTE *find_unique(const BYTE *pat, SIZE_T len, BYTE *start, SIZE_T size, const char *what)
@@ -398,6 +401,7 @@ static void apply_patches(void)
     logf_("[*] resolution table at 0x%08lx  (GOG build has 0x005a0fa0; a different value here"
           " just means a different build, which is fine)", table_va);
     memcpy(GATE_SIG + 1, &table_va, 4);
+    g_hud_table_va = table_va;
 
     /* --- 1. desktop-width gate --------------------------------------------- */
     BYTE *p = find_unique_masked(GATE_SIG, GATE_MASK, sizeof GATE_SIG, g_text, g_textlen, "gate");
@@ -548,6 +552,25 @@ static void apply_patches(void)
             } else if (patch_world_draw(mw, nw, mh, nh, om, ow, ohm, oh, force, guard)) ok++;
               else fail++;
             if (mode_ctor) { if (patch_world_viewport(mw, nw)) ok++; else fail++; }
+        }
+    }
+
+    /* s49 probe.  Off unless the ini asks for it -- it deliberately breaks the
+     * HUD, so it must never fire on a normal run. */
+    {
+        char ip[MAX_PATH];
+        snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+        if (GetPrivateProfileIntA("HudProbe", "Enable", 0, ip)) {
+            g_hud_mw = (DWORD)GetPrivateProfileIntA("HudProbe", "MatchW", 560, ip);
+            g_hud_mh = (DWORD)GetPrivateProfileIntA("HudProbe", "MatchH", 560, ip);
+            g_hud_nw = (DWORD)GetPrivateProfileIntA("HudProbe", "NewW", 280, ip);
+            g_hud_nh = (DWORD)GetPrivateProfileIntA("HudProbe", "NewH", 280, ip);
+            if (g_hud_nw == g_hud_mw && g_hud_nh == g_hud_mh) {
+                logf_("[x] [hudprobe] %ux%u -> %ux%u is a NO-OP.  Refusing.",
+                      (unsigned)g_hud_mw, (unsigned)g_hud_mh,
+                      (unsigned)g_hud_nw, (unsigned)g_hud_nh);
+                fail++;
+            } else if (patch_hud_probe()) ok++; else fail++;
         }
     }
 
@@ -1696,6 +1719,176 @@ static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
     return 1;
 }
 
+
+/* ------------------------------------------------- s49: the HUD shrink probe
+ *
+ * The question s49 leaves open is whether the sprite blit STRETCHES its sprite
+ * onto the destination rectangle or copies it 1:1 into a rectangle that may be
+ * the wrong size.  Growing a rect cannot answer it (a stretched sprite and a
+ * stock sprite in a bigger box look alike); shrinking one can.
+ *
+ * FUN_00502660 is the class-4 draw.  Every one of its style branches builds the
+ * destination from obj+0x0b/0x0d (position) and obj+0x0f/0x11 (size), all int16
+ * in the virtual 3200x2400 space.  Halving the size at the entry therefore halves
+ * the destination rect and nothing else.
+ *
+ * IDENTIFICATION, and s46's lesson that one property is not enough: the detour
+ * site proves we are in the class-4 draw, and the exact rect 560x560 proves which
+ * widget.  That rect is unique to MAINWIN.WIN across all 19 parsed .WIN files --
+ * ten widgets, all the bottom-right building panel stack (br00, brempty, and a
+ * class-0x40 sibling that this detour does not touch).  Nothing in any dialog can
+ * be hit by accident.
+ *
+ * The rect persists in the object, so a match fires once per widget and then
+ * stops -- obj+0x0f is 280 on the next frame and no longer matches.  Hits
+ * plateauing at the widget count is the expected shape, and hits climbing forever
+ * would itself be worth knowing (something re-derives the rect every frame).
+ */
+static const BYTE HUD_SIG[] = {
+    0x51,0x53,0x56,0x8b,0xf1, 0xe8,0,0,0,0,
+    0x85,0xc0, 0x0f,0x84,0,0,0,0,
+    0xa1,0,0,0,0, 0x85,0xc0, 0x75,0x0d,
+    0xa1,0,0,0,0, 0x85,0xc0, 0x0f,0x84 };
+static const BYTE HUD_MASK[] = {
+       1,   1,   1,   1,   1,    1,0,0,0,0,
+       1,   1,    1,   1,0,0,0,0,
+       1,0,0,0,0,    1,   1,    1,   1,
+       1,0,0,0,0,    1,   1,    1,   1 };
+
+static volatile DWORD g_hud_calls, g_hud_hits;
+static volatile DWORD g_hud_hash[4];
+static DWORD g_hud_delay, g_hud_every;
+
+static int patch_hud_probe(void)
+{
+    BYTE *at = find_unique_masked(HUD_SIG, HUD_MASK, sizeof HUD_SIG,
+                                  g_text, g_textlen, "class-4 draw");
+    if (!at) { logf_("[x] [hudprobe] class-4 draw signature not found"); return 0; }
+    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 128, MEM_COMMIT | MEM_RESERVE,
+                                      PAGE_EXECUTE_READWRITE);
+    if (!stub) { logf_("[x] [hudprobe] VirtualAlloc failed"); return 0; }
+
+    DWORD a_calls = (DWORD)(SIZE_T)&g_hud_calls;
+    DWORD a_hits  = (DWORD)(SIZE_T)&g_hud_hits;
+    DWORD a_hash  = (DWORD)(SIZE_T)&g_hud_hash[0];
+    WORD  nw = (WORD)g_hud_nw, nh = (WORD)g_hud_nh;
+    int i = 0, f1, f2, f3;
+
+    stub[i++]=0x50;                                                  /* push eax            */
+    stub[i++]=0x52;                                                  /* push edx            */
+    stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_calls,4); i+=4; /* inc [g_hud_calls]   */
+
+    stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x41; stub[i++]=0x0f;  /* movsx eax,w[ecx+0xf]*/
+    stub[i++]=0x3d; memcpy(stub+i,&g_hud_mw,4); i+=4;                /* cmp eax,MatchW      */
+    stub[i++]=0x75; f1=i++;                                          /* jne skip            */
+    stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x41; stub[i++]=0x11;  /* movsx eax,w[ecx+0x11]*/
+    stub[i++]=0x3d; memcpy(stub+i,&g_hud_mh,4); i+=4;                /* cmp eax,MatchH      */
+    stub[i++]=0x75; f2=i++;                                          /* jne skip            */
+
+    /* record the first four matched widgets' ART ASSET name hashes (obj+0x66,
+     * s48.9) so the log proves WHICH widgets were hit, not merely how many. */
+    stub[i++]=0xa1; memcpy(stub+i,&a_hits,4); i+=4;                  /* mov eax,[g_hud_hits]*/
+    stub[i++]=0x83; stub[i++]=0xf8; stub[i++]=0x04;                  /* cmp eax,4           */
+    stub[i++]=0x73; f3=i++;                                          /* jae nostore         */
+    stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x66;                  /* mov edx,[ecx+0x66]  */
+    stub[i++]=0x89; stub[i++]=0x14; stub[i++]=0x85;
+    memcpy(stub+i,&a_hash,4); i+=4;                                  /* mov [hash+eax*4],edx*/
+    stub[f3] = (BYTE)(i - f3 - 1);                                   /* nostore:            */
+    stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_hits,4); i+=4;  /* inc [g_hud_hits]    */
+
+    if (g_hud_nw) {
+        stub[i++]=0x66; stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x0f;
+        memcpy(stub+i,&nw,2); i+=2;                                  /* mov w[ecx+0xf],NewW */
+        stub[i++]=0x66; stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x11;
+        memcpy(stub+i,&nh,2); i+=2;                                  /* mov w[ecx+0x11],NewH*/
+    }
+
+    stub[f1] = (BYTE)(i - f1 - 1);                                   /* skip:               */
+    stub[f2] = (BYTE)(i - f2 - 1);
+    stub[i++]=0x5a;                                                  /* pop edx             */
+    stub[i++]=0x58;                                                  /* pop eax             */
+    stub[i++]=0x51; stub[i++]=0x53; stub[i++]=0x56;                  /* push ecx/ebx/esi    */
+    stub[i++]=0x8b; stub[i++]=0xf1;                                  /* mov esi,ecx         */
+    stub[i++]=0xe9;
+    { LONG back = (LONG)(SIZE_T)(at + 5) - (LONG)(SIZE_T)(stub + i + 4);
+      memcpy(stub+i,&back,4); i+=4; }
+
+    DWORD old;
+    if (!VirtualProtect(at, 5, PAGE_EXECUTE_READWRITE, &old)) {
+        logf_("[x] [hudprobe] VirtualProtect failed"); return 0;
+    }
+    at[0] = 0xe9;
+    { LONG rel = (LONG)(SIZE_T)stub - (LONG)(SIZE_T)(at + 5);
+      memcpy(at + 1, &rel, 4); }
+    VirtualProtect(at, 5, old, &old);
+
+    if (g_hud_nw)
+        logf_("[+] [hudprobe] class-4 draw at %p (stub %p): rect %ux%u -> %ux%u,"
+              " virtual units", at, stub,
+              (unsigned)g_hud_mw, (unsigned)g_hud_mh, (unsigned)g_hud_nw, (unsigned)g_hud_nh);
+    else
+        logf_("[+] [hudprobe] class-4 draw at %p (stub %p): DRY RUN, counting %ux%u"
+              " widgets only, no writes", at, stub,
+              (unsigned)g_hud_mw, (unsigned)g_hud_mh);
+    return 1;
+}
+
+/* The renderer and the art set are what this run's answer depends on, so they are
+ * logged every tick and not merely at startup.  s37 lost two runs to an instrument
+ * that recorded the resolution but not the renderer, and a run that lands on slot
+ * 4 instead of slot 3 answers a different question while looking identical. */
+static DWORD WINAPI hudprobe_thread(LPVOID unused)
+{
+    (void)unused;
+    Sleep(g_hud_delay * 1000);
+    DWORD last_calls = 0xffffffff, last_hits = 0xffffffff;
+    for (int t = 0;; t++) {
+        DWORD w = wfb_read16(0x60c18c), h = wfb_read16(0x60c18e);
+        DWORD hw = wfb_read32(g_hud_table_va - 0x14);        /* 0x5a0f8c */
+        DWORD cfg = wfb_read32(0x612fec), slot = 0xffffffff;
+        if (cfg && !IsBadReadPtr((void *)(SIZE_T)cfg, 0x1c))
+            memcpy(&slot, (BYTE *)(SIZE_T)(cfg + 0x18), 4);
+        static const char *suf[5] = { ".i06", ".i08", ".i10", ".i12", ".i16" };
+        logf_("  [hudprobe] t=%us  screen %ux%u  slot %ld art %s  renderer %s (0x5a0f8c=%lu)"
+              "  class4 draws=%lu  matches=%lu",
+              (unsigned)(g_hud_delay + t * g_hud_every), (unsigned)w, (unsigned)h,
+              (long)(int)slot, (slot < 5 ? suf[slot] : "?"),
+              hw ? "HARDWARE 3D" : "SOFTWARE", (unsigned long)hw,
+              (unsigned long)g_hud_calls, (unsigned long)g_hud_hits);
+        if (g_hud_hits && g_hud_hits != last_hits)
+            logf_("  [hudprobe]   matched asset hashes: %08lx %08lx %08lx %08lx"
+                  "  (br00.i16=10adfcbb brempty.i16=395573cb, 0=widget has no art)",
+                  (unsigned long)g_hud_hash[0], (unsigned long)g_hud_hash[1],
+                  (unsigned long)g_hud_hash[2], (unsigned long)g_hud_hash[3]);
+        /* A probe that fired zero times must say so loudly rather than let a
+         * blank screenshot be read as "no change, therefore 1:1". */
+        if (g_hud_calls == last_calls && g_hud_calls == 0)
+            logf_("  [hudprobe]   *** ZERO class-4 draws seen -- the detour is NOT"
+                  " running.  Do not interpret the screen. ***");
+        else if (g_hud_calls && !g_hud_hits)
+            logf_("  [hudprobe]   *** detour IS running but NOTHING matched %ux%u."
+                  "  Wrong window, or the rect is not what MAINWIN.WIN says. ***",
+                  (unsigned)g_hud_mw, (unsigned)g_hud_mh);
+        last_calls = g_hud_calls; last_hits = g_hud_hits;
+        Sleep(g_hud_every * 1000);
+    }
+}
+
+static void maybe_start_hudprobe(void)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%s\\tropico-fix.ini", g_dir);
+    if (!GetPrivateProfileIntA("HudProbe", "Enable", 0, path)) return;
+    if (!g_hud_table_va) {
+        logf_("[x] [hudprobe] resolution table never located -- not starting");
+        return;
+    }
+    g_hud_delay = GetPrivateProfileIntA("HudProbe", "Delay", 20, path);
+    g_hud_every = GetPrivateProfileIntA("HudProbe", "Every", 10, path);
+    if (!g_hud_every) g_hud_every = 10;
+    CreateThread(NULL, 0, hudprobe_thread, NULL, 0, NULL);
+}
+
 static const BYTE VP_SIG[] = { 0x0f,0xbf,0x4e,0x11, 0x0f,0xbf,0x46,0x0f,
                                0x89,0x8e,0x8e,0x00,0x00,0x00 };
 
@@ -1786,5 +1979,6 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     maybe_start_scan();
     maybe_start_watchfb();
     maybe_start_cliplog();
+    maybe_start_hudprobe();
     return TRUE;
 }
