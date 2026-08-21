@@ -48,6 +48,24 @@ done
 [ "$bad" -eq 0 ] || { echo "!! $bad asset(s) did not install" >&2; exit 1; }
 echo "   $(ls "$TMP/art" | wc -l) assets installed and verified"
 
+# The seven assets PopTop only authored at 640x480 (FINDINGS 69.5) are missing from
+# EVERY art class, not just the target one. [Menu] Slot picks which class the menu
+# uses -- slots 0-4 map to i06/i08/i10/i12/i16 -- so without these, Slot=3 dies with
+# "Error opening pack file item 'setuplb.i12'" exactly as Slot=4 once died on .i16.
+# Generate them for the stock classes too, at each slot's own authored size.
+echo "== generating the menu assets for the stock art classes (slots 1-3) =="
+for spec in "i08 800 600" "i10 1024 768" "i12 1280 1024"; do
+  set -- $spec
+  python3 "$HERE/tropico-artset.py" --data "$GAMEDIR/data" --exe "$GAMEDIR/Tropico.EXE" \
+      --width "$2" --height "$3" --src-ext i06 --src-size 640x480 --missing-only \
+      --out-ext "$1" --out "$TMP/menu_$1" >/dev/null
+  cp "$TMP/menu_$1"/*."$1" "$GAMEDIR/data/"
+  for f in "$TMP/menu_$1"/*."$1"; do
+    cmp -s "$f" "$GAMEDIR/data/$(basename "$f")" || { echo "!! failed to install $(basename "$f")" >&2; exit 1; }
+  done
+done
+echo "   21 stock-class menu assets installed and verified"
+
 echo "== updating [Resolution] in the ini =="
 python3 - "$INI" "$W" "$H" <<'PY'
 import re, sys

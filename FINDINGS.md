@@ -4878,7 +4878,17 @@ which is why the startup asks for slot 0. That is the real reason every earlier
 approach was doomed.
 
 `tools/tropico-artset.py` gained `--src-ext` / `--src-size` / `--missing-only` to
-synthesise them from the `.i06` originals. Identity oracle still **78/78
+synthesise them from the `.i06` originals.
+
+**They are missing from EVERY class, not just `.i16`.** `[Menu] Slot` picks which art
+class the menu uses -- slots 0-4 map to `.i06`/`.i08`/`.i10`/`.i12`/`.i16` -- so `Slot=3`
+died with *"Error opening pack file item 'setuplb.i12'"* for exactly the reason `Slot=4`
+once died on `.i16`. Fixing one class and declaring the problem solved was the mistake;
+`--out-ext` already existed for this. Both `tropico-install.sh` and
+`tropico-set-resolution.sh` now generate the seven for the stock classes too, at each
+slot's own authored size (800x600, 1024x768, 1280x1024), verify every file, and record
+them in the manifest so `--uninstall` removes them. **Owner verified all four slots:
+intro, menu and scenario previews correct in each.** Identity oracle still **78/78
 byte-identical**. A 3x upscale is soft, but it is information-identical to stretching a
 640x480 buffer to 1080p -- the same pixels, done in the asset pipeline instead of a
 compositor.
