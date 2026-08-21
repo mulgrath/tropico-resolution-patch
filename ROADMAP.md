@@ -25,7 +25,8 @@ hand to another person.
 | Arbitrary-resolution world render | **works** (§47) — verified at 1920x1080 and 2560x1440, same binary, every renderer. Four writes at `0x526220`. Known-good build archived in `known-good/` |
 | HUD / UI at any non-stock mode | broken in game, but **no longer blocked**. The engine will not scale HUD art by any route (§50/§60/§61), so a derived art set is required — and §62 decoded the `.iNN` packet format, so that set can now be generated at any width from the user's own files. Remaining work is pipeline and verification, not research. |
 | Zoomed detail preview (bottom right) | **fixed** (§47) — was ours, caused by an unguarded write; a size gate separates it from the main viewport at any mode |
-| Centring / upscaling | **not started** — game paints top-left, rest black (§15) |
+| Centring / upscaling | **not needed — dismissed by the owner 2026-08-21.** The intro, menu, terrain and UI all render natively at the panel's own mode, so there is nothing to centre or upscale; 1440p is the same stretch at a larger size. §15 and the gamescope/Proton trade-off below are moot |
+| Packaging | **DONE — §72.** One command installs; one command switches resolution in 0.7 s |
 
 Best fully-correct experience today: **1280x1024**, no virtual desktop (the largest mode whose HUD art is right). The world itself now renders correctly at any mode; the HUD is what caps the usable resolution.
 
@@ -81,7 +82,12 @@ the owner prefers the software renderer anyway, **Proton currently looks like th
 default** — it solves the presentation problems that have no in-exe fix, and costs an option
 that was never going to be the default. Worth testing Proton against the GOG build.
 
-## Priority 2 — centring and upscaling (tier 4)
+## Priority 2 — centring and upscaling (tier 4) — CLOSED, NOT NEEDED
+
+Dismissed by the owner 2026-08-21: the game now renders natively at the target mode end
+to end, so there is nothing left to letterbox. The original note follows for the record.
+
+### Original note
 
 XWayland emulates rather than switches modes, so the game sits top-left with black around it
 (§15). Not fixable inside the exe.
@@ -278,9 +284,19 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
     `binkw32_orig.dll` is missing, it refuses rather than copying the proxy over itself
     and destroying the real Bink — which would take every movie in the game with it.
 
-    Still to do: pick the mode automatically instead of defaulting to 1920x1080, and
-    derive the `[VText]` dials from the scale ratio so a new resolution does not need a
-    hand-dialling pass (the installer currently warns instead).
+    **DONE — §72.** The mode is picked from the primary display; a set is staged for
+    every connected monitor at install (31 s each) so switching later is a 0.7 s copy via
+    `tools/tropico-setmode.sh`; and the mod's fixes are defaults in the C, which took the
+    shipped ini from 161 lines to 35. Verified by log-diff against the frozen ini
+    (`13 applied, 0 failed`, identical), a byte-identical swap round trip, and a clean
+    uninstall (288 files, nothing left behind, archives untouched).
+
+    **Deriving the `[VText]` dials is a NEGATIVE RESULT, not an open task — §72.4.** The
+    defect scales with the label's own pixel length, which the argument-rewrite hook
+    cannot see, so no formula over the scale ratio is exact for more than one label. The
+    five dials stay measurements and now default ON only at 1920x1080. Any other mode
+    leaves rotated text stock (~11% overhang) and says so in the log and the installer
+    output. The dialling procedure lives in §72.4.
 
 ## Ground rules
 

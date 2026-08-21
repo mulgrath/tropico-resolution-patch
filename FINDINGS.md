@@ -5138,3 +5138,138 @@ prefer a structural inventory over a name harvest next time.
 Note the hash cannot be walked backwards: `h = h*0x41C64E6E + toupper(c) + 0x3039` and
 `0x41C64E6E` is even, so it is not invertible mod 2^32 and a name's suffix cannot be
 stripped off a hash. Identification has to come from the blob, not the index.
+
+## 72. Packaging: one mode at a time, swapped in 0.7 s — and why the VText dials are not a formula
+
+Everything below is packaging, not research. It closes ROADMAP item 12 apart from one
+piece, which is recorded here as a negative result rather than left as a TODO.
+
+### 72.1 The constraint, stated correctly
+
+The five resolution slots are NOT the limit. Slot entries are writable and the art class
+is chosen per slot from the pointer table at `0x5a12d8` (§11/§19), and loose files
+override the archives per class (§24, confirmed §63.1). So two live widescreen modes in
+one F2 ladder is mechanically available today.
+
+What blocks it is elsewhere: **the world-extent clamp is a boot-time constant derived
+from one mode** — `dw = m.w * 2, dh = m.h * 2`, poked once — and `[WorldFix]` has the
+same shape. Two live modes means making those recompute when the mode changes. `[VText]`
+already reads the live scale globals and is gated on them, which is why it alone survives
+the F2 ladder climbing through every stock mode on the way up.
+
+So the design is deliberately **one live mode at a time**, and the friction that would
+otherwise cause — reinstalling to move the game to a different monitor — is removed by
+pre-generating instead of by supporting two modes at once.
+
+### 72.2 Staged art sets
+
+A full art set is 267 files, 61 MB, and takes **31 s** to generate. Copying one is
+**0.19 s**. So `tools/tropico-install.sh` generates one set per connected monitor into
+`artsets/<WxH>/`, and `tools/tropico-setmode.sh` activates one by copying it into `data/`
+and rewriting `[Resolution]`. Measured on this box: install 66 s for two modes, swap
+**0.7 s**, round-trip 1080p -> 1440p -> 1080p byte-identical.
+
+`tropico-artset.py` reads only the PK2 archives, never loose files, so a re-run over an
+already-patched install cannot rescale derived art. That is what makes switching safe to
+repeat.
+
+Three files track state, and the split matters:
+
+| file | holds | removed by |
+|---|---|---|
+| `data/ARTSET-MANIFEST.txt` | the active swappable set (267) | a swap, and uninstall |
+| `data/ARTSET-STATIC.txt` | the 21 mode-independent menu assets for slots 1-3 (§69.5) | uninstall only |
+| `data/ARTSET-MODE.txt` | which mode's art is unpacked | uninstall |
+
+Before this there was one manifest, **built by globbing** `*.i16 *.i12 ...`. Two problems,
+both now fixed: it would have swept up any art the game ships loose, and it conflated the
+swappable and static halves, so generating the static half and then honouring the old
+manifest deleted the files just written. The installer migrates the old layout explicitly.
+
+### 72.3 The mod's fixes are defaults now, not ini keys
+
+Every fix defaulted OFF in the C, so the shipped ini had to spell out ~25 keys and read
+like a research file. The defaults are now ON — `WorldFix` Enable/Force/ObjW/ObjH,
+`Menu` FixPreview=2/FixMovieScale=1/Slot=4, `VText` Enable/Fix/Entry — and the shipped
+ini is **35 lines, six of them keys** (was 161). Every key still overrides, so every dead
+end stays reachable without living in the file.
+
+Two guards came out of doing it:
+
+* **`Menu Slot` defaults to 4 only if `data/setuplb.i16` exists.** Unconditionally
+  defaulting it kills the menu with `Error opening pack file item 'setuplb.i16'` for
+  anyone who drops the DLL in without running the installer.
+* **The proxy cross-checks `[Resolution]` against `ARTSET-MODE.txt`** and logs
+  `ART MISMATCH` if they disagree. A half-applied swap otherwise presents exactly as the
+  §12 broken-HUD symptom, which is expensive to recognise from a screenshot.
+
+**A latent bug fell out of the log-diff.** `[WorldFix] Width` falls back to the mode when
+absent; `Height` had no such twin, so `nh` stayed 0 and the image-pixel-height write
+(`864 -> 1080`) was silently skipped the moment the ini stopped spelling Height out. The
+frozen ini had been hiding it. Fixed at the same place the width fallback lives.
+
+Verification was a **log diff against a run with the frozen 161-line ini**: identical
+patch phase, `13 applied, 0 failed` both, differing only in VirtualAlloc'd stub addresses
+and the new cross-check line.
+
+### 72.4 NEGATIVE RESULT: the five VText dials cannot be derived from the scale ratio
+
+The plan was to compute `BoxH / BoxDY / BoxDX / BldgDH / BldgDY` from `xs`/`ys` so a new
+mode needs no hand-dialling. **It does not close, and the reason is structural rather than
+a missing measurement.**
+
+§65.3 gives the defect exactly:
+
+```
+label_top = box_top + 0.5 * box_h - c * label_px        c = 0.5 * ys/xs   (0.375 at 16:9)
+correct is c = 0.5, so the label sits 0.5 * (1 - ys/xs) * label_px too low
+```
+
+The error is proportional to **`label_px`, the rendered length of that particular
+string** — and the hook rewrites the drawer's arguments, which carry the box, not the
+label. Solving for a rewrite that is correct for every label requires `c = 0.5`, and `c`
+is fixed by the two scale globals, so **no argument rewrite is exact for more than one
+label length**. The dialled set is a compromise sized for the longest label, plus room
+growth, plus the payback that growth costs — three effects fitted together by eye. It is a
+measurement, not an evaluation of a formula, and rescaling it is not meaningful.
+
+Attempting to reconstruct the frozen numbers from the notes alone lands around -67..-81
+virtual against the dialled -99, and closing that gap needs `[VText] Probe=1` geometry
+per label per site, which only an in-game session produces. No probe log from §65/§66
+survives in `logs/`.
+
+**So the dials stay measurements**, and the C defaults them **only at 1920x1080** — the
+mode they were dialled for and confirmed in. At any other mode the geometry is left stock,
+the log says so, and the installer prints the cost: rotated tab and building-panel labels
+overhang by about 11%, and nothing else is affected.
+
+**Dialling a new mode**, 3-4 runs. Units are VIRTUAL:
+
+```
+vertical:    units = pixels * 2400 / Height
+horizontal:  units = pixels * 3200 / Width
+```
+
+Set `[VText] Probe=1`, start a map, F2 to the target mode, open the F2 settings tabs, the
+almanac, and a building panel. Then: set the room dial (`BoxH`, `BldgDH`) generously until
+no letter is cut, and walk the position dials (`BoxDY`, `BoxDX`, `BldgDY`) in, converting
+the pixel offset you want with the formulas above. Raising the room dial drifts the label
+down by roughly two thirds of the growth — pay that back on the position dial. The four
+`[VText]` roles, for reference:
+
+| dial | job |
+|---|---|
+| `BoxH` / `BldgDH` | ROOM. Grows the box. Raise when a letter is cut. |
+| `BoxDY` / `BldgDY` | POSITION, vertical. Rigid translation; room unchanged. |
+| `BoxDX` | POSITION, horizontal. Same, other axis. |
+| `DY` / `DX` / `ClipH` | NOT these. They patch instruction immediates and are **not** mode-gated, so they move the label in every stock mode the F2 ladder climbs through. |
+
+### 72.5 Dead ends the ini used to document, kept here instead
+
+* `[Menu] FixMoviePitch` — **do not enable.** Overrides the pitch passed to
+  `BinkCopyToBuffer` and crashes: the game allocates exactly `movieW*movieH*2` and 1280 is
+  the correct pitch for it. Bink was never at fault (§68).
+* `[Menu] Fit` — no-op. Patches the 640x480 clamp at `0x515e58`, but the menu and intro
+  take the `videowin.win` branch, which bypasses that clamp entirely (§69).
+* Loose `.WIN` overrides — **do not load.** Only `.i16` art does; each asset type has its
+  own loader (§64.2 REFUTED by §65).

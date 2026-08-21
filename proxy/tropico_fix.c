@@ -106,6 +106,10 @@ static DWORD g_surf_va;
 static DWORD g_slot_out;
 static int patch_menu_slot(void);
 static DWORD g_vt_ys_va, g_vt_xs_va;
+/* The mode slot 4 was actually set to. Written once, where slot 4 is patched;
+ * read by the [VText] defaults and the art-set cross-check, both of which are
+ * only correct for the mode the art was generated for. */
+static UINT  g_mode_w, g_mode_h;
 static int g_vt_entry, g_vt_bdh, g_vt_bdy, g_vt_log, g_vt_boxdx;
 static DWORD g_vte_entry_va;
 /* s65 vtext hook state -- declared here because apply_patches() sets it from the
@@ -503,7 +507,8 @@ static void apply_patches(void)
             DWORD wh[2] = { m.w, m.h };
             int a = poke(tbl + SLOT4_OFF, wh, sizeof wh);
             int b = poke(chain + CHAIN_W_OFF, &m.w, 4) && poke(chain + CHAIN_H_OFF, &m.h, 4);
-            if (a && b) { logf_("[+] slot 4 -> %lux%lu  (data table %p, code chain %p)", m.w, m.h, tbl, chain); ok++; }
+            if (a && b) { g_mode_w = m.w; g_mode_h = m.h;
+                          logf_("[+] slot 4 -> %lux%lu  (data table %p, code chain %p)", m.w, m.h, tbl, chain); ok++; }
             else { logf_("[x] slot 4: VirtualProtect failed"); fail++; }
             /* The world-extent clamp must move with the mode or the terrain still
              * stops at 1600 no matter how wide the screen is (FINDINGS 29-35). */
@@ -551,18 +556,23 @@ static void apply_patches(void)
     {
         char ip[MAX_PATH];
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-        if (GetPrivateProfileIntA("WorldFix", "Enable", 0, ip)) {
+        if (GetPrivateProfileIntA("WorldFix", "Enable", 1, ip)) {
             UINT mw = (UINT)GetPrivateProfileIntA("WorldFix", "Match", 1600, ip);
             UINT nw = (UINT)GetPrivateProfileIntA("WorldFix", "Width", 0, ip);
             if (!nw) nw = (UINT)m.w;
             int mode_ctor = GetPrivateProfileIntA("WorldFix", "Ctor", 0, ip);
             UINT om = (UINT)GetPrivateProfileIntA("WorldFix", "ObjMatch", 2666, ip);
-            UINT ow = (UINT)GetPrivateProfileIntA("WorldFix", "ObjW", 0, ip);
+            UINT ow = (UINT)GetPrivateProfileIntA("WorldFix", "ObjW", 3200, ip);
             UINT ohm = (UINT)GetPrivateProfileIntA("WorldFix", "ObjHMatch", 1920, ip);
-            UINT oh  = (UINT)GetPrivateProfileIntA("WorldFix", "ObjH", 0, ip);
+            UINT oh  = (UINT)GetPrivateProfileIntA("WorldFix", "ObjH", 2400, ip);
             UINT mh  = (UINT)GetPrivateProfileIntA("WorldFix", "HMatch", 864, ip);
             UINT nh  = (UINT)GetPrivateProfileIntA("WorldFix", "Height", 0, ip);
-            int force = GetPrivateProfileIntA("WorldFix", "Force", 0, ip);
+            /* The twin of the Width fallback above, and it was missing: without it
+             * the image pixel height write is skipped and the world keeps the stock
+             * 864 while the width follows the mode. Harmless while the ini spelled
+             * Height out; a silent half-fix the moment it stopped doing so. */
+            if (!nh) nh = (UINT)m.h;
+            int force = GetPrivateProfileIntA("WorldFix", "Force", 1, ip);
             /* -1 = auto (half the mode width); 0 = no gate at all. */
             int gi = GetPrivateProfileIntA("WorldFix", "Guard", -1, ip);
             UINT guard = force ? (gi < 0 ? (UINT)m.w / 2 : (UINT)gi) : 0;
@@ -620,8 +630,8 @@ static void apply_patches(void)
         char ip[MAX_PATH];
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
         g_bink_pitch = GetPrivateProfileIntA("Menu", "FixMoviePitch", 0, ip);
-        if (GetPrivateProfileIntA("Menu", "FixPreview", 0, ip)) {
-            if (patch_preview_fix(GetPrivateProfileIntA("Menu", "FixPreview", 0, ip)))
+        if (GetPrivateProfileIntA("Menu", "FixPreview", 2, ip)) {
+            if (patch_preview_fix(GetPrivateProfileIntA("Menu", "FixPreview", 2, ip)))
                 ok++; else fail++;
         }
         if (GetPrivateProfileIntA("Menu", "SurfaceProbe", 0, ip)) {
@@ -640,7 +650,7 @@ static void apply_patches(void)
         if (GetPrivateProfileIntA("Menu", "PreviewProbe", 0, ip)) {
             if (patch_preview_probe()) ok++; else fail++;
         }
-        if (GetPrivateProfileIntA("Menu", "FixMovieScale", 0, ip)) {
+        if (GetPrivateProfileIntA("Menu", "FixMovieScale", 1, ip)) {
             if (patch_blit_scale()) ok++; else fail++;
         }
         if (GetPrivateProfileIntA("Menu", "BlitProbe", 0, ip)) {
@@ -666,7 +676,23 @@ static void apply_patches(void)
             }
             if (patch_movie_probe()) ok++; else fail++;
         }
-        g_menu_slot = GetPrivateProfileIntA("Menu", "Slot", -1, ip);
+        /* s69: the menu renders at slot 4 -- but ONLY if the seven 640x480-only
+         * assets were synthesised into data/. Defaulting this ON unconditionally
+         * would kill the menu with "Error opening pack file item 'setuplb.i16'"
+         * for anyone who dropped the DLL in without running the installer, so the
+         * default is conditional on the art existing. An explicit ini value still
+         * wins either way -- including Slot=-1 to force stock behaviour. */
+        {
+            char probe[MAX_PATH];
+            snprintf(probe, sizeof probe, "%s\\data\\setuplb.i16", g_dir);
+            int have_menu_art = (GetFileAttributesA(probe) != INVALID_FILE_ATTRIBUTES);
+            g_menu_slot = GetPrivateProfileIntA("Menu", "Slot", have_menu_art ? 4 : -1, ip);
+            if (!have_menu_art && g_menu_slot >= 0)
+                logf_("[-] [menu] Slot=%d but data\\setuplb.i16 is missing --"
+                      " the menu will fail to open its art (run tropico-install.sh)", g_menu_slot);
+            else if (!have_menu_art)
+                logf_("  [menu] no synthesised menu art; leaving the menu at stock 640x480");
+        }
         if (g_menu_slot >= 0) { if (patch_menu_slot()) ok++; else fail++; }
         int mw = GetPrivateProfileIntA("Menu", "W", 0, ip);
         int mh = GetPrivateProfileIntA("Menu", "H", 0, ip);
@@ -699,7 +725,7 @@ static void apply_patches(void)
     {
         char ip[MAX_PATH];
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-        if (GetPrivateProfileIntA("VText", "Enable", 0, ip)) {
+        if (GetPrivateProfileIntA("VText", "Enable", 1, ip)) {
             /* -1000 is the "absent" sentinel: 0 and negatives are all legal values. */
             int dy = GetPrivateProfileIntA("VText", "DY", -1000, ip);
             int dx = GetPrivateProfileIntA("VText", "DX", -1000, ip);
@@ -712,18 +738,33 @@ static void apply_patches(void)
                 fail++;
             } else if (patch_vtext(dy, dx, ch, dy != -1000, dx != -1000, ch != -1000)) ok++;
             else fail++;
-            g_vt_fix   = GetPrivateProfileIntA("VText", "Fix",   0, ip);
-            g_vt_fw    = GetPrivateProfileIntA("VText", "FixW",  0, ip);
-            g_vt_fh    = GetPrivateProfileIntA("VText", "FixH",  0, ip);
-            g_vt_boxh  = GetPrivateProfileIntA("VText", "BoxH",  0, ip);
-            g_vt_boxdy = GetPrivateProfileIntA("VText", "BoxDY", 0, ip);
-            g_vt_boxdx = GetPrivateProfileIntA("VText", "BoxDX", 0, ip);
-            g_vt_entry = GetPrivateProfileIntA("VText", "Entry", 0, ip);
+            /* THE FIVE DIALS ARE MEASUREMENTS, NOT A FORMULA (FINDINGS 72).
+             * They were hand-dialled against 1920x1080 and confirmed in game, and
+             * the defect they correct scales with the LABEL's pixel length, which
+             * the hook cannot see -- so no rewrite of these arguments is exact for
+             * every label, and one dialled set cannot be rescaled to another mode.
+             * They are therefore the default ONLY at the mode they were dialled
+             * for. Anywhere else the geometry is left stock: rotated labels
+             * overhang by about 11%, nothing else is affected, and the log says so.
+             * An explicit ini value always wins, which is how a new mode gets
+             * dialled -- the procedure is in FINDINGS 72. */
+            const int vt_dialled = (g_mode_w == 1920 && g_mode_h == 1080);
+            g_vt_fix   = GetPrivateProfileIntA("VText", "Fix",   vt_dialled, ip);
+            g_vt_fw    = GetPrivateProfileIntA("VText", "FixW",  (int)g_mode_w, ip);
+            g_vt_fh    = GetPrivateProfileIntA("VText", "FixH",  (int)g_mode_h, ip);
+            g_vt_boxh  = GetPrivateProfileIntA("VText", "BoxH",  vt_dialled ?  340 : 0, ip);
+            g_vt_boxdy = GetPrivateProfileIntA("VText", "BoxDY", vt_dialled ?  -99 : 0, ip);
+            g_vt_boxdx = GetPrivateProfileIntA("VText", "BoxDX", vt_dialled ?  -14 : 0, ip);
+            g_vt_entry = GetPrivateProfileIntA("VText", "Entry", vt_dialled, ip);
+            if (!vt_dialled && !g_vt_boxh && !g_vt_boxdy)
+                logf_("[-] [vtext] no dials for %ux%u -- rotated labels left STOCK"
+                      " (they will overhang ~11%%). Dial them per FINDINGS 72.",
+                      g_mode_w, g_mode_h);
             /* Probe now means "log every rotated draw", not "install the hooks":
              * the hooks ARE the fix, so Fix=1 installs them either way. */
             g_vt_log   = GetPrivateProfileIntA("VText", "Probe", 0, ip);
-            g_vt_bdh   = GetPrivateProfileIntA("VText", "BldgDH", 0, ip);
-            g_vt_bdy   = GetPrivateProfileIntA("VText", "BldgDY", 0, ip);
+            g_vt_bdh   = GetPrivateProfileIntA("VText", "BldgDH", vt_dialled ?  107 : 0, ip);
+            g_vt_bdy   = GetPrivateProfileIntA("VText", "BldgDY", vt_dialled ? -111 : 0, ip);
             if (g_vt_fix && !(g_vt_fw && g_vt_fh)) {
                 logf_("[x] [vtext] Fix=1 needs FixW/FixH -- an ungated correction breaks"
                       " every mode the F2 ladder climbs through");
@@ -734,6 +775,32 @@ static void apply_patches(void)
                           g_vt_fw, g_vt_fh, g_vt_boxh, g_vt_boxdy);
                 if (patch_vtext_probe()) ok++; else fail++;
                 if (g_vt_entry) { if (patch_vtext_entry()) ok++; else fail++; }
+            }
+        }
+    }
+
+    /* CROSS-CHECK THE ART AGAINST THE MODE. tropico-setmode.sh stamps the mode
+     * whose art set is currently unpacked into data/ (FINDINGS 72). A half-applied
+     * swap -- ini moved, art not, or the reverse -- looks exactly like the section 11
+     * art-mismatch symptom, which is an expensive thing to re-diagnose from a
+     * screenshot. Cheap to check here, so check here. */
+    if (g_mode_w && g_mode_h) {
+        char mp[MAX_PATH], buf[64] = {0};
+        DWORD got = 0;
+        HANDLE fh;
+        snprintf(mp, sizeof mp, "%s\\data\\ARTSET-MODE.txt", g_dir);
+        fh = CreateFileA(mp, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        if (fh != INVALID_HANDLE_VALUE) {
+            UINT aw = 0, ah = 0;
+            ReadFile(fh, buf, sizeof buf - 1, &got, NULL);
+            CloseHandle(fh);
+            if (sscanf(buf, "%ux%u", &aw, &ah) == 2 && aw && ah) {
+                if (aw != g_mode_w || ah != g_mode_h)
+                    logf_("[x] ART MISMATCH: the mode is %ux%u but data/ holds the %ux%u art set."
+                          " The HUD will be wrong. Run tools/tropico-setmode.sh %u %u.",
+                          g_mode_w, g_mode_h, aw, ah, g_mode_w, g_mode_h);
+                else
+                    logf_("  art set in data/ matches the mode (%ux%u)", aw, ah);
             }
         }
     }
