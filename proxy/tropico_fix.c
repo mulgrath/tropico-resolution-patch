@@ -105,6 +105,11 @@ static int patch_preview_fix(int mode);
 static DWORD g_surf_va;
 static DWORD g_slot_out;
 static int patch_menu_slot(void);
+static int patch_slot_probe(void);
+static void find_applyvideo(void);
+static DWORD g_preset_ret;   /* return address of the preset-apply call site */
+static int g_slot_log;
+static DWORD g_applyvideo_va;
 static DWORD g_vt_ys_va, g_vt_xs_va;
 /* The mode slot 4 was actually set to. Written once, where slot 4 is patched;
  * read by the [VText] defaults and the art-set cross-check, both of which are
@@ -692,6 +697,24 @@ static void apply_patches(void)
                       " the menu will fail to open its art (run tropico-install.sh)", g_menu_slot);
             else if (!have_menu_art)
                 logf_("  [menu] no synthesised menu art; leaving the menu at stock 640x480");
+        }
+
+        /* s73: the frontend preset. Installed whenever the menu slot is redirected
+         * -- without it the menu is correct at startup and drops back to 640x480 the
+         * moment you return to it from a map. [Menu] SlotProbe=1 additionally logs
+         * every apply-video call and its caller, which is how this was found. */
+        g_slot_log = GetPrivateProfileIntA("Menu", "SlotProbe", 0, ip);
+        if (g_menu_slot >= 0 || g_slot_log) {
+            if (!g_vt_xs_va || !g_vt_ys_va) {
+                static const BYTE CS[]  = {0x66,0x3d,0x80,0x02, 0x7e,0x0a,
+                                           0xc7,0x44,0x24,0x10,0x80,0x02,0x00,0x00};
+                static const BYTE CM[]  = {   1,   1,   1,   1,    1,   1,
+                                              1,   1,   1,   1,   1,   1,   1,   1};
+                BYTE *c = find_unique_masked(CS, CM, sizeof CS, g_text, g_textlen, "clamp scales");
+                if (c) { g_vt_xs_va = rd32(c + 23); g_vt_ys_va = rd32(c + 69); }
+            }
+            find_applyvideo();
+            if (patch_slot_probe()) ok++; else fail++;
         }
         if (g_menu_slot >= 0) { if (patch_menu_slot()) ok++; else fail++; }
         int mw = GetPrivateProfileIntA("Menu", "W", 0, ip);
@@ -2590,6 +2613,112 @@ static int patch_vtext_entry(void)
     return 1;
 }
 
+/* -------------------------------------------------------- s73 apply-video probe
+ *
+ * WHICH CALL ASKS FOR 640x480 WHEN THE MENU IS RE-ENTERED FROM A MAP.
+ *
+ * FUN_00515450 is the engine's apply-video-settings routine and takes the five
+ * settings as ecx, edx, arg1, arg2, arg3 -> fields +0xc, +0x10, +0x14, +0x18,
+ * +0x1c, with arg2 the resolution slot and -1 meaning "keep" (section 69.4).
+ *
+ * A static sweep of all 19 call sites (section 73.1) shows only the TWO startup
+ * sites pass slot 0 as a literal, and those are already redirected. Every other
+ * site either passes -1 or computes the slot at runtime -- so the return-to-menu
+ * path cannot be identified by reading immediates, and the honest instrument is
+ * to log what the routine is ACTUALLY handed, and by whom. Same move that settled
+ * section 66.
+ *
+ * The routine opens `sub esp,8` / `mov eax,[0x612fec]` = 3 + 5 bytes, so the
+ * detour relocates EIGHT, not five: taking five would split the mov and corrupt
+ * the function. Both relocated instructions are position-independent.
+ *
+ * The address is not hardcoded. It is read from the rel32 of the call that ends
+ * the startup-slot signature, so it survives a build whose addresses moved --
+ * which is the whole reason the Steam build patches at all. */
+static void __cdecl slotprobe_hook(DWORD *a)
+{
+    /* a[] from the trampoline: 0 flags, 1 EDI, 2 ESI, 3 EBP, 4 ESP, 5 EBX,
+     * 6 EDX, 7 ECX, 8 EAX, 9 return address, 10 arg1, 11 arg2, 12 arg3. */
+    /* THE FIX (s73). Returning to the main menu from a map re-applies the FRONTEND
+     * preset row, whose stored resolution slot is 0 -- PopTop put 640x480 there
+     * because the menu art only ever existed at that size (s69.5). The startup
+     * redirect does not cover it: that patches two `push 0` immediates inside
+     * FUN_0047c370, and this is a different call site reading a different row.
+     *
+     * Rewrite the argument on the stack, exactly as the startup sites rewrite
+     * theirs, and ONLY for this call site. A blanket "slot 0 becomes slot 4" would
+     * also override a deliberate 640x480 chosen from the F2 settings screen, which
+     * is a legal choice arriving through a different caller. */
+    if (g_menu_slot >= 0 && g_preset_ret && a[9] == g_preset_ret && (int)a[11] == 0) {
+        a[11] = (DWORD)g_menu_slot;
+        if (!g_slot_log) return;
+        logf_("  [slotprobe] frontend preset asked for slot 0 -> rewritten to %d", g_menu_slot);
+        return;
+    }
+    if (!g_slot_log) return;
+
+    /* NO DEDUPE. The first version deduped on (caller, slot) and that hid the
+     * event we were looking for: the menu re-entry either repeats a pair already
+     * seen or makes no call at all, and those two have completely different fixes.
+     * A plain sequence with a generous cap distinguishes them. */
+    static int nseq;
+    if (nseq >= 300) return;
+    nseq++;
+    /* The live mode, read from the engine's own virtual->pixel scale globals, so
+     * every call is stamped with the mode in force when it was made. That is what
+     * says whether a mode CHANGE happened, rather than only what was requested. */
+    int lw = 0, lh = 0;
+    if (g_vt_xs_va && g_vt_ys_va) {
+        lw = (int)(*(float *)(SIZE_T)g_vt_xs_va * 3200.0f + 0.5f);
+        lh = (int)(*(float *)(SIZE_T)g_vt_ys_va * 2400.0f + 0.5f);
+    }
+    logf_("  [slotprobe] #%d caller %08lx  SLOT(arg2)=%d  arg1=%d arg3=%d  ecx=%d edx=%d"
+          "  (mode now %dx%d)",
+          nseq, (unsigned long)a[9], (int)a[11], (int)a[10], (int)a[12],
+          (int)a[7], (int)a[6], lw, lh);
+}
+
+static int patch_slot_probe(void)
+{
+    if (!g_applyvideo_va) {
+        logf_("[x] [slotprobe] apply-video routine not located");
+        return 0;
+    }
+    BYTE *entry = (BYTE *)(SIZE_T)g_applyvideo_va;
+    /* Refuse unless the prologue is the one we measured. Relocating something
+     * else would corrupt the function silently, and this runs on two builds. */
+    static const BYTE PRO[] = {0x83,0xec,0x08, 0xa1};
+    if (memcmp(entry, PRO, sizeof PRO) != 0) {
+        logf_("[x] [slotprobe] %08lx does not open with `sub esp,8 / mov eax,imm32`"
+              " (%02x %02x %02x %02x) -- refusing",
+              (unsigned long)g_applyvideo_va, entry[0], entry[1], entry[2], entry[3]);
+        return 0;
+    }
+    BYTE *tr = (BYTE *)VirtualAlloc(NULL, 96, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tr) { logf_("[x] [slotprobe] VirtualAlloc failed"); return 0; }
+    int o = 0;
+    tr[o++] = 0x60;                                                 /* pushad          */
+    tr[o++] = 0x9C;                                                 /* pushfd          */
+    tr[o++] = 0x54;                                                 /* push esp        */
+    tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&slotprobe_hook; memcpy(tr + o, &f, 4); o += 4; }
+    tr[o++] = 0xFF; tr[o++] = 0xD0;                                 /* call eax        */
+    tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x04;                 /* add esp,4       */
+    tr[o++] = 0x9D;                                                 /* popfd           */
+    tr[o++] = 0x61;                                                 /* popad           */
+    memcpy(tr + o, entry, 8); o += 8;                               /* relocated 8     */
+    tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((entry + 8) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
+
+    BYTE det[8];
+    det[0] = 0xE9;
+    { DWORD r = (DWORD)(SIZE_T)(tr - (entry + 5)); memcpy(det + 1, &r, 4); }
+    det[5] = det[6] = det[7] = 0x90;   /* pad the 3 bytes the jmp does not cover */
+    if (!poke(entry, det, 8)) { logf_("[x] [slotprobe] VirtualProtect failed"); return 0; }
+    logf_("[+] [menu] apply-video %08lx detoured -> %p"
+          " (frontend preset -> slot %d, so the menu survives a return from a map)",
+          (unsigned long)g_applyvideo_va, (void *)tr, g_menu_slot);
+    return 1;
+}
+
 /* ------------------------------------------------------------- s68 startup movie
  *
  * The startup movie never plays. Established by measurement, not inference:
@@ -2780,6 +2909,55 @@ static int patch_movie_probe(void)
  *
  * These two calls sit BEFORE the intro's guards, so this works whether or not
  * [Intro] Force is on. push imm8, so the slot must be 0..127. */
+/* The apply-video routine's address, read from the rel32 of the call that ends
+ * the startup slot-request signature. Build-independent by construction: the two
+ * builds put this function at different addresses and the signature finds both. */
+static void find_applyvideo(void)
+{
+    static const BYTE SIG[]  = {0x6a,0, 0x6a,0x00, 0x6a,0xff,
+                                0x83,0xca,0xff, 0x83,0xc9,0xff,
+                                0xc7,0x40,0x1c,0,0x00,0x00,0x00, 0xe8};
+    static const BYTE MASK[] = {   1,0,    1,   1,    1,   1,
+                                   1,   1,   1,    1,   1,   1,
+                                   1,   1,   1,0,   1,   1,   1,    1};
+    for (SIZE_T i = 0; i + sizeof SIG + 4 <= g_textlen; i++) {
+        SIZE_T k = 0;
+        for (; k < sizeof SIG; k++) if (MASK[k] && g_text[i + k] != SIG[k]) break;
+        if (k != sizeof SIG) continue;
+        g_applyvideo_va = (DWORD)(SIZE_T)(g_text + i + 24) + rd32(g_text + i + 20);
+        break;
+    }
+
+    /* The PRESET-APPLY call site (s73). It loads all five settings out of the
+     * preset arrays indexed by the current preset row:
+     *
+     *   mov edx,[eax+ecx*4+0x48]   ; the resolution slot
+     *   push -1                    ; arg3
+     *   push edx                   ; arg2 = slot
+     *   mov edx,[eax+ecx*4+0x40] / push edx
+     *   mov edx,[eax+ecx*4+0x38]
+     *   mov ecx,[eax+ecx*4+0x30]
+     *   call apply-video
+     *
+     * Row 0 is the in-game preset and row 1 the frontend one, and PopTop stored
+     * 640x480 in row 1 because the menu art only existed at that size (s69.5).
+     * Matched by signature rather than hardcoded so the Steam build works too. */
+    {
+        static const BYTE PS[]  = {0x8b,0x54,0x88,0x48, 0x6a,0xff, 0x52,
+                                   0x8b,0x54,0x88,0x40, 0x52,
+                                   0x8b,0x54,0x88,0x38,
+                                   0x8b,0x4c,0x88,0x30, 0xe8};
+        static const BYTE PM[]  = {   1,   1,   1,   1,    1,   1,    1,
+                                      1,   1,   1,   1,    1,
+                                      1,   1,   1,   1,
+                                      1,   1,   1,   1,    1};
+        BYTE *c = find_unique_masked(PS, PM, sizeof PS, g_text, g_textlen, "preset apply");
+        if (c) g_preset_ret = (DWORD)(SIZE_T)(c + sizeof PS + 4);
+        else   logf_("[-] [menu] preset-apply call site not found --"
+                     " returning to the menu from a map will drop to 640x480");
+    }
+}
+
 static int patch_menu_slot(void)
 {
     /* push imm8 / push 0 / push -1 / or edx,-1 / or ecx,-1 / mov [eax+0x1c],imm32 / call */

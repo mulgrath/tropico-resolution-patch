@@ -215,7 +215,14 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
    repeatable and self-restoring.
 
 10. ~~Main menu is a 640x480 window in the top-left.~~ **SOLVED AND CONFIRMED IN GAME
-    — §69.** The intro and the main menu now render correctly at **1920x1080**.
+    — §69, completed by §73.** Returning to the menu *from a map* dropped back to
+    640x480 until §73: that path applies the FRONTEND preset row, whose stored slot is
+    0, through a call site that computes its slot rather than pushing a literal. Fixed
+    and confirmed in game 2026-08-21.
+
+    Original §69 note follows.
+
+    **SOLVED AND CONFIRMED IN GAME — §69.** The intro and the main menu now render correctly at **1920x1080**.
 
     Root cause was not a default and not Wine: the startup **explicitly asks for slot
     0**, because **the menu art was only ever authored at 640x480** — seven assets exist

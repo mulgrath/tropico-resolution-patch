@@ -5273,3 +5273,101 @@ down by roughly two thirds of the growth — pay that back on the position dial.
   take the `videowin.win` branch, which bypasses that clamp entirely (§69).
 * Loose `.WIN` overrides — **do not load.** Only `.i16` art does; each asset type has its
   own loader (§64.2 REFUTED by §65).
+
+## 73. The menu drops back to 640x480 when re-entered from a map — the FRONTEND preset row
+
+**SOLVED AND CONFIRMED IN GAME** by the owner, 2026-08-21. Found by the owner clicking
+"Main Menu" from inside a map — a path nobody had exercised, which is why §69 shipped
+looking complete.
+
+### 73.1 What the static sweep settled, and what it could not
+
+`FUN_00515450` is the apply-video routine; `arg2` is the resolution slot and `-1` means
+"keep" (§69.4). Scanning `.text` for `E8` calls resolving to it finds **19 call sites**,
+and reading the immediates each one pushes gives a clean partial answer:
+
+* exactly **two** pass slot 0 as a literal — both inside `FUN_0047c370`, both already
+  redirected by §69's one-byte patch
+* ten pass `-1`, which cannot drop the mode
+* the rest **compute** the slot at runtime
+
+So the bug is not a third hardcoded site, and no amount of reading immediates would name
+it. That is a real limit of static reading, not a reason to guess — the instrument is to
+log what the routine is handed and by whom, the same move that settled §66.
+
+### 73.2 The probe, and the dedupe that hid the answer
+
+`[Menu] SlotProbe=1` detours the routine's entry and logs caller, all five settings, and
+**the live mode at the moment of the call**, read from the virtual->pixel scale globals.
+
+The routine opens `sub esp,8` / `mov eax,[0x612fec]` = 3 + 5 bytes, so the detour
+relocates **eight**, not the usual five: taking five would split the `mov` and corrupt the
+function silently. Both relocated instructions are position-independent. The address is
+read from the rel32 of the call that ends the startup slot-request signature, so it is
+build-independent like everything else.
+
+**The first version deduped on (caller, slot) and that hid the event.** The menu re-entry
+either repeats a pair already seen or makes no call at all — and those two have completely
+different fixes. Removing the dedupe in favour of a sequence number is what made the run
+readable.
+
+> **Rule earned, and it generalises:** a rate limiter on a diagnostic is a filter on the
+> hypothesis space. Dedupe on the thing you are *not* testing, never on the thing you are.
+
+### 73.3 The measurement
+
+```
+#1 caller 0047c394  SLOT=4  arg1=-1 arg3=0   ecx=-1 edx=-1  (mode now 640x480)   startup
+#2 caller 0051599b  SLOT=4  arg1=1  arg3=-1  ecx=0  edx=1   (mode now 1920x1080) map load
+#3 caller 0051599b  SLOT=0  arg1=1  arg3=-1  ecx=0  edx=0   (mode now 1920x1080) MENU RETURN
+```
+
+Two calls, **same call site**, different values. That site reads every setting out of
+preset arrays indexed by the current preset row:
+
+```asm
+mov edx,[eax+ecx*4+0x48]   ; the resolution slot
+push -1                    ; arg3
+push edx                   ; arg2 = slot
+mov edx,[eax+ecx*4+0x40] / push edx
+mov edx,[eax+ecx*4+0x38]   ; edx arg
+mov ecx,[eax+ecx*4+0x30]   ; ecx arg
+call FUN_00515450
+```
+
+So there are **two preset rows: 0 for in-game and 1 for the frontend**, and the CFG
+confirms the slot array exactly — `0x272 = 4` (row 0) and `0x276 = 0` (row 1). PopTop
+stored 640x480 in the frontend row for the same reason the startup asked for it: the menu
+art only ever existed at that size (§69.5).
+
+The mode stamp is what makes this conclusive rather than plausible: the call is made
+*while the mode is still 1920x1080*, so this is a genuine mode change on the way back to
+the menu, not a menu drawn small inside a correct mode. §69.2 had established those look
+identical on screen.
+
+### 73.4 The fix, and why it is gated
+
+Rewrite `arg2` on the stack from the entry detour — the identical trick §69 uses at the
+two startup sites, applied to a site that computes its slot instead of pushing a literal.
+
+**Gated on that one caller.** A blanket "slot 0 becomes slot 4" would also override a
+deliberate 640x480 chosen from the F2 settings screen, which is a legal choice arriving
+through a different caller (`0x491373`, seen in the same log). The preset-apply site is
+located by its own signature — unique in the GOG build — so the gate is build-independent
+rather than an address.
+
+On by default whenever `[Menu] Slot` is redirected, because without it the menu is correct
+at startup and wrong the moment you come back to it, which is worse than being wrong
+consistently. `[Menu] SlotProbe=1` still logs every call for anyone re-treading this.
+
+### 73.5 A control run that mattered
+
+The first probe run was made with `TROPICO_RES=0`, which writes CFG `0x242` **and**
+`0x272` — the in-game preset row. So the slot-0 call in that run was our own launcher's
+doing, arriving before the F2 climb, and taking it at face value would have produced a fix
+for a symptom the test rig created. The control run without the flag reproduced the real
+defect at a different point in the sequence and named the frontend row instead.
+
+TESTING.md's rule was written for exactly this and still earns its place: **keep one
+untouched known-good path, and re-run it whenever a result depends on a value your own
+harness wrote.**
