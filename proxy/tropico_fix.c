@@ -101,6 +101,7 @@ static int patch_blit_probe(void);
 static int patch_blit_scale(void);
 static int patch_preview_probe(void);
 static int patch_surface_probe(void);
+static int patch_preview_fix(int mode);
 static DWORD g_surf_va;
 static DWORD g_slot_out;
 static int patch_menu_slot(void);
@@ -619,6 +620,10 @@ static void apply_patches(void)
         char ip[MAX_PATH];
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
         g_bink_pitch = GetPrivateProfileIntA("Menu", "FixMoviePitch", 0, ip);
+        if (GetPrivateProfileIntA("Menu", "FixPreview", 0, ip)) {
+            if (patch_preview_fix(GetPrivateProfileIntA("Menu", "FixPreview", 0, ip)))
+                ok++; else fail++;
+        }
         if (GetPrivateProfileIntA("Menu", "SurfaceProbe", 0, ip)) {
             /* descriptor width lives at +4 of the object; the locked base at +9 */
             static const BYTE CS[]  = {0x66,0x3d,0x80,0x02, 0x7e,0x0a,
@@ -2988,6 +2993,191 @@ static int patch_surface_probe(void)
     }
     logf_("[+] [surf] %d surface-access site(s) detoured (descriptor+9 = %08x)", g_surf_n, va);
     return g_surf_n > 0;
+}
+
+/* -------------------------------------------- s70 the scenario map preview
+ *
+ * FUN_0044da90 draws it (identified by sweeping every surface access; site 0x44de89
+ * fires as the scenario screen loads). Its destination arithmetic is correct and the
+ * screen descriptor really does read 1920 at draw time -- both verified -- so the fault
+ * is neither the stride nor the addressing.
+ *
+ * It is the EXTENTS. The inner loop reads the source locked 1:1 to the destination
+ * pointer:
+ *
+ *     ecx = src_base - dst_base        (a fixed delta, 0x44de9e)
+ *     mov di,[ecx+ebp]                 (0x44deaa -- so source advances WITH dest)
+ *     add ebp,2 / dec ebx / jne
+ *
+ * with ebx = the DESTINATION width in pixels, and the source row base advancing by a
+ * hardcoded 0x158 bytes (0x44e00f) = 172 entries. So the loop draws dest-width pixels
+ * out of a 172-wide source row. At 640x480 the preview rect is under 172 and it works.
+ * At 1920x1080 it is about 3x that, so each output row runs on into the following
+ * source rows -- three copies across -- and past the end of the map array vertically,
+ * which is the colour noise. Every feature of the picture is accounted for.
+ *
+ * The proper fix is to STEP the source (nearest-neighbour), but the read is delta-locked
+ * to the destination pointer, so that means replacing the loop. This clamps the extents
+ * to the source instead: the preview draws at its native 172x172 rather than tiling. It
+ * ends up smaller than its widget, which is honest -- there is no more source data --
+ * and it is correct rather than corrupt.
+ *
+ * 172 is read from the stride immediate the code itself carries, not hardcoded. */
+/* ---- s70.5 scaling mode: nearest-neighbour, computed per pixel -----------------
+ *
+ * The clamp above is correct but small. Real magnification means the source index must
+ * STEP -- and the loop's read is delta-locked to the destination pointer
+ * (`mov di,[ecx+ebp]`, ecx a fixed src-dst delta), so stepping cannot be expressed by
+ * changing a register. The read itself has to be replaced.
+ *
+ * So compute the source address per pixel instead of deriving it from the pointer:
+ *
+ *     i = (dst - rowdst) / 2                  column within the destination row
+ *     j = i * srcw / dstw                     nearest-neighbour column
+ *     row = r * srcw / dstw                   same ratio, so aspect is preserved
+ *     addr = srcbase + row*stride + j*2
+ *
+ * Outside the source it returns 0, and the engine's own `test di,di / je` already
+ * treats 0 as "skip this pixel" -- so the extents need no clamping at all in this mode.
+ * That is why the clamps are NOT applied here: they would cut the magnified image back
+ * to 172 rows.
+ *
+ * The row index r is tracked rather than passed: the per-row setup runs once per
+ * destination row, so it counts up while the destination row pointer advances by
+ * exactly one screen row, and resets whenever it does not -- which is a new draw. */
+
+static DWORD g_pv_rowdst, g_pv_srcbase, g_pv_dstw, g_pv_srcw, g_pv_stride, g_pv_prev;
+static int   g_pv_r;
+static WORD  g_pv_pixel;
+
+static void __cdecl pv_row(DWORD rowdst, DWORD delta, DWORD dstw)
+{
+    DWORD src = rowdst + delta;                 /* the 1:1 source base for this row */
+    DWORD sw  = g_surf_va ? *(WORD *)(SIZE_T)(g_surf_va - 5) : 0;
+    if (g_pv_prev && sw && rowdst == g_pv_prev + 2 * sw) g_pv_r++;
+    else { g_pv_r = 0; g_pv_srcbase = src; }
+    g_pv_prev   = rowdst;
+    g_pv_rowdst = rowdst;
+    g_pv_dstw   = dstw;
+}
+
+static void __cdecl pv_pixel(DWORD dst)
+{
+    g_pv_pixel = 0;
+    if (!g_pv_dstw || !g_pv_srcw) return;
+    int i = (int)((dst - g_pv_rowdst) >> 1);
+    int j = (int)(((__int64)i * g_pv_srcw) / (int)g_pv_dstw);
+    int r = (int)(((__int64)g_pv_r * g_pv_srcw) / (int)g_pv_dstw);
+    if (i < 0 || j < 0 || j >= (int)g_pv_srcw || r < 0 || r >= (int)g_pv_srcw) return;
+    g_pv_pixel = *(WORD *)(SIZE_T)(g_pv_srcbase + (DWORD)r * g_pv_stride + (DWORD)j * 2);
+}
+
+static int patch_preview_fix(int mode)
+{
+    /* B first: it carries the stride, and tells us the source width.
+     *   mov eax,[esp+0x34] / mov edi,[esp+0x28] / inc eax / add edi,0x158 / cmp eax,edx */
+    static const BYTE SB[]  = {0x8b,0x44,0x24,0x34, 0x8b,0x7c,0x24,0x28, 0x40,
+                               0x81,0xc7,0,0,0,0, 0x3b,0xc2};
+    static const BYTE MB[]  = {   1,   1,   1,   1,    1,   1,   1,   1,    1,
+                                  1,   1,0,0,0,0,    1,   1};
+    BYTE *b = find_unique_masked(SB, MB, sizeof SB, g_text, g_textlen, "preview row loop");
+    if (!b) { logf_("[x] [preview] row-loop signature not found"); return 0; }
+    DWORD stride = rd32(b + 11);
+    if (!stride || (stride & 1)) { logf_("[x] [preview] odd stride %lu -- refusing", stride); return 0; }
+    DWORD srcw = stride / 2;
+
+    g_pv_srcw = srcw; g_pv_stride = stride;
+
+    /*   mov [esp+0x24],ecx / inc ebx / mov di,[ecx+ebp] / test di,di */
+    static const BYTE SA[]  = {0x89,0x4c,0x24,0x24, 0x43, 0x66,0x8b,0x3c,0x29, 0x66,0x85,0xff};
+    static const BYTE MA[]  = {   1,   1,   1,   1,    1,    1,   1,   1,   1,    1,   1,   1};
+    BYTE *a = find_unique_masked(SA, MA, sizeof SA, g_text, g_textlen, "preview row count");
+    if (!a) { logf_("[x] [preview] row-count signature not found"); return 0; }
+
+    if (mode >= 2) {
+        /* --- per-row setup: record rowdst / srcbase / dstw, no clamping --- */
+        BYTE *tr = (BYTE *)VirtualAlloc(NULL, 96, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!tr) { logf_("[x] [preview] VirtualAlloc failed"); return 0; }
+        int o = 0;
+        tr[o++] = 0x60; tr[o++] = 0x9C;
+        tr[o++] = 0x53;                                   /* push ebx (dstw)  */
+        tr[o++] = 0x51;                                   /* push ecx (delta) */
+        tr[o++] = 0x55;                                   /* push ebp (rowdst)*/
+        tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&pv_row; memcpy(tr + o, &f, 4); o += 4; }
+        tr[o++] = 0xFF; tr[o++] = 0xD0;
+        tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x0C;
+        tr[o++] = 0x9D; tr[o++] = 0x61;
+        memcpy(tr + o, a, 5); o += 5;                     /* mov [esp+0x24],ecx / inc ebx */
+        tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((a + 5) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
+        BYTE det[5]; det[0] = 0xE9;
+        { DWORD r = (DWORD)(SIZE_T)(tr - (a + 5)); memcpy(det + 1, &r, 4); }
+        if (!poke(a, det, 5)) { logf_("[x] [preview] VirtualProtect failed (row)"); return 0; }
+
+        /* --- the read: mov di,[ecx+ebp] / test di,di  (4 + 3 bytes) --- */
+        BYTE *rd = a + 5;
+        if (!(rd[0] == 0x66 && rd[1] == 0x8b && rd[2] == 0x3c && rd[3] == 0x29)) {
+            logf_("[x] [preview] read instruction not where expected"); return 0;
+        }
+        BYTE *t2 = (BYTE *)VirtualAlloc(NULL, 96, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!t2) { logf_("[x] [preview] VirtualAlloc failed"); return 0; }
+        DWORD px = (DWORD)(SIZE_T)&g_pv_pixel;
+        o = 0;
+        t2[o++] = 0x60; t2[o++] = 0x9C;
+        t2[o++] = 0x55;                                   /* push ebp (dest ptr) */
+        t2[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&pv_pixel; memcpy(t2 + o, &f, 4); o += 4; }
+        t2[o++] = 0xFF; t2[o++] = 0xD0;
+        t2[o++] = 0x83; t2[o++] = 0xC4; t2[o++] = 0x04;
+        t2[o++] = 0x9D; t2[o++] = 0x61;                   /* popfd / popad       */
+        t2[o++] = 0x66; t2[o++] = 0x8B; t2[o++] = 0x3D;   /* mov di,[g_pv_pixel] */
+        memcpy(t2 + o, &px, 4); o += 4;
+        t2[o++] = 0x66; t2[o++] = 0x85; t2[o++] = 0xFF;   /* test di,di          */
+        t2[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((rd + 7) - (t2 + o + 4)); memcpy(t2 + o, &r, 4); o += 4; }
+        BYTE d2[7]; d2[0] = 0xE9;
+        { DWORD r = (DWORD)(SIZE_T)(t2 - (rd + 5)); memcpy(d2 + 1, &r, 4); }
+        memset(d2 + 5, 0x90, 2);
+        if (!poke(rd, d2, 7)) { logf_("[x] [preview] VirtualProtect failed (read)"); return 0; }
+
+        logf_("[+] [preview] SCALING mode: source %lux%lu stride %lu, nearest-neighbour"
+              " per pixel (%p / %p)", srcw, srcw, stride, (void *)a, (void *)rd);
+        return 1;
+    }
+
+    /* --- A: clamp the per-row pixel count to the source width --- */
+    {
+        BYTE *tr = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!tr) { logf_("[x] [preview] VirtualAlloc failed"); return 0; }
+        int o = 0;
+        memcpy(tr + o, a, 5); o += 5;                       /* mov [esp+0x24],ecx / inc ebx */
+        tr[o++] = 0x81; tr[o++] = 0xFB;                     /* cmp ebx,srcw                 */
+        memcpy(tr + o, &srcw, 4); o += 4;
+        tr[o++] = 0x7E; tr[o++] = 0x06;                     /* jle +6                       */
+        tr[o++] = 0xBB; memcpy(tr + o, &srcw, 4); o += 4;   /* mov ebx,srcw                 */
+        tr[o++] = 0x90;
+        tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((a + 5) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
+        BYTE det[5]; det[0] = 0xE9;
+        { DWORD r = (DWORD)(SIZE_T)(tr - (a + 5)); memcpy(det + 1, &r, 4); }
+        if (!poke(a, det, 5)) { logf_("[x] [preview] VirtualProtect failed (A)"); return 0; }
+    }
+
+    /* --- B: clamp the row count to the source height (square: same value) --- */
+    {
+        BYTE *tr = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!tr) { logf_("[x] [preview] VirtualAlloc failed"); return 0; }
+        int o = 0;
+        tr[o++] = 0x81; tr[o++] = 0xFA;                     /* cmp edx,srcw                 */
+        memcpy(tr + o, &srcw, 4); o += 4;
+        tr[o++] = 0x7E; tr[o++] = 0x05;                     /* jle +5                       */
+        tr[o++] = 0xBA; memcpy(tr + o, &srcw, 4); o += 4;   /* mov edx,srcw                 */
+        memcpy(tr + o, b, 8); o += 8;                       /* the two relocated movs       */
+        tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((b + 8) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
+        BYTE det[8]; det[0] = 0xE9;
+        { DWORD r = (DWORD)(SIZE_T)(tr - (b + 5)); memcpy(det + 1, &r, 4); }
+        memset(det + 5, 0x90, 3);
+        if (!poke(b, det, 8)) { logf_("[x] [preview] VirtualProtect failed (B)"); return 0; }
+    }
+    logf_("[+] [preview] extents clamped to the source (%lu from stride %lu) at %p / %p",
+          srcw, stride, (void *)a, (void *)b);
+    return 1;
 }
 
 static int patch_hud_probe(void)

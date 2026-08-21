@@ -4937,7 +4937,7 @@ during bring-up. That avoids #150 by construction but needs a trigger point.
 
 ---
 
-## 70. The scenario-screen map preview — OPEN
+## 70. The scenario-screen map preview — SOLVED (native size); magnification OPEN
 
 At 1920x1080 the scenario selection's map preview draws three copies across, with a
 second band of colour noise. Stock resolutions are fine. **Not solved.** Recorded
@@ -4987,16 +4987,56 @@ the screen while writing to an offscreen surface of another width, is **dead**.
 Its SOURCE stride is hardcoded `0x158` (344 bytes) at `0x44e00f`, and the row base is
 `edi + 344*row + 0x4bc` -- map-array geometry, which should be resolution-independent.
 
-Unresolved: with a correct stride and correct per-row destination, the observed tiling
-should not happen. Either the extents (`ebx` per-row count, `edx` row count) are wrong,
-or what is on screen is not what this function draws. **Do not guess between those.**
+**It is the EXTENTS**, and the owner's pointer to `app/maps/*.mp2` is what settled it.
+The inner loop reads the source LOCKED 1:1 to the destination pointer:
+
+```
+ecx = src_base - dst_base       ; a fixed delta, 0x44de9e
+mov di,[ecx+ebp]                ; 0x44deaa -- source advances WITH dest
+add ebp,2 / dec ebx / jne
+```
+
+`ebx` is the DESTINATION width in pixels, while a source row is 172 entries
+(`0x158` / 2, from the hardcoded row advance at `0x44e00f`). So the loop draws
+dest-width pixels out of a 172-wide source row. At 640x480 the preview rect is under
+172 and it works; at 1920x1080 it is about 3x that, so each output row runs on into the
+following source rows -- **three copies across** -- and past the end of the map array
+vertically, **which is the colour noise**. Every feature of the picture is accounted
+for, including why it is invisible at stock resolutions.
+
+`[Menu] FixPreview=1` clamps both extents to the source, read from the code's own
+stride immediate rather than hardcoded. **Confirmed in game: correct, no tiling, no
+noise** -- but drawn at its native 172x172, so smaller than its widget.
+
+### 70.4 OPEN: magnification (`FixPreview=2`)
+
+Real magnification needs the source index to STEP, and the read is delta-locked to the
+destination pointer, so no register change expresses it -- the read instruction has to
+be replaced. Mode 2 does that, computing each pixel's source address as
+`srcbase + (r*srcw/dstw)*stride + (i*srcw/dstw)*2` and returning 0 outside the source
+(the engine's own `test di,di / je` already skips 0).
+
+**Tried and not right yet.** The 3x tiling goes away and one island is drawn, but it is
+vertically flattened and a second corrupted shape remains. Two known defects:
+
+1. Both axes use the HORIZONTAL ratio `srcw/dstw`. The vertical needs `dsth`, which is
+   not available at the per-row hook.
+2. The row index `r` is tracked with a heuristic -- "rowdst advanced by exactly one
+   screen row, else new draw" -- which evidently does not hold on this path.
+
+And one thing that was wrong from the start: **the screen draws TWO shapes.** The
+second corrupted shape is present in the ORIGINAL bug too, so it is a separate draw,
+not an artefact of the fix. Treating the picture as one image is a mistake to avoid
+next time; identify the second draw before attempting mode 2 again.
+
+Ship mode 1.
+
+### 70.5 Age
 
 The x and y values in the probe log are **garbage** -- the trampoline pushed four
 arguments using fixed `[esp+N]` offsets, forgetting that each `push` moves `esp`, so
 the second and third reads were off by 4 and 8. The stride was right only because it
 came from an absolute read. Fix the offsets before trusting that probe again.
-
-### 70.4 Age
 
 Pre-existing, not introduced. The menu never ran above 640x480 until §69, so this path
 had never been exercised at a non-stock resolution.

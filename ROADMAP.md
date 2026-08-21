@@ -253,13 +253,19 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
     matching the wrong site. **Deferred by the owner: finish GOG first.** When picked up,
     start from the log — it names every site that matched — rather than from the picture.
 
-12. **Scenario-screen map preview tiles at 1920x1080 — §70. OPEN.** Renderer identified
-    by sweeping every surface access: `FUN_0044da90` (site `0x44de89`, fires as the
-    scenario screen loads). Its stride and per-row destination are both correct, so the
-    fault is in the extents or in what is actually on screen. Ruled out by measurement:
-    our movie-blit patch (single caller), `[WorldFix]` (control run), our synthesised art
-    (1:1 regeneration changed nothing), and `FUN_00492d40` (probed twice, never fires).
-    Pre-existing — this path had never run above 640x480 before §69.
+12. **Scenario-screen map preview — §70. FIXED at native size; magnification open.**
+    The inner loop reads the source locked 1:1 to the destination pointer while `ebx` is
+    the DESTINATION width, and a source row is only 172 entries — so at 1920x1080 each
+    row runs into the next source rows (three copies across) and off the end of the map
+    array (the colour noise). `[Menu] FixPreview=1` clamps both extents to the source,
+    read from the code's own stride immediate. Confirmed correct in game, drawn at its
+    native 172x172.
+
+    `FixPreview=2` attempts nearest-neighbour magnification by replacing the read. It
+    removes the tiling but is not right yet: it uses the horizontal ratio on both axes,
+    its row-index heuristic does not hold, and — important — **the screen draws TWO
+    shapes**, which was true of the original bug as well. Identify the second draw before
+    resuming.
 
 12. **Packaging — STARTED.** `tools/tropico-install.sh [W H]` installs onto a GOG or
     Steam install in one command, and `--uninstall` reverses it. It finds the install
