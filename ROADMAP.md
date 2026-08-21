@@ -253,6 +253,14 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
     matching the wrong site. **Deferred by the owner: finish GOG first.** When picked up,
     start from the log — it names every site that matched — rather than from the picture.
 
+12. **Scenario-screen map preview tiles at 1920x1080 — §70. OPEN.** Renderer identified
+    by sweeping every surface access: `FUN_0044da90` (site `0x44de89`, fires as the
+    scenario screen loads). Its stride and per-row destination are both correct, so the
+    fault is in the extents or in what is actually on screen. Ruled out by measurement:
+    our movie-blit patch (single caller), `[WorldFix]` (control run), our synthesised art
+    (1:1 regeneration changed nothing), and `FUN_00492d40` (probed twice, never fires).
+    Pre-existing — this path had never run above 640x480 before §69.
+
 12. **Packaging — STARTED.** `tools/tropico-install.sh [W H]` installs onto a GOG or
     Steam install in one command, and `--uninstall` reverses it. It finds the install
     (or takes `TROPICO_DIR`), preserves the real `binkw32.dll` as `binkw32_orig.dll`,

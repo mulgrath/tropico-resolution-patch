@@ -99,6 +99,9 @@ static int g_menu_slot = -1;
 static int g_bink_pitch;
 static int patch_blit_probe(void);
 static int patch_blit_scale(void);
+static int patch_preview_probe(void);
+static int patch_surface_probe(void);
+static DWORD g_surf_va;
 static DWORD g_slot_out;
 static int patch_menu_slot(void);
 static DWORD g_vt_ys_va, g_vt_xs_va;
@@ -616,6 +619,22 @@ static void apply_patches(void)
         char ip[MAX_PATH];
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
         g_bink_pitch = GetPrivateProfileIntA("Menu", "FixMoviePitch", 0, ip);
+        if (GetPrivateProfileIntA("Menu", "SurfaceProbe", 0, ip)) {
+            /* descriptor width lives at +4 of the object; the locked base at +9 */
+            static const BYTE CS[]  = {0x66,0x3d,0x80,0x02, 0x7e,0x0a,
+                                       0xc7,0x44,0x24,0x10,0x80,0x02,0x00,0x00};
+            static const BYTE CM[]  = {   1,   1,   1,   1,    1,   1,
+                                          1,   1,   1,   1,   1,   1,   1,   1};
+            BYTE *c = find_unique_masked(CS, CM, sizeof CS, g_text, g_textlen, "descriptor");
+            if (c) {
+                /* the clamp reads `mov ax,[descW]` six bytes earlier */
+                g_surf_va = rd32(c - 4) + 5;
+                if (patch_surface_probe()) ok++; else fail++;
+            } else { logf_("[x] [surf] could not locate the screen descriptor"); fail++; }
+        }
+        if (GetPrivateProfileIntA("Menu", "PreviewProbe", 0, ip)) {
+            if (patch_preview_probe()) ok++; else fail++;
+        }
         if (GetPrivateProfileIntA("Menu", "FixMovieScale", 0, ip)) {
             if (patch_blit_scale()) ok++; else fail++;
         }
@@ -2831,6 +2850,144 @@ static int patch_blit_scale(void)
     logf_("[+] [blit] destination clamps at %p removed (jl -> jmp): the movie scaler"
           " may now magnify past the source size", (void *)at);
     return 1;
+}
+
+/* --------------------------------------------- s70 the map-preview probe
+ *
+ * The scenario screen's map preview tiles three across with the second band as colour
+ * noise. Same 3x signature as the movie (1920/640) and noise means the SOURCE read is
+ * running past its buffer.
+ *
+ * NOT caused by [Menu] FixMovieScale. The clamps that removed live in FUN_00531690,
+ * which has exactly ONE caller -- the menu movie tick -- so nothing else can reach that
+ * code. Structural, not a guess.
+ *
+ * The renderer is FUN_00492d40 (the map-selection screen; it also owns the rotated
+ * "Map Size"/"Elevation" labels at 0x494aea). Its destination addressing reads correct:
+ * row start = screenW*y + x at 0x494479, row advance = screenW*2 at 0x49465a. So the
+ * fault is in what it is told to draw, not where. Log the geometry rather than keep
+ * reading disassembly. */
+/* Confirmed by the surface sweep: FUN_0044da90 draws the scenario preview (site 1,
+ * 0x44de89, fired straight after s_c_loop.BIK opened). Its destination arithmetic reads
+ * correct -- base + (y*screenW + x)*2, recomputed per row -- so the question is what
+ * screenW and the surface actually ARE at draw time. The renderer takes its stride from
+ * the SCREEN descriptor while writing to whichever surface is currently locked; if the
+ * preview goes to an offscreen surface of a different width, that mismatch is the whole
+ * bug and it is invisible at 640x480 where the two agree. */
+static void __cdecl preview_hook(DWORD stride, DWORD y, DWORD x, DWORD rows)
+{
+    static int n;
+    if (n >= 8) return;
+    n++;
+    logf_("  [preview] descriptor width=%lu  x=%ld y=%ld  lastrow=%ld   (mode %dx%d)",
+          stride, (long)(int)x, (long)(int)y, (long)(int)rows,
+          g_vt_xs_va ? (int)(*(float *)(SIZE_T)g_vt_xs_va * 3200.0f + 0.5f) : 0,
+          g_vt_ys_va ? (int)(*(float *)(SIZE_T)g_vt_ys_va * 2400.0f + 0.5f) : 0);
+}
+
+static int patch_preview_probe(void)
+{
+    /* Two earlier versions of this probe fired ZERO times because they sat inside
+     * FUN_00492d40 -- the SANDBOX map setup, not scenario selection. The surface sweep
+     * settled it: the renderer is FUN_0044da90. Hook the instruction that loads the
+     * stride, `movsx esi,[screen width]`, seven bytes. */
+    static const BYTE SIG[]  = {0x0f,0xbf,0x35,0,0,0,0, 0x8b,0x44,0x24,0x34,
+                                0x03,0xc1, 0x0f,0xaf,0xc6};
+    static const BYTE MASK[] = {   1,   1,   1,0,0,0,0,    1,   1,   1,   1,
+                                   1,   1,    1,   1,   1};
+    BYTE *at = find_unique_masked(SIG, MASK, sizeof SIG, g_text, g_textlen, "map preview");
+    if (!at) { logf_("[x] [preview] signature not found"); return 0; }
+
+    BYTE *tr = (BYTE *)VirtualAlloc(NULL, 96, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tr) { logf_("[x] [preview] VirtualAlloc failed"); return 0; }
+    int o = 0;
+    tr[o++] = 0x60; tr[o++] = 0x9C;                                 /* pushad / pushfd    */
+    /* after pushad+pushfd esp is 0x24 lower, so the callee's [esp+N] is [esp+0x24+N] */
+    /* after pushad+pushfd, the callee's [esp+N] is at [esp+0x24+N] */
+    tr[o++] = 0xFF; tr[o++] = 0x74; tr[o++] = 0x24; tr[o++] = 0x5C; /* push [esp+0x38] rows */
+    tr[o++] = 0xFF; tr[o++] = 0x74; tr[o++] = 0x24; tr[o++] = 0x34; /* push [esp+0x10] x    */
+    tr[o++] = 0xFF; tr[o++] = 0x74; tr[o++] = 0x24; tr[o++] = 0x58; /* push [esp+0x34] y    */
+    tr[o++] = 0xB8; { DWORD v = g_surf_va - 5; memcpy(tr + o, &v, 4); o += 4; } /* mov eax,&descW */
+    tr[o++] = 0x0F; tr[o++] = 0xB7; tr[o++] = 0x00;                 /* movzx eax,word [eax] */
+    tr[o++] = 0x50;                                                 /* push eax  stride     */
+    tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&preview_hook; memcpy(tr + o, &f, 4); o += 4; }
+    tr[o++] = 0xFF; tr[o++] = 0xD0;                                 /* call eax           */
+    tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x10;                 /* add esp,16         */
+    tr[o++] = 0x9D; tr[o++] = 0x61;                                 /* popfd / popad      */
+    memcpy(tr + o, at, 7); o += 7;                                  /* relocated movsx    */
+    tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((at + 7) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
+
+    BYTE det[7]; det[0] = 0xE9;
+    { DWORD r = (DWORD)(SIZE_T)(tr - (at + 5)); memcpy(det + 1, &r, 4); }
+    memset(det + 5, 0x90, 2);
+    if (!poke(at, det, 7)) { logf_("[x] [preview] VirtualProtect failed"); return 0; }
+    logf_("[+] [preview] map-preview draw at %p detoured -> %p", (void *)at, (void *)tr);
+    return 1;
+}
+
+/* ------------------------------------------- s70 sweep every surface access
+ *
+ * Finding the map-preview renderer by reasoning about which screen owns which
+ * function has now failed three times: FUN_00492d40 was probed twice and fired ZERO
+ * times (it is the sandbox map setup, not scenario selection), stpruler.i16 turned out
+ * not to be what is displayed, and [WorldFix] was exonerated by a control run.
+ *
+ * So stop naming candidates. Every path that draws to the screen must read the locked
+ * surface base at [screen descriptor + 9]. Detour EVERY instruction in .text that
+ * references it and log which ones fire while the scenario screen is up. The renderer
+ * cannot hide from that.
+ *
+ * Each such instruction is `mov reg,[abs]` (5-6 bytes) or `add reg,[abs]` (6), all long
+ * enough for a jmp rel32, and all position-independent, so relocating is a plain copy.
+ * The descriptor VA is discovered from the movie clamp's own operand, not hardcoded. */
+
+static BYTE *g_surf_site[32];
+static int   g_surf_n;
+static DWORD g_surf_hit;
+
+static void __cdecl surface_hook(DWORD idx)
+{
+    /* One line per site, the first time it fires. A bitmask keeps this to a few dozen
+     * bytes of work on what is a very hot path. */
+    if (idx >= 32 || (g_surf_hit & (1u << idx))) return;
+    g_surf_hit |= (1u << idx);
+    logf_("  [surf] site %lu at %p FIRED", idx, (void *)g_surf_site[idx]);
+}
+
+static int patch_surface_probe(void)
+{
+    if (!g_surf_va) { logf_("[x] [surf] screen-descriptor VA unknown"); return 0; }
+    DWORD va = g_surf_va;
+    for (SIZE_T i = 0; i + 6 <= g_textlen && g_surf_n < 32; i++) {
+        BYTE *p = g_text + i;
+        int len = 0;
+        if (p[0] == 0xA1 && rd32(p + 1) == va) len = 5;                 /* mov eax,[abs] */
+        else if (p[0] == 0x8B && (p[1] == 0x0D || p[1] == 0x15 || p[1] == 0x1D ||
+                                  p[1] == 0x25 || p[1] == 0x2D || p[1] == 0x35 ||
+                                  p[1] == 0x3D) && rd32(p + 2) == va) len = 6;
+        else if (p[0] == 0x03 && p[1] == 0x05 && rd32(p + 2) == va) len = 6; /* add eax,[abs] */
+        if (!len) continue;
+
+        BYTE *tr = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!tr) continue;
+        int idx = g_surf_n;
+        int o = 0;
+        tr[o++] = 0x60; tr[o++] = 0x9C;                       /* pushad / pushfd */
+        tr[o++] = 0x68; { DWORD v = (DWORD)idx; memcpy(tr + o, &v, 4); o += 4; }
+        tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&surface_hook; memcpy(tr + o, &f, 4); o += 4; }
+        tr[o++] = 0xFF; tr[o++] = 0xD0;
+        tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x04;
+        tr[o++] = 0x9D; tr[o++] = 0x61;                       /* popfd / popad   */
+        memcpy(tr + o, p, len); o += len;                     /* the original access */
+        tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((p + len) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
+
+        BYTE det[6]; det[0] = 0xE9;
+        { DWORD r = (DWORD)(SIZE_T)(tr - (p + 5)); memcpy(det + 1, &r, 4); }
+        if (len > 5) memset(det + 5, 0x90, len - 5);
+        if (poke(p, det, len)) { g_surf_site[idx] = p; g_surf_n++; i += len - 1; }
+    }
+    logf_("[+] [surf] %d surface-access site(s) detoured (descriptor+9 = %08x)", g_surf_n, va);
+    return g_surf_n > 0;
 }
 
 static int patch_hud_probe(void)

@@ -4934,3 +4934,69 @@ not a redistribution"), or accepting the 640x480 menu.
 
 A fourth, unexplored: force the mode change **after** the menu exists rather than
 during bring-up. That avoids #150 by construction but needs a trigger point.
+
+---
+
+## 70. The scenario-screen map preview — OPEN
+
+At 1920x1080 the scenario selection's map preview draws three copies across, with a
+second band of colour noise. Stock resolutions are fine. **Not solved.** Recorded
+because four candidate theories died and the survivors narrow it a lot.
+
+### 70.1 Ruled out, each by measurement
+
+- **Not our movie-blit patch (§69.6).** `FUN_00531690`, which holds the clamps that
+  patch removes, has **exactly one caller** -- the menu movie tick. Structural, not a
+  control run.
+- **Not `[WorldFix]`.** Owner ran with `Enable=0`: still tiled.
+- **Not our synthesised art.** `stpruler.i16` holds 29 sprites of 127x136 and looked
+  like the map thumbnails, but there are **32 scenarios**, and regenerating it at 1:1
+  (sprites back to 127x136, others left at 3x) changed nothing on screen. Note the
+  weaker form of that argument: if the preview were drawn SCALED to its widget, an
+  unchanged picture would be consistent with either source size -- the real signal is
+  that a third-size source did not turn three tiles into nine.
+- **Not `FUN_00492d40`.** Probed twice, **fired zero times**. It owns the rotated
+  "Map Size"/"Elevation" labels, so it is the SANDBOX map setup, not scenario
+  selection. Two runs were spent on it because the screen names were similar.
+
+> Zero log lines from a probe means "this code did not run" only if the probe is on a
+> path that would have run. The first attempt sat on a branch taken when `[0x5a0f88]`
+> is 0, which the game does not take -- indistinguishable from "function never runs"
+> unless you check.
+
+### 70.2 The renderer, identified by sweep
+
+Naming candidate functions failed three times, so instead **every instruction in .text
+that reads the locked surface base** (`[screen descriptor + 9]`, 26 sites) was detoured
+and logged. Three fired; one is the movie blit, one is a frame/flip helper
+(`FUN_004eb660`), and:
+
+```
+[surf] site 1 at 0044de89 FIRED      <- immediately after s_c_loop.BIK opened
+```
+
+**`FUN_0044da90` draws the scenario preview.** That is a measurement, not an inference.
+
+### 70.3 What is known about it, and what is not
+
+Its destination arithmetic is **correct**: `base + (y * screenW + x) * 2`, recomputed
+per row at `0x44de73`, inner loop advancing 2 bytes per pixel. Probed at draw time the
+screen descriptor reads **1920** -- so the leading theory, that it takes its stride from
+the screen while writing to an offscreen surface of another width, is **dead**.
+
+Its SOURCE stride is hardcoded `0x158` (344 bytes) at `0x44e00f`, and the row base is
+`edi + 344*row + 0x4bc` -- map-array geometry, which should be resolution-independent.
+
+Unresolved: with a correct stride and correct per-row destination, the observed tiling
+should not happen. Either the extents (`ebx` per-row count, `edx` row count) are wrong,
+or what is on screen is not what this function draws. **Do not guess between those.**
+
+The x and y values in the probe log are **garbage** -- the trampoline pushed four
+arguments using fixed `[esp+N]` offsets, forgetting that each `push` moves `esp`, so
+the second and third reads were off by 4 and 8. The stride was right only because it
+came from an absolute read. Fix the offsets before trusting that probe again.
+
+### 70.4 Age
+
+Pre-existing, not introduced. The menu never ran above 640x480 until §69, so this path
+had never been exercised at a non-stock resolution.
