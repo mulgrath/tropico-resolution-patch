@@ -253,10 +253,20 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
     matching the wrong site. **Deferred by the owner: finish GOG first.** When picked up,
     start from the log — it names every site that matched — rather than from the picture.
 
-12. **THEN:** packaging. Generate the set at install time from the user's own archives, pick
-   the mode automatically, and ship it as one step. This is the last thing between the project
-   and the brief: "give someone a working version on Linux that doesn't require any awkward
-   setups on their part".
+12. **Packaging — STARTED.** `tools/tropico-install.sh [W H]` installs onto a GOG or
+    Steam install in one command, and `--uninstall` reverses it. It finds the install
+    (or takes `TROPICO_DIR`), preserves the real `binkw32.dll` as `binkw32_orig.dll`,
+    writes the ini from `known-good/` with the mode substituted, and **generates the art
+    set from the user's own archives** — nothing derived from the game ships with the
+    patch. Every step is verified rather than assumed, and the whole thing is idempotent.
+
+    The one destructive step is guarded: if `binkw32.dll` is already the proxy and
+    `binkw32_orig.dll` is missing, it refuses rather than copying the proxy over itself
+    and destroying the real Bink — which would take every movie in the game with it.
+
+    Still to do: pick the mode automatically instead of defaulting to 1920x1080, and
+    derive the `[VText]` dials from the scale ratio so a new resolution does not need a
+    hand-dialling pass (the installer currently warns instead).
 
 ## Ground rules
 

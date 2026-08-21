@@ -20,3 +20,8 @@ known-good/fonts-scale*/
 *.i10
 *.i12
 *.i16
+
+# Local backups of generated art. Personal-use copies; regenerable at any time with
+# tools/tropico-set-resolution.sh, so they are kept out of history by choice, not
+# because they are unimportant.
+generated/
