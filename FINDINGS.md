@@ -5121,7 +5121,8 @@ Verified:
 * All 85 previously-installed assets regenerate **byte-identical**; the change is purely
   additive. 267 files, 34 MB.
 
-**Not yet confirmed in game** — the geometry is measured, the picture is not.
+**CONFIRMED IN GAME** by the owner, 2026-08-21: the crescent is gone and the portrait
+fills its ring.
 
 ### 71.4 What the same scan says is still missing
 

@@ -194,8 +194,8 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
    `brNN.imm`, 183 of them, and only `br00` is written down anywhere — the rest are named
    at runtime, so §48.2's exe+`.WIN` harvest never saw them and they were never
    regenerated. `tropico-artset.py` gains `numeric_family()`, a third name source; the
-   identity run now covers 260 assets byte-identical instead of 78. Geometry verified,
-   **not yet confirmed in game**. §71.4 records 76 UI-art entries that are still unnamed.
+   identity run now covers 260 assets byte-identical instead of 78. **Confirmed in game by the
+   owner 2026-08-21.** §71.4 records 76 UI-art entries that are still unnamed.
 
 9. ~~Startup movie does not play.~~ **SOLVED AND CONFIRMED IN GAME — §67, §68.**
    Not broken and not disabled: the intro is a **one-shot**. `FUN_0047c370` (reached
