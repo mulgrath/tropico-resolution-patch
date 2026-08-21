@@ -253,19 +253,17 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
     matching the wrong site. **Deferred by the owner: finish GOG first.** When picked up,
     start from the log — it names every site that matched — rather than from the picture.
 
-12. **Scenario-screen map preview — §70. FIXED at native size; magnification open.**
-    The inner loop reads the source locked 1:1 to the destination pointer while `ebx` is
-    the DESTINATION width, and a source row is only 172 entries — so at 1920x1080 each
-    row runs into the next source rows (three copies across) and off the end of the map
-    array (the colour noise). `[Menu] FixPreview=1` clamps both extents to the source,
-    read from the code's own stride immediate. Confirmed correct in game, drawn at its
-    native 172x172.
+12. ~~Scenario-screen map preview tiles at 1920x1080.~~ **SOLVED AND CONFIRMED IN GAME
+    — §70.** The inner loop reads the source locked 1:1 to the destination pointer while
+    the count is the DESTINATION width, and a source row is only 172 entries — so at
+    1920x1080 each row ran into the following source rows (three copies across) and into
+    the NEXT MAP's preview, which is what the "colour noise" was. All previews share one
+    array with rows stacked consecutively.
 
-    `FixPreview=2` attempts nearest-neighbour magnification by replacing the read. It
-    removes the tiling but is not right yet: it uses the horizontal ratio on both axes,
-    its row-index heuristic does not hold, and — important — **the screen draws TWO
-    shapes**, which was true of the original bug as well. Identify the second draw before
-    resuming.
+    `[Menu] FixPreview=2` magnifies properly: per-pixel nearest-neighbour across, and a
+    Bresenham accumulator stepping the source row POINTER down, which advances it exactly
+    `srcH-1` times over `dstH` rows and so cannot leave this map. `FixPreview=1` is the
+    conservative alternative — correct but drawn at native size.
 
 12. **Packaging — STARTED.** `tools/tropico-install.sh [W H]` installs onto a GOG or
     Steam install in one command, and `--uninstall` reverses it. It finds the install

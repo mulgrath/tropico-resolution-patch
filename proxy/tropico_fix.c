@@ -3023,41 +3023,40 @@ static int patch_surface_probe(void)
  * and it is correct rather than corrupt.
  *
  * 172 is read from the stride immediate the code itself carries, not hardcoded. */
-/* ---- s70.5 scaling mode: nearest-neighbour, computed per pixel -----------------
+/* ---- s70.5 scaling mode --------------------------------------------------------
  *
- * The clamp above is correct but small. Real magnification means the source index must
- * STEP -- and the loop's read is delta-locked to the destination pointer
- * (`mov di,[ecx+ebp]`, ecx a fixed src-dst delta), so stepping cannot be expressed by
- * changing a register. The read itself has to be replaced.
+ * The owner identified the second shape: it is the NEXT MAP's preview. Every map's
+ * preview lives in ONE array, 172-entry rows stacked consecutively, so overrunning
+ * map N's rows walks straight into map N+1. That is what the "colour noise" always was.
  *
- * So compute the source address per pixel instead of deriving it from the pointer:
+ * It also means the vertical step must be EXACT -- one row too far is not a rounding
+ * error, it is another map. So vertical scaling steps the source row POINTER with a
+ * Bresenham accumulator rather than computing a row index:
  *
- *     i = (dst - rowdst) / 2                  column within the destination row
- *     j = i * srcw / dstw                     nearest-neighbour column
- *     row = r * srcw / dstw                   same ratio, so aspect is preserved
- *     addr = srcbase + row*stride + j*2
+ *     acc += srcH ; while (acc >= dstH) { acc -= dstH ; edi += stride }
  *
- * Outside the source it returns 0, and the engine's own `test di,di / je` already
- * treats 0 as "skip this pixel" -- so the extents need no clamping at all in this mode.
- * That is why the clamps are NOT applied here: they would cut the magnified image back
- * to 172 rows.
+ * Over dstH destination rows that advances edi exactly srcH-1 times, so it cannot leave
+ * this map's rows. The first attempt used the horizontal ratio on BOTH axes and guessed
+ * the row index from pointer arithmetic; both are gone.
  *
- * The row index r is tracked rather than passed: the per-row setup runs once per
- * destination row, so it counts up while the destination row pointer advances by
- * exactly one screen row, and resets whenever it does not -- which is a new draw. */
+ * Horizontal stays a per-pixel nearest-neighbour lookup, because the loop's read is
+ * delta-locked to the destination pointer and no register change makes it step. With
+ * the row pointer now correct the read only needs the column:
+ *
+ *     addr = (rowdst + delta) + (i * srcw / dstw) * 2
+ *
+ * New-draw detection is exact rather than heuristic: within a draw, edi is only ever
+ * written by our own hook, so an incoming edi that is not the one we last wrote means a
+ * new draw. dstH comes from the loop's own bounds, both live in registers there. */
 
-static DWORD g_pv_rowdst, g_pv_srcbase, g_pv_dstw, g_pv_srcw, g_pv_stride, g_pv_prev;
-static int   g_pv_r;
+static DWORD g_pv_rowdst, g_pv_delta, g_pv_dstw, g_pv_srcw, g_pv_stride;
+static DWORD g_pv_acc, g_pv_dsth, g_pv_last_edi, g_pv_edi;
 static WORD  g_pv_pixel;
 
 static void __cdecl pv_row(DWORD rowdst, DWORD delta, DWORD dstw)
 {
-    DWORD src = rowdst + delta;                 /* the 1:1 source base for this row */
-    DWORD sw  = g_surf_va ? *(WORD *)(SIZE_T)(g_surf_va - 5) : 0;
-    if (g_pv_prev && sw && rowdst == g_pv_prev + 2 * sw) g_pv_r++;
-    else { g_pv_r = 0; g_pv_srcbase = src; }
-    g_pv_prev   = rowdst;
     g_pv_rowdst = rowdst;
+    g_pv_delta  = delta;
     g_pv_dstw   = dstw;
 }
 
@@ -3066,10 +3065,24 @@ static void __cdecl pv_pixel(DWORD dst)
     g_pv_pixel = 0;
     if (!g_pv_dstw || !g_pv_srcw) return;
     int i = (int)((dst - g_pv_rowdst) >> 1);
-    int j = (int)(((__int64)i * g_pv_srcw) / (int)g_pv_dstw);
-    int r = (int)(((__int64)g_pv_r * g_pv_srcw) / (int)g_pv_dstw);
-    if (i < 0 || j < 0 || j >= (int)g_pv_srcw || r < 0 || r >= (int)g_pv_srcw) return;
-    g_pv_pixel = *(WORD *)(SIZE_T)(g_pv_srcbase + (DWORD)r * g_pv_stride + (DWORD)j * 2);
+    if (i < 0) return;
+    int j = (int)(((__int64)i * (int)g_pv_srcw) / (int)g_pv_dstw);
+    if (j < 0 || j >= (int)g_pv_srcw) return;
+    g_pv_pixel = *(WORD *)(SIZE_T)(g_pv_rowdst + g_pv_delta + (DWORD)j * 2);
+}
+
+/* stands in for `add edi,stride` at the bottom of the row loop */
+static void __cdecl pv_adv(DWORD edi, DWORD row, DWORD lastrow)
+{
+    if (edi != g_pv_last_edi) {
+        g_pv_acc = 0;
+        int h = (int)lastrow - (int)row + 2;   /* row has already been incremented */
+        g_pv_dsth = (h > 0) ? (DWORD)h : 1;
+    }
+    g_pv_acc += g_pv_srcw;
+    while (g_pv_dsth && g_pv_acc >= g_pv_dsth) { g_pv_acc -= g_pv_dsth; edi += g_pv_stride; }
+    g_pv_last_edi = edi;
+    g_pv_edi      = edi;
 }
 
 static int patch_preview_fix(int mode)
@@ -3137,8 +3150,30 @@ static int patch_preview_fix(int mode)
         memset(d2 + 5, 0x90, 2);
         if (!poke(rd, d2, 7)) { logf_("[x] [preview] VirtualProtect failed (read)"); return 0; }
 
-        logf_("[+] [preview] SCALING mode: source %lux%lu stride %lu, nearest-neighbour"
-              " per pixel (%p / %p)", srcw, srcw, stride, (void *)a, (void *)rd);
+        /* --- the row advance: `add edi,stride`, six bytes at b+9 --- */
+        BYTE *ad = b + 9;
+        if (!(ad[0] == 0x81 && ad[1] == 0xC7)) {
+            logf_("[x] [preview] row-advance instruction not where expected"); return 0;
+        }
+        BYTE *t3 = (BYTE *)VirtualAlloc(NULL, 96, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!t3) { logf_("[x] [preview] VirtualAlloc failed"); return 0; }
+        DWORD ev = (DWORD)(SIZE_T)&g_pv_edi;
+        o = 0;
+        t3[o++] = 0x60; t3[o++] = 0x9C;
+        t3[o++] = 0x52; t3[o++] = 0x50; t3[o++] = 0x57;  /* push edx(last)/eax(row)/edi */
+        t3[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&pv_adv; memcpy(t3 + o, &f, 4); o += 4; }
+        t3[o++] = 0xFF; t3[o++] = 0xD0;
+        t3[o++] = 0x83; t3[o++] = 0xC4; t3[o++] = 0x0C;
+        t3[o++] = 0x9D; t3[o++] = 0x61;
+        t3[o++] = 0x8B; t3[o++] = 0x3D; memcpy(t3 + o, &ev, 4); o += 4; /* mov edi,[g_pv_edi] */
+        t3[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((ad + 6) - (t3 + o + 4)); memcpy(t3 + o, &r, 4); o += 4; }
+        BYTE d3[6]; d3[0] = 0xE9;
+        { DWORD r = (DWORD)(SIZE_T)(t3 - (ad + 5)); memcpy(d3 + 1, &r, 4); }
+        d3[5] = 0x90;
+        if (!poke(ad, d3, 6)) { logf_("[x] [preview] VirtualProtect failed (advance)"); return 0; }
+
+        logf_("[+] [preview] SCALING mode: source %lux%lu stride %lu; column lookup at %p,"
+              " row stepping at %p", srcw, srcw, stride, (void *)rd, (void *)ad);
         return 1;
     }
 

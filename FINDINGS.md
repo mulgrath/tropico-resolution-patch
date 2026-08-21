@@ -4937,7 +4937,7 @@ during bring-up. That avoids #150 by construction but needs a trigger point.
 
 ---
 
-## 70. The scenario-screen map preview — SOLVED (native size); magnification OPEN
+## 70. The scenario-screen map preview
 
 At 1920x1080 the scenario selection's map preview draws three copies across, with a
 second band of colour noise. Stock resolutions are fine. **Not solved.** Recorded
@@ -5008,35 +5008,37 @@ for, including why it is invisible at stock resolutions.
 stride immediate rather than hardcoded. **Confirmed in game: correct, no tiling, no
 noise** -- but drawn at its native 172x172, so smaller than its widget.
 
-### 70.4 OPEN: magnification (`FixPreview=2`)
+### 70.4 SOLVED: magnification (`FixPreview=2`)
 
-Real magnification needs the source index to STEP, and the read is delta-locked to the
-destination pointer, so no register change expresses it -- the read instruction has to
-be replaced. Mode 2 does that, computing each pixel's source address as
-`srcbase + (r*srcw/dstw)*stride + (i*srcw/dstw)*2` and returning 0 outside the source
-(the engine's own `test di,di / je` already skips 0).
+**The second shape was never corruption — it is the NEXT MAP's preview.** The owner
+identified it. Every map's preview lives in ONE array, 172-entry rows stacked
+consecutively, so overrunning map N walks into map N+1. That is what the "colour noise"
+always was, and it reframes the whole fix: the vertical step has to be **exact**. One
+row too far is not a rounding artefact, it is another map.
 
-**Tried and not right yet.** The 3x tiling goes away and one island is drawn, but it is
-vertically flattened and a second corrupted shape remains. Two known defects:
+Three hooks, all in `FUN_0044da90`:
 
-1. Both axes use the HORIZONTAL ratio `srcw/dstw`. The vertical needs `dsth`, which is
-   not available at the per-row hook.
-2. The row index `r` is tracked with a heuristic -- "rowdst advanced by exactly one
-   screen row, else new draw" -- which evidently does not hold on this path.
+- **per row** (`0x44dea5`) record the destination row start, the `src-dst` delta and the
+  destination width.
+- **the read** (`0x44deaa`) replaced entirely. The loop's read is delta-locked to the
+  destination pointer, so no register change can make the source step -- the instruction
+  itself has to go. In its place, `addr = rowdst + delta + (i * srcw / dstw) * 2`.
+- **the row advance** (`add edi,stride`) replaced with a Bresenham accumulator:
+  `acc += srcH; while (acc >= dstH) { acc -= dstH; edi += stride }`. Over `dstH`
+  destination rows that steps the pointer exactly `srcH-1` times, so leaving this map's
+  rows is **structurally impossible** rather than guarded against.
 
-And one thing that was wrong from the start: **the screen draws TWO shapes.** The
-second corrupted shape is present in the ORIGINAL bug too, so it is a separate draw,
-not an artefact of the fix. Treating the picture as one image is a mistake to avoid
-next time; identify the second draw before attempting mode 2 again.
+`dstH` comes from the loop's own bounds, live in registers at that point. New-draw
+detection is exact, not heuristic: within a draw `edi` is only ever written by our hook,
+so an incoming value we did not write means a new draw.
 
-Ship mode 1.
+**Confirmed in game: correct, full size, correct aspect, no second shape.**
+
+The first attempt failed for two reasons worth keeping: it used the HORIZONTAL ratio on
+both axes, and it guessed the row index from pointer arithmetic. Both were replaced
+rather than tuned.
 
 ### 70.5 Age
-
-The x and y values in the probe log are **garbage** -- the trampoline pushed four
-arguments using fixed `[esp+N]` offsets, forgetting that each `push` moves `esp`, so
-the second and third reads were off by 4 and 8. The stride was right only because it
-came from an absolute read. Fix the offsets before trusting that probe again.
 
 Pre-existing, not introduced. The menu never ran above 640x480 until §69, so this path
 had never been exercised at a non-stock resolution.
