@@ -158,13 +158,102 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
    undone by deleting them. `px.PK2` is never written.
 
 7. ~~Optional polish: patch `.WIN` rects so rotated-text widgets stop overhanging.~~
-   **TRIED AND REVERTED — §64.** The format is writable (32/32 byte-identical round-trip) and
-   loose `.WIN` overrides are CONFIRMED to work (§64.2), but `cy` moves the text and the clip
-   bottom together, so every value trades overhang against cropping the tab. The tab graphic
-   is not drawn from those widgets at all (§64.3, refuting §63.6). Open lead: the owner found
-   that the **Reduce** setting restores the clipped bottom (§64.4).
+   **SOLVED AND CONFIRMED IN GAME — §65.** Rotated text is drawn by `FUN_00450b10`
+   (`0x450b10`), which renders the string horizontally into an offscreen surface with
+   the box's axes swapped and then transposes it (`FUN_00500e70`). The defect is a
+   coordinate-space mismatch, the §30/§47 shape: the engine measures the label's length
+   through `3200/W` on the way in and `H/2400` on the way out, so at 16:9 it believes
+   every rotated label is 25% shorter than it is, centres it against that, and pushes it
+   off the bottom. Fix ships in the proxy as `[VText]`, which rewrites the drawer's
+   arguments at the call site and is **gated on the mode** so the stock modes stay
+   untouched.
 
-8. **NEXT:** packaging. Generate the set at install time from the user's own archives, pick
+   Two corrections fall out. §64.2 is **REFUTED** — loose `.WIN` overrides do NOT load;
+   only `.i16` art does (§63.1), because each asset type has its own loader.
+
+   **§66 closes the rest.** `bldgdtl`'s "Owners"/"Wages"/"Rent" **is** rotated text, from a
+   third call site (`0x5034d8`, `rot=2`) that §65 had mislabelled "a flip". Settled by
+   detouring the wrapper's entry so every rotated draw logs its caller, rather than by
+   re-reading the disassembly. Same defect, simpler correction — that site passes no clip,
+   so the box is the only lever. Ships as `BldgDH=67 BldgDY=-84`, mode-gated, confirmed in
+   game. All rotated text in the game is now correct at 1920x1080.
+
+   **Frozen 2026-08-21** at font scale **1.00 on both axes** — the 0.90 font shrink was a
+   workaround for the placement bug and came back out once the placement was fixed; the
+   clipping it had been hiding is covered by the room dials instead (§66.4). Four dials,
+   all mode-gated: `BoxH=340 BoxDY=-99 BoxDX=-14` for the tabs, `BldgDH=107 BldgDY=-111`
+   for the building panel.
+
+   **Open:** the dials are per-mode. 2560x1440 needs its own pass — the ini carries the
+   unit conversions and the procedure, so it is a dialling job, not a research one.
+   Deriving them from the scale ratio would remove the pass entirely; not attempted.
+
+8. **Build-menu preview offset.** The circular building preview in the build menu sits a
+   few pixels left of its stone-ring surround, leaving an unpainted sliver at the right
+   edge through which the terrain shows. Reported with a screenshot 2026-08-21. Not yet
+   investigated; expected to be the §11/§26 family (a rect computed at the stock width).
+   Needs the offset measured at two resolutions to tell a fixed pixel error from a
+   scale-proportional one.
+
+9. ~~Startup movie does not play.~~ **SOLVED AND CONFIRMED IN GAME — §67, §68.**
+   Not broken and not disabled: the intro is a **one-shot**. `FUN_0047c370` (reached
+   unconditionally from WinMain) is guarded by a config field that the very next
+   instruction clears, so it plays once ever. `[Intro] Force=1` NOPs that guard.
+   Off by default — every-launch playback is a preference, not a fix.
+
+   The proxy was exonerated first by a stock-DLL control run, then four Bink exports
+   were turned from forwarders into logging wrappers, which showed Bink healthy and
+   `intro_01` never requested. `tools/tropico-stock-run.sh` makes that control
+   repeatable and self-restoring.
+
+10. ~~Main menu is a 640x480 window in the top-left.~~ **SOLVED AND CONFIRMED IN GAME
+    — §69.** The intro and the main menu now render correctly at **1920x1080**.
+
+    Root cause was not a default and not Wine: the startup **explicitly asks for slot
+    0**, because **the menu art was only ever authored at 640x480** — seven assets exist
+    solely as `.i06`. Fix is three parts: redirect the startup slot request (one byte
+    per site), synthesise the seven missing assets, and remove two destination clamps in
+    the movie blit that forbid magnification (`jl` -> `jmp`).
+
+    Five approaches failed first, all recorded in §69 so they are not retried: the
+    640x480 clamp at `0x515e58` (wrong branch), the per-screen slot write (never fires),
+    substituting the slot at one of its three reads (crash), writing the field during
+    display bring-up (#150), and overriding the Bink destination pitch (crash — 1280 was
+    correct all along).
+
+11. **Steam build support.** Installed at
+    `~/.steam/debian-installation/steamapps/common/Tropico` (flat layout, no `app/`).
+
+    **The masked signatures work.** A 2026-08-19 log from that install shows the DRM
+    wrapper leaves `.text` as ciphertext at load, the patcher defers to the GetDeviceCaps
+    hook as designed, and then finds everything: resolution table at `0x5a0cc0` (GOG:
+    `0x5a0fa0`), gate at `0x514d70`, VRAM at `0x52df3f` — 4 applied, 0 failed. That is the
+    build-independence design paying off on a build where every absolute address moved.
+
+    **One art set serves both editions.** Generated at 1920x1080 from the Steam archives,
+    all 78 assets come out **byte-identical** to the GOG-generated set. Packaging does not
+    need per-edition art — though it should still generate from the user's own archives
+    rather than ship the output, since that is what keeps this a patch and not a
+    redistribution.
+
+    Brought current 2026-08-21: current proxy, the frozen `tropico-fix.ini`, and the
+    1920x1080 art set installed and verified byte-for-byte. **Untested in game since.**
+
+    `tools/tropico-gog.sh` now takes `TROPICO_DIR` and gives each install its own
+    wineprefix (`~/.wine-tropico-gog` / `-steam`), overridable with `WINEPREFIX`. It also
+    writes **every** `TROPICO.CFG` it finds — the Steam build has one in the root and one
+    in `data2/`, observed holding different values, so writing only one is the "test that
+    silently ran the wrong slot" trap.
+
+    **First run, 2026-08-21 (owner):** the patch applies and the game runs, but the world
+    render is wrong in a way the GOG build is not. Software 3D shows the stale smear past
+    the 1600 mark — the §11 symptom the world-painter fix cures on GOG — and Hardware 3D
+    shows a full-screen smear with pixels apparently misaligned. So the world-painter
+    correction (§ world render, `0x526220`) is either not matching on this build or is
+    matching the wrong site. **Deferred by the owner: finish GOG first.** When picked up,
+    start from the log — it names every site that matched — rather than from the picture.
+
+12. **THEN:** packaging. Generate the set at install time from the user's own archives, pick
    the mode automatically, and ship it as one step. This is the last thing between the project
    and the brief: "give someone a working version on Linux that doesn't require any awkward
    setups on their part".

@@ -54,11 +54,30 @@ if [ -n "${TROPICO_DISPLAY:-}" ]; then
   fi
 fi
 
-export WINEPREFIX="$HOME/.wine-tropico-gog"
+# TROPICO_DIR=<path>  -- which INSTALL to run. Defaults to the GOG one.
+#
+# The Steam edition is a different build in a different layout (no app/ subdirectory)
+# and it is DRM-wrapped, so its .text is ciphertext at load time and the patcher has to
+# defer to the GetDeviceCaps hook. That is handled inside the proxy; all this needs to
+# know is where the game lives. Each install gets its OWN wineprefix -- sharing one
+# would let a registry or CFG change made for one edition silently affect the other,
+# which is the same class of trap as the stale virtual desktop below.
+GAMEDIR="${TROPICO_DIR:-/mnt/Windows/GOG Games/Tropico/app}"
+if [ ! -f "$GAMEDIR/Tropico.EXE" ]; then
+  echo "!! no Tropico.EXE in '$GAMEDIR'" >&2
+  echo "   set TROPICO_DIR to the install directory" >&2
+  exit 1
+fi
+case "$GAMEDIR" in
+  *steamapps*) PREFIX_TAG="steam" ;;
+  *)           PREFIX_TAG="gog"   ;;
+esac
+export WINEPREFIX="${WINEPREFIX:-$HOME/.wine-tropico-$PREFIX_TAG}"
 export WINEARCH=win32
 export DISPLAY="${DISPLAY:-:1}"
 export WINEDEBUG="${WINEDEBUG:--all}"
-GAMEDIR="/mnt/Windows/GOG Games/Tropico/app"
+echo "== install: $GAMEDIR"
+echo "== prefix : $WINEPREFIX"
 
 if [ -n "${TROPICO_NODESK:-}" ]; then
   # No Wine virtual desktop: the game talks to the real display. Measured 2026-08-19 --
@@ -79,9 +98,20 @@ wineserver -k 2>/dev/null; wineserver -w 2>/dev/null
 # loads -- NOT whatever slot you last looked at. Forgetting this makes every test
 # silently exercise the previously stored slot instead of the one you meant.
 if [ -n "${TROPICO_RES:-}" ]; then
+  # The GOG build keeps the live CFG in data2/; the Steam build has one in BOTH the
+  # root and data2/. Write every copy that exists -- writing the wrong one looks exactly
+  # like a test that failed, which is trap #1 in TESTING.md.
+  CFGS=""
+  for c in "$GAMEDIR/data2/TROPICO.CFG" "$GAMEDIR/TROPICO.CFG"; do
+    [ -f "$c" ] && CFGS="$CFGS|$c"
+  done
+  if [ -z "$CFGS" ]; then echo "!! no TROPICO.CFG found under '$GAMEDIR'" >&2; exit 1; fi
   CFG="$GAMEDIR/data2/TROPICO.CFG"
   B="$(printf '\\x%02x' "$TROPICO_RES")"
   # 578 = 0x242 = settings+0x18, the live resolution index
+  OLDIFS="$IFS"; IFS='|'
+  for CFG in $CFGS; do
+  [ -n "$CFG" ] || continue
   printf "$B" | dd of="$CFG" bs=1 seek=578 conv=notrunc status=none
   # 626 = 0x272 = settings+0x48, the DETAIL PRESET array. Code at 0x5159e8 does
   #   mov ecx,[obj + [0x61aeb8]*4 + 0x48] ; mov [obj+0x18],ecx
@@ -97,6 +127,8 @@ if [ -n "${TROPICO_RES:-}" ]; then
   echo "== CFG readback: 0x242=$(dd if="$CFG" bs=1 skip=578 count=1 status=none | od -An -tu1 | tr -d ' ')" \
        "0x272=$(dd if="$CFG" bs=1 skip=626 count=1 status=none | od -An -tu1 | tr -d ' ')" \
        "0x276=$(dd if="$CFG" bs=1 skip=630 count=1 status=none | od -An -tu1 | tr -d ' ') =="
+  done
+  IFS="$OLDIFS"
 
 fi
 

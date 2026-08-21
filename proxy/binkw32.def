@@ -20,10 +20,10 @@ EXPORTS
     _BinkCheckCursor@20 = binkw32_orig._BinkCheckCursor@20
     _BinkClose@4 = binkw32_orig._BinkClose@4
     _BinkCloseTrack@4 = binkw32_orig._BinkCloseTrack@4
-    _BinkCopyToBuffer@28 = binkw32_orig._BinkCopyToBuffer@28
+    _BinkCopyToBuffer@28 = my_BinkCopyToBuffer@28
     _BinkDDSurfaceType@4 = binkw32_orig._BinkDDSurfaceType@4
     _BinkDoFrame@4 = binkw32_orig._BinkDoFrame@4
-    _BinkGetError@0 = binkw32_orig._BinkGetError@0
+    _BinkGetError@0 = my_BinkGetError@0
     _BinkGetKeyFrame@12 = binkw32_orig._BinkGetKeyFrame@12
     _BinkGetRealtime@12 = binkw32_orig._BinkGetRealtime@12
     _BinkGetRects@8 = binkw32_orig._BinkGetRects@8
@@ -36,9 +36,9 @@ EXPORTS
     _BinkIsSoftwareCursor@8 = binkw32_orig._BinkIsSoftwareCursor@8
     _BinkLogoAddress@0 = binkw32_orig._BinkLogoAddress@0
     _BinkNextFrame@4 = binkw32_orig._BinkNextFrame@4
-    _BinkOpen@8 = binkw32_orig._BinkOpen@8
+    _BinkOpen@8 = my_BinkOpen@8
     _BinkOpenDirectSound@4 = binkw32_orig._BinkOpenDirectSound@4
-    _BinkOpenMiles@4 = binkw32_orig._BinkOpenMiles@4
+    _BinkOpenMiles@4 = my_BinkOpenMiles@4
     _BinkOpenTrack@8 = binkw32_orig._BinkOpenTrack@8
     _BinkOpenWaveOut@4 = binkw32_orig._BinkOpenWaveOut@4
     _BinkPause@8 = binkw32_orig._BinkPause@8
@@ -51,7 +51,7 @@ EXPORTS
     _BinkSetPan@8 = binkw32_orig._BinkSetPan@8
     _BinkSetSimulate@4 = binkw32_orig._BinkSetSimulate@4
     _BinkSetSoundOnOff@8 = binkw32_orig._BinkSetSoundOnOff@8
-    _BinkSetSoundSystem@8 = binkw32_orig._BinkSetSoundSystem@8
+    _BinkSetSoundSystem@8 = my_BinkSetSoundSystem@8
     _BinkSetSoundTrack@4 = binkw32_orig._BinkSetSoundTrack@4
     _BinkSetVideoOnOff@8 = binkw32_orig._BinkSetVideoOnOff@8
     _BinkSetVolume@8 = binkw32_orig._BinkSetVolume@8

@@ -54,6 +54,13 @@ STOCK_W, STOCK_H = 1600, 1200          # what the .i16 set is authored for
 
 # --------------------------------------------------------------- font handling
 #
+# WHY SCALING A GLYPH SPRITE ALSO SCALES ITS SPACING (section 65). The pen advance is
+# not stored anywhere separate: FUN_00452080 computes it as (glyph.x + glyph.w) *
+# (3200/screen_width) + font tracking, and those x/w are read by FUN_004eb330 out of the
+# loaded sprite table -- i.e. out of THIS file. So rewriting a glyph's x and w rewrites
+# its advance by the same factor, and a width-only font scale condenses text rather than
+# merely thinning it.
+#
 # FONTS ARE DIFFERENT, on two independent counts, and both were measured.
 #
 # 1. PopTop scaled their own fonts UNIFORMLY, never per-axis. Their .i12 set sits on a
@@ -199,7 +206,7 @@ def rescale_sprite(d, s, nw, nh):
 
 
 def rescale(d, to_w, to_h, from_w=STOCK_W, from_h=STOCK_H, verbose=False,
-            font_scale=None):
+            font_scale=None, font_scale_x=None, font_scale_y=None):
     r = hs.parse(d)
     if not r['exact']:
         raise ValueError('container chain ends at %d, file is %d -- refusing'
@@ -217,6 +224,19 @@ def rescale(d, to_w, to_h, from_w=STOCK_W, from_h=STOCK_H, verbose=False,
         # softens every glyph in the game to fix a handful of labels -- a bad trade,
         # confirmed by the project owner comparing both in game.
         xs = ys = 1.0 if font_scale is None else font_scale
+        # PER-AXIS override (section 65). The uniform knob above trades every glyph in
+        # the game against the rotated minority, which is why 1.0 won. But the constraint
+        # is not on glyph AREA -- it is on length along the reading direction, and for
+        # rotated text the reading direction is the screen's VERTICAL, which shrank by
+        # 1080/1200. Squeezing glyph WIDTH alone by that same 0.90 cancels the rotated
+        # overhang exactly, costs horizontal text only slack it already has in surplus,
+        # and leaves glyph HEIGHT -- the thing that carries legibility -- untouched.
+        # 0.90 x 1.00 is a 1.11 aspect change; PopTop's own .i12 set is 0.96 (section
+        # 63.4), so this stays inside the range they shipped.
+        if font_scale_x is not None:
+            xs = font_scale_x
+        if font_scale_y is not None:
+            ys = font_scale_y
     out = bytearray(d[:r['table_base']])
     table = [bytearray(t) for t in r['table']]
     blocks = []
@@ -245,7 +265,7 @@ def rescale(d, to_w, to_h, from_w=STOCK_W, from_h=STOCK_H, verbose=False,
     return bytes(out)
 
 
-def asset_names(exe, idx):
+def asset_names(exe, idx, src_ext='i16', missing_only=False, out_ext='i16'):
     """Every .imm name we can recover, that has an .i16 entry in an archive.
 
     TWO sources, and the second is not optional. Section 48.2: the names of HUD art live
@@ -265,11 +285,22 @@ def asset_names(exe, idx):
                 names.add(m.group(0).decode())
     out = []
     for n in sorted(names):
-        name = n[:-4] + '.i16'
-        e = idx.get(pk2.name_hash(name))
-        if e:
-            out.append((name, e))
+        base = n[:-4]
+        src = base + '.' + src_ext
+        e = idx.get(pk2.name_hash(src))
+        if not e:
+            continue
+        # missing_only: only assets that have NO .i16 of their own. Section 69.5 --
+        # seven of them exist solely as .i06 because PopTop authored the menu, the
+        # credits and the folder screens at 640x480 and nothing else. Running the menu
+        # at any other resolution needs those classes synthesised.
+        if missing_only and idx.get(pk2.name_hash(base + '.i16')):
+            continue
+        out.append((base + '.' + out_ext, e))
     return out
+
+
+MENU_SRC = [set()]
 
 
 def main():
@@ -282,18 +313,52 @@ def main():
     ap.add_argument('--height', type=int, required=True)
     ap.add_argument('--only', action='append',
                     help='generate only this asset (e.g. int_main.i16); repeatable')
+    ap.add_argument('--src-ext', default='i16',
+                    help='art class to READ from (default i16). Use i06 with --src-size '
+                         '640x480 to synthesise classes PopTop never authored.')
+    ap.add_argument('--src-size', default=None, metavar='WxH',
+                    help='what the source class is authored for (default 1600x1200)')
+    ap.add_argument('--missing-only', action='store_true',
+                    help='only generate assets that have no .i16 of their own')
+    ap.add_argument('--out-ext', default='i16',
+                    help='art class to WRITE (default i16). Slots 0-4 use i06/i08/i10/'
+                         'i12/i16 respectively, so a menu on slot 3 needs --out-ext i12.')
+    ap.add_argument('--with-menu', action='store_true',
+                    help='after the normal pass, also synthesise the assets PopTop only '
+                         'authored at 640x480 (the menu, credits and folder screens). '
+                         'Equivalent to a second run with --src-ext i06 --src-size '
+                         '640x480 --missing-only.')
     ap.add_argument('--identity', action='store_true',
                     help='regenerate at 1600x1200 and require byte-identical output')
     ap.add_argument('--font-scale', type=float, default=None,
                     help='uniform scale for font assets (default 1.0 = leave them stock, '
                          'which is byte-identical to PopTop and needs no resampling)')
+    ap.add_argument('--font-scale-x', type=float, default=None,
+                    help='horizontal-only scale for font assets, overriding --font-scale. '
+                         '0.90 at 1920x1080 cancels the rotated-text overhang exactly '
+                         '(section 65)')
+    ap.add_argument('--font-scale-y', type=float, default=None,
+                    help='vertical-only scale for font assets, overriding --font-scale')
     ap.add_argument('-v', '--verbose', action='store_true')
     a = ap.parse_args()
 
     idx = pk2.load_all(a.data)
     if not idx:
         sys.exit('no archives found in %r' % a.data)
-    names = asset_names(a.exe, idx)
+    src_w, src_h = STOCK_W, STOCK_H
+    if a.src_size:
+        src_w, src_h = (int(v) for v in a.src_size.lower().split('x'))
+    names = asset_names(a.exe, idx, src_ext=a.src_ext,
+                        missing_only=a.missing_only, out_ext=a.out_ext)
+    if a.with_menu:
+        # Section 69.5: seven assets exist only as .i06. Without them the menu
+        # dies with "Error opening pack file item 'setuplb.i16'" the moment it
+        # is asked to run at any other resolution.
+        extra = asset_names(a.exe, idx, src_ext='i06',
+                            missing_only=True, out_ext=a.out_ext)
+        have = set(n for n, _ in names)
+        names += [(n, e) for n, e in extra if n not in have]
+        MENU_SRC[0] = set(n for n, _ in extra)
     if a.only:
         want = set(a.only)
         names = [(n, e) for n, e in names if n in want]
@@ -319,7 +384,10 @@ def main():
                 print('  %s  (%d sprites)%s'
                       % (name, r['count'], '  [FONT: uniform + box filter]'
                          if is_font(d, r) else ''))
-            new = rescale(d, w, h, verbose=a.verbose, font_scale=a.font_scale)
+            fw, fh = (640, 480) if name in MENU_SRC[0] else (src_w, src_h)
+            new = rescale(d, w, h, from_w=fw, from_h=fh, verbose=a.verbose,
+                          font_scale=a.font_scale,
+                          font_scale_x=a.font_scale_x, font_scale_y=a.font_scale_y)
         except Exception as ex:
             if isinstance(ex, ValueError) and 'chain ends' in str(ex):
                 # section 26's known exception: glastube has extra sections before and

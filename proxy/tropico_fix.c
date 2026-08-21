@@ -88,6 +88,25 @@ static int patch_world_viewport(UINT match_w, UINT new_w);
 static int patch_hud_probe(void);
 static int patch_pathb_recompute(BYTE *layout_fn);
 static int patch_chrome_scale(DWORD table_va);
+static int patch_vtext(int dy, int dx, int cliph, int have_dy, int have_dx, int have_cliph);
+static int patch_vtext_probe(void);
+static int patch_vtext_entry(void);
+static int patch_intro(void);
+static int patch_menu(int w, int h);
+static int patch_movie_probe(void);
+static DWORD g_mv_flag_va;
+static int g_menu_slot = -1;
+static int g_bink_pitch;
+static int patch_blit_probe(void);
+static int patch_blit_scale(void);
+static DWORD g_slot_out;
+static int patch_menu_slot(void);
+static DWORD g_vt_ys_va, g_vt_xs_va;
+static int g_vt_entry, g_vt_bdh, g_vt_bdy, g_vt_log, g_vt_boxdx;
+static DWORD g_vte_entry_va;
+/* s65 vtext hook state -- declared here because apply_patches() sets it from the
+ * ini long before the hook that reads it is defined. */
+static int g_vt_fix, g_vt_fw, g_vt_fh, g_vt_boxh, g_vt_boxdy;
 static DWORD g_hud_mw, g_hud_mh;
 static int g_chr_enable;
 static DWORD g_chr_trim = 8;
@@ -588,6 +607,109 @@ static void apply_patches(void)
             } else if (g_chr_enable) {
                 logf_("[*] [chrome] ChromeScale=0 -- the six fmul operands are LEFT STOCK;"
                       " this run varies the draw style only");
+            }
+        }
+    }
+
+    /* s69: the movie/menu window. Off unless the ini asks. */
+    {
+        char ip[MAX_PATH];
+        snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+        g_bink_pitch = GetPrivateProfileIntA("Menu", "FixMoviePitch", 0, ip);
+        if (GetPrivateProfileIntA("Menu", "FixMovieScale", 0, ip)) {
+            if (patch_blit_scale()) ok++; else fail++;
+        }
+        if (GetPrivateProfileIntA("Menu", "BlitProbe", 0, ip)) {
+            if (patch_blit_probe()) ok++; else fail++;
+        }
+        if (GetPrivateProfileIntA("Menu", "Probe", 0, ip)) {
+            /* The submode flag lives at [0x612fec]; read its VA out of the
+             * videowi2 branch rather than hardcoding it. */
+            static const BYTE FS[]  = {0x8b,0x15,0,0,0,0, 0x39,0x5a,0x1c};
+            static const BYTE FM[]  = {   1,   1,0,0,0,0,    1,   1,   1};
+            BYTE *f = find_unique_masked(FS, FM, sizeof FS, g_text, g_textlen, "movie submode");
+            if (f) g_mv_flag_va = rd32(f + 2);
+            /* The clamp's own fmul operands are the px<->virtual scale globals, and
+             * they are the cheapest read-out of the live mode. Take them from there
+             * so [Menu] Probe does not depend on [VText] being enabled. */
+            if (!g_vt_xs_va || !g_vt_ys_va) {
+                static const BYTE CS[]  = {0x66,0x3d,0x80,0x02, 0x7e,0x0a,
+                                           0xc7,0x44,0x24,0x10,0x80,0x02,0x00,0x00};
+                static const BYTE CM[]  = {   1,   1,   1,   1,    1,   1,
+                                              1,   1,   1,   1,   1,   1,   1,   1};
+                BYTE *c = find_unique_masked(CS, CM, sizeof CS, g_text, g_textlen, "clamp scales");
+                if (c) { g_vt_xs_va = rd32(c + 23); g_vt_ys_va = rd32(c + 69); }
+            }
+            if (patch_movie_probe()) ok++; else fail++;
+        }
+        g_menu_slot = GetPrivateProfileIntA("Menu", "Slot", -1, ip);
+        if (g_menu_slot >= 0) { if (patch_menu_slot()) ok++; else fail++; }
+        int mw = GetPrivateProfileIntA("Menu", "W", 0, ip);
+        int mh = GetPrivateProfileIntA("Menu", "H", 0, ip);
+        if (GetPrivateProfileIntA("Menu", "Fit", 0, ip)) {
+            /* Pillarbox: the largest 4:3 box that fits the mode, which is what the
+             * owner asked for -- fill as much as possible without distorting. */
+            int W = GetPrivateProfileIntA("Resolution", "Width", 0, ip);
+            int H = GetPrivateProfileIntA("Resolution", "Height", 0, ip);
+            if (!mw || !mh) {
+                if (W && H) {
+                    mw = (H * 4 / 3 < W) ? H * 4 / 3 : W;
+                    mh = (W * 3 / 4 < H) ? W * 3 / 4 : H;
+                } else logf_("[x] [menu] Fit=1 needs [Resolution] Width/Height, or Menu W/H");
+            }
+            if (mw && mh) { if (patch_menu(mw, mh)) ok++; else fail++; }
+            else fail++;
+        }
+    }
+
+    /* s68: force the startup movie. Off unless the ini asks. */
+    {
+        char ip[MAX_PATH];
+        snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+        if (GetPrivateProfileIntA("Intro", "Force", 0, ip)) {
+            if (patch_intro()) ok++; else fail++;
+        }
+    }
+
+    /* s65: rotated tab-label placement.  Off unless the ini asks. */
+    {
+        char ip[MAX_PATH];
+        snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+        if (GetPrivateProfileIntA("VText", "Enable", 0, ip)) {
+            /* -1000 is the "absent" sentinel: 0 and negatives are all legal values. */
+            int dy = GetPrivateProfileIntA("VText", "DY", -1000, ip);
+            int dx = GetPrivateProfileIntA("VText", "DX", -1000, ip);
+            int ch = GetPrivateProfileIntA("VText", "ClipH", -1000, ip);
+            if (dy != -1000 && (dy < -128 || dy > 127)) {
+                logf_("[x] [vtext] DY=%d out of range -- it is a signed byte displacement (-128..127)", dy);
+                fail++;
+            } else if (dx != -1000 && (dx < -128 || dx > 127)) {
+                logf_("[x] [vtext] DX=%d out of range -- it is a signed byte displacement (-128..127)", dx);
+                fail++;
+            } else if (patch_vtext(dy, dx, ch, dy != -1000, dx != -1000, ch != -1000)) ok++;
+            else fail++;
+            g_vt_fix   = GetPrivateProfileIntA("VText", "Fix",   0, ip);
+            g_vt_fw    = GetPrivateProfileIntA("VText", "FixW",  0, ip);
+            g_vt_fh    = GetPrivateProfileIntA("VText", "FixH",  0, ip);
+            g_vt_boxh  = GetPrivateProfileIntA("VText", "BoxH",  0, ip);
+            g_vt_boxdy = GetPrivateProfileIntA("VText", "BoxDY", 0, ip);
+            g_vt_boxdx = GetPrivateProfileIntA("VText", "BoxDX", 0, ip);
+            g_vt_entry = GetPrivateProfileIntA("VText", "Entry", 0, ip);
+            /* Probe now means "log every rotated draw", not "install the hooks":
+             * the hooks ARE the fix, so Fix=1 installs them either way. */
+            g_vt_log   = GetPrivateProfileIntA("VText", "Probe", 0, ip);
+            g_vt_bdh   = GetPrivateProfileIntA("VText", "BldgDH", 0, ip);
+            g_vt_bdy   = GetPrivateProfileIntA("VText", "BldgDY", 0, ip);
+            if (g_vt_fix && !(g_vt_fw && g_vt_fh)) {
+                logf_("[x] [vtext] Fix=1 needs FixW/FixH -- an ungated correction breaks"
+                      " every mode the F2 ladder climbs through");
+                fail++;
+            } else if (GetPrivateProfileIntA("VText", "Probe", 0, ip) || g_vt_fix) {
+                if (g_vt_fix)
+                    logf_("[*] [vtext] fix armed for %dx%d: BoxH=%d BoxDY=%d",
+                          g_vt_fw, g_vt_fh, g_vt_boxh, g_vt_boxdy);
+                if (patch_vtext_probe()) ok++; else fail++;
+                if (g_vt_entry) { if (patch_vtext_entry()) ok++; else fail++; }
             }
         }
     }
@@ -1970,6 +2092,747 @@ static int patch_chrome_scale(DWORD table_va)
     return patch_pathb_recompute(fn);
 }
 
+
+/* FINDINGS section 65: the F2 settings tabs' ROTATED-TEXT geometry, which is
+ * HARD-CODED here -- no .WIN file is consulted for this window.  (The almanac's
+ * tabs are a different call site, 0x40741e, and may well be data-driven; these
+ * are not.  Three runs' worth of loose .WIN overrides did nothing because of it.)
+ *
+ * The tab plate is blitted at (edi, esi) = (x, y) in the virtual 3200x2400 space,
+ * and the rotated label's box and clip are then computed from the SAME x/y with
+ * three immediates:
+ *
+ *   call <blit>                 ; draws the tab plate at (x, y)
+ *   lea  ebx,[esi+5]            ; arg4 = text box Y origin      <- DY
+ *   add  esi,0x123              ; clip bottom = y + 291         <- ClipH
+ *   ...
+ *   lea  ecx,[edi+3]            ; arg3 = text box X origin      <- DX
+ *
+ * FUN_00450b10 CENTRES the string inside the box, so DY is the lever that MOVES
+ * the label; ClipH only decides where it gets cut off.  Measured at 1920x1080:
+ * clip height 291 * (1080/2400) = 131 px against a ~106 px plate, so the label is
+ * centred in a box 25 px taller than the tab it sits on and hangs ~12 px out the
+ * bottom -- the 11% the project owner reported.
+ *
+ * DY is a SIGNED BYTE displacement, so the usable range is -128..127 virtual
+ * units = -57..+57 px at 1080.  To move the label N px up at height H:
+ *   DY = 5 - N * 2400 / H .
+ *
+ * Every value is left stock unless the ini names it, so a partial section varies
+ * exactly what it says and nothing else. */
+static int patch_vtext(int dy, int dx, int cliph, int have_dy, int have_dx, int have_cliph)
+{
+    /* call rel32 wildcarded; every other byte literal. */
+    static const BYTE pat[]  = { 0xe8,0x00,0x00,0x00,0x00, 0x8d,0x5e,0x05,
+                                 0x81,0xc6,0x23,0x01,0x00,0x00, 0x89,0x74,0x24,0x20,
+                                 0xdb,0x44,0x24,0x20, 0x6a,0x01, 0x8d,0x4f,0x03,
+                                 0x68,0xff,0x00,0x00,0x00 };
+    static const BYTE mask[] = { 1,0,0,0,0, 1,1,1,
+                                 1,1,1,1,1,1, 1,1,1,1,
+                                 1,1,1,1, 1,1, 1,1,1,
+                                 1,1,1,1,1 };
+    /* DELIBERATELY NOT find_unique_masked.  There are TWO matches, and both are
+     * wanted: 0x4916f5 is the F2 settings tabs and 0x407375 is the almanac's.
+     * The two windows share this layout code verbatim, so one signature fixes
+     * both.  Refusing on non-uniqueness would have been exactly wrong here. */
+    BYTE *sites[8];
+    int nsites = 0;
+    for (SIZE_T i = 0; i + sizeof pat <= g_textlen; i++) {
+        SIZE_T j = 0;
+        for (; j < sizeof pat; j++)
+            if (mask[j] && g_text[i + j] != pat[j]) break;
+        if (j != sizeof pat) continue;
+        if (nsites == 8) { logf_("[x] [vtext] more than 8 matches -- signature too loose, refusing"); return 0; }
+        sites[nsites++] = g_text + i;
+    }
+    if (!nsites) { logf_("[x] [vtext] tab-layout signature not found"); return 0; }
+    logf_("[*] [vtext] %d tab-layout site(s) found", nsites);
+    for (int k = 0; k < nsites; k++)
+        logf_("      [%d] %p: box Y +%d, box X +%d, clip H %u", k, (void *)sites[k],
+              (int)(signed char)sites[k][7], (int)(signed char)sites[k][26],
+              (unsigned)rd32(sites[k] + 10));
+
+    int n = 0;
+    for (int k = 0; k < nsites; k++) {
+    BYTE *hit = sites[k];
+    if (have_dy) {
+        signed char v = (signed char)dy;
+        if (poke(hit + 7, &v, 1)) { logf_("  [+] box Y origin: +5 -> %+d virtual", (int)v); n++; }
+        else { logf_("  [x] box Y origin: VirtualProtect failed"); return 0; }
+    }
+    if (have_dx) {
+        signed char v = (signed char)dx;
+        if (poke(hit + 26, &v, 1)) { logf_("  [+] box X origin: +3 -> %+d virtual", (int)v); n++; }
+        else { logf_("  [x] box X origin: VirtualProtect failed"); return 0; }
+    }
+    if (have_cliph) {
+        DWORD v = (DWORD)cliph;
+        if (poke(hit + 10, &v, 4)) { logf_("  [+] clip height: 291 -> %u virtual", (unsigned)v); n++; }
+        else { logf_("  [x] clip height: VirtualProtect failed"); return 0; }
+    }
+    }
+    if (!n) {
+        /* A patch that changes nothing applies "cleanly" and teaches nothing --
+         * the section 54 failure mode.  Refuse instead. */
+        logf_("[*] [vtext] no DY/DX/ClipH given -- geometry left STOCK (probe-only run)");
+        return 1;
+    }
+    logf_("[*] [vtext] %d write(s) across %d site(s)", n, nsites);
+    return 1;
+}
+
+
+/* ------------------------------------------------------------------ s65 probe
+ *
+ * WHY A PROBE.  DY moves the rotated tab label DOWN but not UP at 1920x1080,
+ * while at the stock modes it moves both ways, and ClipH reaches the label at
+ * every resolution.  Something clamps the placement, and 0x60bc38 (the outer
+ * clip top) has 19 writers, so static analysis cannot say which one is live.
+ * Rather than guess a fifth time, log what FUN_00450b10 is ACTUALLY handed.
+ *
+ * Both tab-layout sites carry the draw call at exactly site+0xA9, so one
+ * trampoline serves both.  The call is redirected to a stub that logs the
+ * seventeen stack arguments and then tail-jumps to the original target with the
+ * stack byte-for-byte as the callee expects it -- pushad/popad restore ECX, which
+ * carries `this`, and the return address is left untouched so the callee still
+ * returns to the real call site.
+ *
+ * The two virtual->pixel scale factors are read out of the site's own `fmul`
+ * operands (site+0x22 and site+0x49), NOT hardcoded, so the probe survives a
+ * build whose globals moved -- the same rule the signatures follow. */
+
+/* (declared with the movie-probe state above) */
+static int   g_vt_logged;                 /* rate limit: this is a per-frame path */
+
+/* The label is END-ANCHORED at the box bottom: measured at 1920x1080 the box runs
+ * y 136..250 px and the label 161..250, i.e. its tail sits exactly on the box
+ * bottom and it grows upward.  The tab PLATE, however, is only 106 px (136..242),
+ * so the box is 9 px taller than the art and the tail hangs past the tab.  Shrink
+ * the box and the label rises with it -- `h` is the lever, and it arrives here as
+ * an argument, so no .WIN file and no immediate is involved.
+ *
+ * GATED ON THE MODE.  The correction is only right for the mode the art set was
+ * generated for; the stock modes are correct as PopTop shipped them and must pass
+ * through untouched.  The game climbs 640x480 -> ... -> target on every launch, so
+ * an ungated patch visibly breaks every mode on the way up -- which is exactly what
+ * the earlier DY immediate did. */
+static void __cdecl vtext_hook(DWORD *a)
+{
+    if (g_vt_fix && g_vt_xs_va && g_vt_ys_va) {
+        int w = (int)(*(float *)(SIZE_T)g_vt_xs_va * 3200.0f + 0.5f);
+        int h = (int)(*(float *)(SIZE_T)g_vt_ys_va * 2400.0f + 0.5f);
+        if (w == g_vt_fw && h == g_vt_fh) {
+            if (g_vt_boxh)  a[5] = (DWORD)g_vt_boxh;         /* box height */
+            if (g_vt_boxdy) {
+                /* TRANSLATE, don't resize.  Resizing moves the box bottom, which is
+                 * both the label's anchor AND the clip floor, so it trades overhang
+                 * for a cut last letter -- measured: h=216 lifted the label 12 px and
+                 * clipped it.  A constant shift moves the label rigidly and cannot
+                 * clip, PROVIDED the clip moves with it: the clip rect is computed at
+                 * the call site from the original y and arrives here as a[10..13], so
+                 * shifting the box alone would leave the clip behind and re-crop. */
+                float ys2 = *(float *)(SIZE_T)g_vt_ys_va;
+                int dpx = (int)((double)g_vt_boxdy * ys2 + (g_vt_boxdy < 0 ? -0.5 : 0.5));
+                a[3]  = (DWORD)((int)a[3] + g_vt_boxdy);
+                a[11] = (DWORD)((int)a[11] + dpx);      /* clip top    */
+                a[13] = (DWORD)((int)a[13] + dpx);      /* clip bottom */
+            }
+            /* MAKE THE CLIP FOLLOW THE BOX.  The clip arrives precomputed from the
+             * call site's own immediates, so shifting it by BoxDY alone lets it drift
+             * ABOVE the box and become the binding constraint -- measured: BoxH=336
+             * with BoxDY=-107 put the passed clip floor at 219 against a box bottom of
+             * 238, so a TALLER box clipped MORE.  Widen the clip past the box in both
+             * directions and let FUN_00450b10's own intersection (clipT = max(clipT,
+             * boxY); clipB = min(clipB, boxY+boxH-1)) pin it exactly to the box. */
+            /* BoxDX is the same rigid translation on the other axis.  It is applied
+             * before the clip is rebuilt below, so the clip follows it for free --
+             * which is the whole reason the horizontal move is done here rather than
+             * through the DX immediate at site+26.  That immediate is NOT mode-gated
+             * and would move the label in every stock mode the F2 ladder climbs. */
+            if (g_vt_boxdx) a[2] = (DWORD)((int)a[2] + g_vt_boxdx);
+
+            if (g_vt_boxh || g_vt_boxdy || g_vt_boxdx) {
+                float ys3 = *(float *)(SIZE_T)g_vt_ys_va;
+                float xs3 = *(float *)(SIZE_T)g_vt_xs_va;
+                int top = (int)((double)(int)a[3] * ys3);
+                int bot = top + (int)((double)(int)a[5] * ys3) - 1;
+                int lft = (int)((double)(int)a[2] * xs3);
+                int rgt = lft + (int)((double)(int)a[4] * xs3) - 1;
+                a[11] = (DWORD)(top - 4);
+                a[13] = (DWORD)(bot + 4);
+                a[10] = (DWORD)(lft - 4);
+                a[12] = (DWORD)(rgt + 4);
+            }
+        }
+    }
+    /* DEDUPE, not a plain counter.  This is a per-frame path, so a simple cap
+     * fills up on the FIRST resolution and never reaches the one under test --
+     * which is exactly what the first probe run did.  Log each DISTINCT
+     * (y, clipT, scale) once instead, so every mode the user climbs through
+     * contributes its three tabs and nothing repeats. */
+    if (!g_vt_log) return;
+    static DWORD seen[96][3];
+    DWORD key0 = a[3], key1 = a[11], key2 = g_vt_ys_va ? *(DWORD *)(SIZE_T)g_vt_ys_va : 0;
+    for (int i = 0; i < g_vt_logged; i++)
+        if (seen[i][0] == key0 && seen[i][1] == key1 && seen[i][2] == key2) return;
+    if (g_vt_logged >= 96) return;
+    seen[g_vt_logged][0] = key0; seen[g_vt_logged][1] = key1; seen[g_vt_logged][2] = key2;
+    g_vt_logged++;
+    float ys = g_vt_ys_va ? *(float *)(SIZE_T)g_vt_ys_va : 0.0f;
+    float xs = g_vt_xs_va ? *(float *)(SIZE_T)g_vt_xs_va : 0.0f;
+    /* a[0]=canvas a[1]=str a[2]=x a[3]=y a[4]=w a[5]=h a[6]=? a[7]=? a[8]=?
+     * a[9]=clipflag a[10..13]=clipL,T,R,B (already PIXELS) a[14]=? a[15]=alpha
+     * a[16]=mode.  x/y/w/h are VIRTUAL; the clip is not. */
+    logf_("  [vt] x=%d y=%d w=%d h=%d | clip L=%d T=%d R=%d B=%d flag=%d mode=%d",
+          (int)a[2], (int)a[3], (int)a[4], (int)a[5],
+          (int)a[10], (int)a[11], (int)a[12], (int)a[13], (int)a[9], (int)a[16]);
+    logf_("       -> MODE %dx%d | box px y=%d h=%d  (ys=%.5f xs=%.5f)  box bottom=%d  clipT-boxY=%d",
+          (int)(xs * 3200.0f + 0.5f), (int)(ys * 2400.0f + 0.5f),
+          (int)((double)(int)a[3] * ys), (int)((double)(int)a[5] * ys), ys, xs,
+          (int)((double)((int)a[3] + (int)a[5]) * ys),
+          (int)a[11] - (int)((double)(int)a[3] * ys));
+}
+
+static int patch_vtext_probe(void)
+{
+    static const BYTE pat[]  = { 0xe8,0x00,0x00,0x00,0x00, 0x8d,0x5e,0x05,
+                                 0x81,0xc6,0x23,0x01,0x00,0x00, 0x89,0x74,0x24,0x20,
+                                 0xdb,0x44,0x24,0x20, 0x6a,0x01, 0x8d,0x4f,0x03,
+                                 0x68,0xff,0x00,0x00,0x00 };
+    static const BYTE mask[] = { 1,0,0,0,0, 1,1,1,
+                                 1,1,1,1,1,1, 1,1,1,1,
+                                 1,1,1,1, 1,1, 1,1,1,
+                                 1,1,1,1,1 };
+    BYTE *sites[8]; int n = 0;
+    for (SIZE_T i = 0; i + sizeof pat <= g_textlen; i++) {
+        SIZE_T j = 0;
+        for (; j < sizeof pat; j++) if (mask[j] && g_text[i + j] != pat[j]) break;
+        if (j == sizeof pat && n < 8) sites[n++] = g_text + i;
+    }
+    if (!n) { logf_("[x] [vtprobe] no tab-layout sites"); return 0; }
+
+    /* scale-factor VAs, read from the site's own fmul operands */
+    g_vt_ys_va = rd32(sites[0] + 0x22);
+    g_vt_xs_va = rd32(sites[0] + 0x49);
+    logf_("[*] [vtprobe] yscale @%08x  xscale @%08x", g_vt_ys_va, g_vt_xs_va);
+
+    int ok = 0;
+    for (int k = 0; k < n; k++) {
+        BYTE *call = sites[k] + 0xA9;
+        if (*call != 0xE8) { logf_("  [x] site %d: no call at +0xA9", k); continue; }
+        BYTE *target = call + 5 + (INT_PTR)(int)rd32(call + 1);
+        /* The call lands on a jump thunk; follow it so the entry probe can detour
+         * the real wrapper rather than the five bytes of the thunk. */
+        if (!g_vte_entry_va) {
+            BYTE *w = target;
+            for (int hop = 0; hop < 4 && *w == 0xE9; hop++) w = w + 5 + (INT_PTR)(int)rd32(w + 1);
+            g_vte_entry_va = (DWORD)(SIZE_T)w;
+        }
+
+        BYTE *tr = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!tr) { logf_("  [x] site %d: VirtualAlloc failed", k); continue; }
+        int o = 0;
+        tr[o++] = 0x60;                                   /* pushad              */
+        tr[o++] = 0x9C;                                   /* pushfd              */
+        tr[o++] = 0x8D; tr[o++] = 0x44; tr[o++] = 0x24; tr[o++] = 0x28; /* lea eax,[esp+0x28] */
+        tr[o++] = 0x50;                                   /* push eax            */
+        tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&vtext_hook; memcpy(tr + o, &f, 4); o += 4; }
+        tr[o++] = 0xFF; tr[o++] = 0xD0;                   /* call eax            */
+        tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x04;   /* add esp,4           */
+        tr[o++] = 0x9D;                                   /* popfd               */
+        tr[o++] = 0x61;                                   /* popad               */
+        tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)(target - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
+
+        DWORD rel = (DWORD)(SIZE_T)(tr - (call + 5));
+        if (poke(call + 1, &rel, 4)) {
+            logf_("  [+] site %d: call %p -> trampoline %p (orig %p)", k, (void *)call, (void *)tr, (void *)target);
+            ok++;
+        } else logf_("  [x] site %d: VirtualProtect failed", k);
+    }
+    return ok > 0;
+}
+
+/* ------------------------------------------------- s66 rotated-text ENTRY probe
+ *
+ * WHY A SECOND PROBE.  patch_vtext_probe() hooks the two tab-layout CALL SITES, so
+ * it can only ever see the two panels whose layout matches that signature.  The
+ * owner reports the building panel's contextual label (Owners / Wages / Rent) as
+ * rotated too, which the call-site probe cannot confirm or refute -- absence of a
+ * log line there means "not one of those two sites", not "not rotated".
+ *
+ * Static analysis says the rotated drawer FUN_00450b10 has exactly one caller
+ * (FUN_004526d0), that FUN_004526d0 has exactly four callers, and that NEITHER
+ * address appears as data anywhere in the image -- so no function pointer can
+ * reach it.  That is a strong claim and it deserves a measurement rather than an
+ * argument, because it is exactly the claim the owner's screenshots contradict.
+ *
+ * So hook the WRAPPER'S ENTRY.  Every rotated draw in the game passes through it,
+ * whatever called it, and the return address on entry names the call site.  Open
+ * the building panel and the log answers the question outright:
+ *   - a line with a caller outside the two tab sites -> it IS rotated, from there
+ *   - no new line at all                             -> it is NOT this path
+ *
+ * The wrapper's first instruction is `mov eax,0x3aa4`, exactly five bytes, so the
+ * detour relocates cleanly with no instruction-boundary guesswork.  The wrapper is
+ * found by following the call at site+0xA9 through its jump thunk, so no address is
+ * hardcoded -- the same build-independence rule the signatures follow. */
+
+static int   g_vte_logged;
+
+static void __cdecl vtentry_hook(DWORD *a)
+{
+    /* a[0] = return address (the call site); the arguments follow.  Named from the
+     * first run's dump, cross-checked against the call-site probe's view of the
+     * same draw: the tab site logged x=2326 y=304 w=88 h=256 in BOTH probes. */
+    #define VTE_X    3
+    #define VTE_Y    4
+    #define VTE_W    5
+    #define VTE_H    6
+    #define VTE_ROT  7
+    #define VTE_CLPT 12
+    #define VTE_CLPB 14
+
+    /* DEDUPE ON (caller, y, scale), NOT on the caller alone.  Keying on the return
+     * address logged each site exactly once -- at 640x480, the first mode the F2
+     * ladder passes through -- and then suppressed every later draw, including all
+     * of the ones at the mode actually under test.  Same trap the call-site probe
+     * already hit once; same fix. */
+    /* ---- the correction for the ROT=2 site (building panel: Owners/Wages/Rent).
+     *
+     * Measured 2026-08-21: this site passes NO clip -- the caller hands it the whole
+     * screen (T=0 B=1080) -- so nothing outside the drawer is cropping the label.
+     * The only thing that can cut it is the drawer's own box intersection at
+     * 0x450cf6, which clamps the clip to the box.  The box is therefore the lever,
+     * exactly as it was for the tabs.
+     *
+     * GATED ON rot==2, not on a return address.  The tabs come through this same
+     * entry with rot==3 and are already corrected at their call sites; keying on the
+     * rotation mode keeps the two corrections from ever touching each other and
+     * survives a build where the call site moved.
+     *
+     * GATED ON THE MODE for the same reason the tab fix is: the stock modes are
+     * right as PopTop shipped them, and the F2 ladder climbs through them on every
+     * launch. */
+    if (g_vt_fix && (g_vt_bdh || g_vt_bdy) && a[VTE_ROT] == 2
+        && g_vt_xs_va && g_vt_ys_va) {
+        int mw = (int)(*(float *)(SIZE_T)g_vt_xs_va * 3200.0f + 0.5f);
+        int mh = (int)(*(float *)(SIZE_T)g_vt_ys_va * 2400.0f + 0.5f);
+        if (mw == g_vt_fw && mh == g_vt_fh) {
+            a[VTE_H] = (DWORD)((int)a[VTE_H] + g_vt_bdh);
+            a[VTE_Y] = (DWORD)((int)a[VTE_Y] + g_vt_bdy);
+        }
+    }
+
+    if (!g_vt_log) return;
+
+    static DWORD seen[64][3];
+    DWORD ret = a[0];
+    DWORD k1 = a[VTE_Y], k2 = g_vt_ys_va ? *(DWORD *)(SIZE_T)g_vt_ys_va : 0;
+    for (int i = 0; i < g_vte_logged; i++)
+        if (seen[i][0] == ret && seen[i][1] == k1 && seen[i][2] == k2) return;
+    if (g_vte_logged >= 64) return;
+    seen[g_vte_logged][0] = ret; seen[g_vte_logged][1] = k1; seen[g_vte_logged][2] = k2;
+    g_vte_logged++;
+
+    float ys = g_vt_ys_va ? *(float *)(SIZE_T)g_vt_ys_va : 0.0f;
+    float xs = g_vt_xs_va ? *(float *)(SIZE_T)g_vt_xs_va : 0.0f;
+
+    /* The string, so the log says WAGES rather than a heap pointer.  Read defensively:
+     * a[2] is only ASSUMED to be a char*, and a wrong guess here would fault inside a
+     * probe whose whole job is to be safe to leave running. */
+    char txt[24]; txt[0] = 0;
+    {
+        const char *p = (const char *)(SIZE_T)a[2];
+        if (!IsBadReadPtr(p, 1)) {
+            int n = 0;
+            while (n < 23 && !IsBadReadPtr(p + n, 1) && p[n] >= 32 && p[n] < 127) { txt[n] = p[n]; n++; }
+            txt[n] = 0;
+        }
+    }
+
+    logf_("  [vte] ret=%08x \"%s\" rot=%d | box x=%d y=%d w=%d h=%d | clip T=%d B=%d",
+          ret, txt, (int)a[VTE_ROT],
+          (int)a[VTE_X], (int)a[VTE_Y], (int)a[VTE_W], (int)a[VTE_H],
+          (int)a[VTE_CLPT], (int)a[VTE_CLPB]);
+    logf_("        -> MODE %dx%d  box px y=%d h=%d  bottom=%d  (ys=%.5f xs=%.5f)",
+          (int)(xs * 3200.0f + 0.5f), (int)(ys * 2400.0f + 0.5f),
+          (int)((double)(int)a[VTE_Y] * ys), (int)((double)(int)a[VTE_H] * ys),
+          (int)((double)((int)a[VTE_Y] + (int)a[VTE_H]) * ys), ys, xs);
+}
+
+static int patch_vtext_entry(void)
+{
+    if (!g_vte_entry_va) {
+        logf_("[x] [vtentry] wrapper address unknown -- the call-site scan must run first");
+        return 0;
+    }
+    BYTE *entry = (BYTE *)(SIZE_T)g_vte_entry_va;
+    /* Refuse unless the first instruction is the expected 5-byte `mov eax,imm32`.
+     * A different build could open with something else, and relocating the wrong
+     * five bytes would corrupt the function silently. */
+    if (entry[0] != 0xB8) {
+        logf_("[x] [vtentry] %08x does not open with `mov eax,imm32` (%02x) -- refusing",
+              g_vte_entry_va, entry[0]);
+        return 0;
+    }
+    BYTE *tr = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tr) { logf_("[x] [vtentry] VirtualAlloc failed"); return 0; }
+    int o = 0;
+    tr[o++] = 0x60;                                                 /* pushad             */
+    tr[o++] = 0x9C;                                                 /* pushfd             */
+    tr[o++] = 0x8D; tr[o++] = 0x44; tr[o++] = 0x24; tr[o++] = 0x24; /* lea eax,[esp+0x24] */
+    tr[o++] = 0x50;                                                 /* push eax           */
+    tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&vtentry_hook; memcpy(tr + o, &f, 4); o += 4; }
+    tr[o++] = 0xFF; tr[o++] = 0xD0;                                 /* call eax           */
+    tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x04;                 /* add esp,4          */
+    tr[o++] = 0x9D;                                                 /* popfd              */
+    tr[o++] = 0x61;                                                 /* popad              */
+    memcpy(tr + o, entry, 5); o += 5;                               /* relocated mov eax  */
+    tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((entry + 5) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
+
+    BYTE det[5];
+    det[0] = 0xE9;
+    { DWORD r = (DWORD)(SIZE_T)(tr - (entry + 5)); memcpy(det + 1, &r, 4); }
+    if (!poke(entry, det, 5)) { logf_("[x] [vtentry] VirtualProtect failed"); return 0; }
+    logf_("[+] [vtentry] wrapper %08x detoured -> %p (logs EVERY rotated draw and its caller)",
+          g_vte_entry_va, (void *)tr);
+    return 1;
+}
+
+/* ------------------------------------------------------------- s68 startup movie
+ *
+ * The startup movie never plays. Established by measurement, not inference:
+ *   - the proxy is NOT the cause -- a control run with the stock binkw32.dll
+ *     behaves identically
+ *   - Bink is healthy -- BinkOpenMiles and BinkSetSoundSystem succeed and the menu
+ *     movies (s_m_loop, s_m2x) open and play
+ *   - intro_01 is never REQUESTED. Nothing fails; something declines to ask.
+ *
+ * The path is FUN_005170b0 (WinMain) -> FUN_00458c90 -> FUN_0047c370, which plays
+ * movie 0x68 ("preintro") and then movie 1 ("intro_01") out of the 104-entry table
+ * at 0x5a0360. FUN_0047c370 opens with two guards:
+ *
+ *     mov eax,[0x59a654] / test / je skip      <- ships as 1 and is never written
+ *     mov eax,[0x5f2170] / mov ecx,[eax+0xc]
+ *     test ecx,ecx       / je skip             <- THIS one is closed
+ *
+ * and the very next instruction after the guards clears that same field, so it is a
+ * ONE-SHOT: whatever sets it does so once. That matches the symptom exactly -- the
+ * intro is not disabled, it is already "used up".
+ *
+ * This NOPs the second je so the sequence always runs. Off unless the ini asks,
+ * because "play the intro on every launch" is a preference, not a bug fix.
+ *
+ * Note preintro.bik is NOT PRESENT in this install -- only intro_01.bik is. So the
+ * first BinkOpen of the pair is expected to fail; the Bink instrumentation will say
+ * so plainly, and whether the game survives that is exactly what the run tests. */
+static int patch_intro(void)
+{
+    static const BYTE SIG[]  = {0xa1,0,0,0,0, 0x85,0xc0, 0x0f,0x84,0,0,0,0,
+                                0xa1,0,0,0,0, 0x8b,0x48,0x0c, 0x85,0xc9, 0x0f,0x84,0,0,0,0};
+    static const BYTE MASK[] = {   1,0,0,0,0,    1,   1,    1,   1,0,0,0,0,
+                                   1,0,0,0,0,    1,   1,   1,    1,   1,    1,   1,0,0,0,0};
+    BYTE *at = find_unique_masked(SIG, MASK, sizeof SIG, g_text, g_textlen, "intro guard");
+    if (!at) { logf_("[x] [intro] guard signature not found"); return 0; }
+    static const BYTE NOPS[6] = {0x90,0x90,0x90,0x90,0x90,0x90};
+    if (!poke(at + 23, NOPS, 6)) { logf_("[x] [intro] VirtualProtect failed"); return 0; }
+    logf_("[+] [intro] one-shot guard NOPed at %p -- startup movie forced on every launch",
+          (void *)(at + 23));
+    logf_("      (gate at the first gate reads %08x; the pair plays movie 0x68 then movie 1)",
+          rd32(at + 1));
+    return 1;
+}
+
+/* ------------------------------------------------- s69 the movie/menu window
+ *
+ * The main menu and the intro both render into a 640x480 box in the TOP-LEFT
+ * corner of a 1920x1080 screen.
+ *
+ * FUN_00515d30 is "play movie #i". After choosing a layout it sizes the window:
+ *
+ *     w = min(screenW, 640) ; h = min(screenH, 480)      <- the clamp, 0x515e58
+ *     ... converted to virtual units through 0x5a0ff8 / 0x5a1000 ...
+ *     msg 0x6a = w      msg 0x6b = h
+ *     msg 0x68 = (3200 - w) / 2                          <- and it CENTRES
+ *     msg 0x69 = (2400 - h) / 2
+ *
+ * So the engine already centres the window. That is the part that does not add up:
+ * a centred 640x480 window would sit in the MIDDLE of the screen, not the corner.
+ * Which means the menu is probably NOT on this path at all -- it is on the
+ * `videowin.win` branch, which jumps to 0x515f86 and skips the clamp, the SetWH and
+ * the centring together.
+ *
+ * Two things are therefore built here, so one run settles it either way:
+ *   patch_menu()        widens the clamp to a PILLARBOXED size (4:3 inside the mode)
+ *   patch_movie_probe() logs which branch each movie actually takes
+ *
+ * If the picture changes, the menu was on the clamped path and this is the fix.
+ * If it does not, the log names the branch that needs the work instead -- and the
+ * clamp change then only affects in-game event movies, which is the risk to watch. */
+
+static int patch_menu(int w, int h)
+{
+    /* mov ax,[screenW] / cmp ax,640 / jle / mov [esp+0x10],640 / ... / same for height */
+    static const BYTE SIG[]  = {0x66,0xa1,0,0,0,0, 0x66,0x3d,0x80,0x02, 0x7e,0x0a,
+                                0xc7,0x44,0x24,0x10,0x80,0x02,0x00,0x00, 0xeb,0x07,
+                                0x0f,0xbf,0xc0, 0x89,0x44,0x24,0x10, 0xdb,0x44,0x24,0x10,
+                                0xd8,0x0d,0,0,0,0, 0xe8,0,0,0,0, 0x8b,0xf8,
+                                0x66,0xa1,0,0,0,0, 0x66,0x3d,0xe0,0x01, 0x7e,0x0a,
+                                0xc7,0x44,0x24,0x10,0xe0,0x01,0x00,0x00};
+    static const BYTE MASK[] = {   1,   1,0,0,0,0,    1,   1,   1,   1,    1,   1,
+                                   1,   1,   1,   1,   1,   1,   1,   1,    1,   1,
+                                   1,   1,   1,    1,   1,   1,   1,    1,   1,   1,   1,
+                                   1,   1,0,0,0,0,    1,0,0,0,0,    1,   1,
+                                   1,   1,0,0,0,0,    1,   1,   1,   1,    1,   1,
+                                   1,   1,   1,   1,   1,   1,   1,   1};
+    BYTE *at = find_unique_masked(SIG, MASK, sizeof SIG, g_text, g_textlen, "movie clamp");
+    if (!at) { logf_("[x] [menu] clamp signature not found"); return 0; }
+    WORD  w16 = (WORD)w, h16 = (WORD)h;
+    DWORD w32 = (DWORD)w, h32 = (DWORD)h;
+    if (!poke(at +  8, &w16, 2) || !poke(at + 16, &w32, 4) ||
+        !poke(at + 54, &h16, 2) || !poke(at + 62, &h32, 4)) {
+        logf_("[x] [menu] VirtualProtect failed"); return 0;
+    }
+    logf_("[+] [menu] movie-window clamp at %p: 640x480 -> %dx%d (the engine centres it itself)",
+          (void *)at, w, h);
+    return 1;
+}
+
+/* Log which branch FUN_00515d30 takes. Its first instruction is `mov eax,[imm32]`,
+ * five bytes, so the detour relocates cleanly -- the same shape as the vtext entry
+ * probe. ECX carries the movie index on entry. */
+static void __cdecl movie_hook(DWORD idx, DWORD playing)
+{
+    static int n;
+    if (n >= 24) return;
+    n++;
+    DWORD sub = 0;
+    if (g_mv_flag_va) {
+        DWORD obj = *(DWORD *)(SIZE_T)g_mv_flag_va;
+        if (obj) sub = *(DWORD *)(SIZE_T)(obj + 0x1c);
+    }
+    /* The mode the GAME thinks it is in, and the mode the DESKTOP is actually in.
+     * If they disagree, the movie is not mis-drawn at all -- the game is rendering
+     * a correct 640x480 frame that nothing is scaling up to the panel. That is a
+     * presentation problem, not a layout one, and it needs a completely different
+     * fix from anything inside the exe. */
+    int gw = 0, gh = 0;
+    if (g_vt_xs_va && g_vt_ys_va) {
+        gw = (int)(*(float *)(SIZE_T)g_vt_xs_va * 3200.0f + 0.5f);
+        gh = (int)(*(float *)(SIZE_T)g_vt_ys_va * 2400.0f + 0.5f);
+    }
+    logf_("          game mode %dx%d | desktop %dx%d", gw, gh,
+          GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    logf_("  [movie] play #%lu   already-playing=%lu   [0x612fec+0x1c]=%lu -> %s",
+          idx, playing, sub,
+          playing ? "REFUSED (a movie is already up)"
+                  : (sub ? "videowi2.win (clamped+centred path)"
+                         : "videowin.win (BYPASSES clamp and centring)"));
+}
+
+static int patch_movie_probe(void)
+{
+    /* mov eax,[playing-flag] / sub esp,0x28 / push ebx / xor ebx,ebx / cmp eax,ebx */
+    static const BYTE SIG[]  = {0xa1,0,0,0,0, 0x83,0xec,0x28, 0x53, 0x33,0xdb, 0x3b,0xc3};
+    static const BYTE MASK[] = {   1,0,0,0,0,    1,   1,   1,    1,    1,   1,    1,   1};
+    BYTE *at = find_unique_masked(SIG, MASK, sizeof SIG, g_text, g_textlen, "play-movie entry");
+    if (!at) { logf_("[x] [movie] entry signature not found"); return 0; }
+    DWORD playing_va = rd32(at + 1);
+
+    BYTE *tr = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tr) { logf_("[x] [movie] VirtualAlloc failed"); return 0; }
+    int o = 0;
+    tr[o++] = 0x60; tr[o++] = 0x9C;                    /* pushad / pushfd     */
+    tr[o++] = 0xA1; memcpy(tr + o, &playing_va, 4); o += 4;  /* mov eax,[flag] */
+    tr[o++] = 0x50;                                    /* push eax (playing)  */
+    tr[o++] = 0x51;                                    /* push ecx (index)    */
+    tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&movie_hook; memcpy(tr + o, &f, 4); o += 4; }
+    tr[o++] = 0xFF; tr[o++] = 0xD0;                    /* call eax            */
+    tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x08;    /* add esp,8           */
+    tr[o++] = 0x9D; tr[o++] = 0x61;                    /* popfd / popad       */
+    memcpy(tr + o, at, 5); o += 5;                     /* relocated mov eax   */
+    tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((at + 5) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
+
+    BYTE det[5]; det[0] = 0xE9;
+    { DWORD r = (DWORD)(SIZE_T)(tr - (at + 5)); memcpy(det + 1, &r, 4); }
+    if (!poke(at, det, 5)) { logf_("[x] [movie] VirtualProtect failed"); return 0; }
+    logf_("[+] [movie] play-movie entry %p detoured -> %p (playing flag %08x)",
+          (void *)at, (void *)tr, playing_va);
+    return 1;
+}
+
+/* ------------------------------------------ s69c the startup ASKS for 640x480
+ *
+ * Two earlier attempts failed and both were aimed at the wrong thing:
+ *   (a) hooking the per-screen assignment in FUN_004e9f30 -- never fired
+ *   (b) substituting the slot at its point of use -- crashed, because
+ *       FUN_0052e480 reads [settings]+0x18 THREE times (width, height, mode set)
+ *       and only one was patched
+ *   (c) writing the field during display bring-up -- DDERR_INVALIDRECT #150,
+ *       the mode cannot be set before the window and surfaces exist
+ *
+ * All of that assumed the menu ends up at 640x480 by DEFAULT. It does not. The
+ * startup sequence FUN_0047c370 calls the engine's own apply-video-settings routine
+ * FUN_00515450 and explicitly ASKS for slot 0, twice:
+ *
+ *     push 0 / push 0 / push -1 / or edx,-1 / or ecx,-1 / mov [eax+0x1c],1 / call
+ *     push 1 / push 0 / push -1 / or edx,-1 / or ecx,-1 / mov [eax+0x1c],0 / call
+ *
+ * The five settings map 1:1 onto ecx, edx, arg1, arg2, arg3 -> fields +0xc, +0x10,
+ * +0x14, +0x18, +0x1c. That mapping is not guesswork: at 0x46175c the game loads
+ * ecx=[obj+0xc], edx=[obj+0x10], and pushes [obj+0x14] last, so arg1 is +0x14 and
+ * arg2 is +0x18 -- the resolution slot. -1 means "keep".
+ *
+ * So changing the second push is the whole fix, one byte per site. It also runs
+ * through the engine's OWN release-and-recreate path at a point the engine itself
+ * considers safe, which is exactly what the bring-up patch could not do.
+ *
+ * These two calls sit BEFORE the intro's guards, so this works whether or not
+ * [Intro] Force is on. push imm8, so the slot must be 0..127. */
+static int patch_menu_slot(void)
+{
+    /* push imm8 / push 0 / push -1 / or edx,-1 / or ecx,-1 / mov [eax+0x1c],imm32 / call */
+    static const BYTE SIG[]  = {0x6a,0, 0x6a,0x00, 0x6a,0xff,
+                                0x83,0xca,0xff, 0x83,0xc9,0xff,
+                                0xc7,0x40,0x1c,0,0x00,0x00,0x00, 0xe8};
+    static const BYTE MASK[] = {   1,0,    1,   1,    1,   1,
+                                   1,   1,   1,    1,   1,   1,
+                                   1,   1,   1,0,   1,   1,   1,    1};
+    int n = 0;
+    for (SIZE_T i = 0; i + sizeof SIG <= g_textlen; i++) {
+        SIZE_T k = 0;
+        for (; k < sizeof SIG; k++) if (MASK[k] && g_text[i + k] != SIG[k]) break;
+        if (k != sizeof SIG) continue;
+        BYTE v = (BYTE)g_menu_slot;
+        if (poke(g_text + i + 3, &v, 1)) {
+            logf_("  [+] [menu] startup slot request at %p: 0 -> %d",
+                  (void *)(g_text + i), g_menu_slot);
+            n++;
+        }
+    }
+    if (!n) { logf_("[x] [menu] startup slot-request sites not found"); return 0; }
+    logf_("[+] [menu] %d startup slot request(s) redirected to slot %d"
+          " (via the engine's own FUN_00515450 apply path)", n, g_menu_slot);
+    return 1;
+}
+
+/* ------------------------------------------------- s69.6 the movie blit probe
+ *
+ * The movie tiles 3x across the top ~160px: a destination advance of 640 px per source
+ * row against a 1920 px screen row. NOT an aspect-ratio problem -- a wrong aspect
+ * stretches, it cannot duplicate an image.
+ *
+ * Bink is innocent, established by a crash rather than an argument. Just before the
+ * copy, FUN_00531690 allocates bink->Width * bink->Height * 2 (640*480*2) and passes
+ * pitch = width*2 = 1280. Forcing that pitch to 3840 made Bink write 1.8MB into a
+ * 614KB buffer and the game died -- which PROVES 1280 is right and the buffer really
+ * is movie-sized.
+ *
+ * So the fault is the game's own blit of that buffer, which starts at 0x531efd by
+ * loading the screen width from ds:0x60c18c. It has two paths, selected at 0x531f47:
+ *   [esp+0x30] != 0  -> a SCALING path (0x531f5f) that fdivs against the movie's own
+ *                       dimensions -- the machinery that should fill a larger widget
+ *   [esp+0x30] == 0  -> an unscaled path at 0x53204a
+ *
+ * Which one runs, and with what geometry, decides the fix. Log it rather than guess:
+ * four wrong theories have already been paid for on this one screen. */
+static void __cdecl blit_hook(DWORD ebp, DWORD *sp)
+{
+    static int n;
+    if (n >= 6) return;
+    n++;
+    /* sp points at the callee's esp as it was on entry to the detour. */
+    logf_("  [blit] path-flag[esp+0x30]=%lu  movie %lux%lu  screenW=%d  ->  %s",
+          sp[0x30 / 4],
+          *(DWORD *)(SIZE_T)(ebp + 0x9a), *(DWORD *)(SIZE_T)(ebp + 0x9e),
+          g_vt_xs_va ? (int)(*(float *)(SIZE_T)g_vt_xs_va * 3200.0f + 0.5f) : 0,
+          sp[0x30 / 4] ? "SCALING path 0x531f5f" : "UNSCALED path 0x53204a");
+    logf_("         locals: [10]=%lu [14]=%lu [1c]=%lu [24]=%lu [28]=%lu [2c]=%lu [34]=%lu [38]=%lu",
+          sp[0x10/4], sp[0x14/4], sp[0x1c/4], sp[0x24/4],
+          sp[0x28/4], sp[0x2c/4], sp[0x34/4], sp[0x38/4]);
+}
+
+static int patch_blit_probe(void)
+{
+    /* the two instructions right after the BinkCopyToBuffer call:
+     *   mov ecx,[esp+0x2c] / mov esi,[esp+0x10] / movsx eax,WORD ds:0x60c18c */
+    static const BYTE SIG[]  = {0x8b,0x4c,0x24,0x2c, 0x8b,0x74,0x24,0x10,
+                                0x0f,0xbf,0x05,0,0,0,0};
+    static const BYTE MASK[] = {   1,   1,   1,   1,    1,   1,   1,   1,
+                                   1,   1,   1,0,0,0,0};
+    BYTE *at = find_unique_masked(SIG, MASK, sizeof SIG, g_text, g_textlen, "movie blit");
+    if (!at) { logf_("[x] [blit] signature not found"); return 0; }
+
+    BYTE *tr = (BYTE *)VirtualAlloc(NULL, 96, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tr) { logf_("[x] [blit] VirtualAlloc failed"); return 0; }
+    int o = 0;
+    tr[o++] = 0x60; tr[o++] = 0x9C;                                 /* pushad / pushfd     */
+    tr[o++] = 0x8D; tr[o++] = 0x44; tr[o++] = 0x24; tr[o++] = 0x24; /* lea eax,[esp+0x24]  */
+    tr[o++] = 0x50;                                                 /* push eax (orig esp) */
+    tr[o++] = 0x55;                                                 /* push ebp            */
+    tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&blit_hook; memcpy(tr + o, &f, 4); o += 4; }
+    tr[o++] = 0xFF; tr[o++] = 0xD0;                                 /* call eax            */
+    tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x08;                 /* add esp,8           */
+    tr[o++] = 0x9D; tr[o++] = 0x61;                                 /* popfd / popad       */
+    memcpy(tr + o, at, 8); o += 8;                                  /* relocated two movs  */
+    tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((at + 8) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
+
+    BYTE det[8];
+    det[0] = 0xE9;
+    { DWORD r = (DWORD)(SIZE_T)(tr - (at + 5)); memcpy(det + 1, &r, 4); }
+    memset(det + 5, 0x90, 3);
+    if (!poke(at, det, 8)) { logf_("[x] [blit] VirtualProtect failed"); return 0; }
+    logf_("[+] [blit] movie blit at %p detoured -> %p", (void *)at, (void *)tr);
+    return 1;
+}
+
+/* ------------------------------------------ s69.6 let the movie blit MAGNIFY
+ *
+ * Measured, not guessed: the probe showed the SCALING path taken, destination rect
+ * 0..1919 x 0..1079, movie 640x480. The machinery is engaged and still tiles.
+ *
+ * The blit then clamps the destination extent down to the SOURCE extent:
+ *
+ *     mov edx,[esp+0x1c]   ; destination width  = 1920
+ *     sub ecx,edi          ; source available   = 640
+ *     cmp edx,ecx / jl keep
+ *     mov [esp+0x1c],ecx   ; destW = 640
+ *
+ * ...and the same two instructions earlier for height. Correct for a 1:1 copy,
+ * fatal for a magnifying one -- and invisible at 640x480, where the two are equal.
+ *
+ * It explains the picture exactly. The destination row remainder was computed as
+ * screenW - destW = 1920 - 1920 = 0 BEFORE the clamp, so afterwards the loop writes
+ * 640 px per row and advances by 0: rows lay end to end, three per screen row,
+ * 480 source rows landing in 160 screen rows. That is the observed image.
+ *
+ * The inner loop steps the source with 16.16 fixed-point increments computed at
+ * 0x532006 and 0x53202c, so it is a real scaler -- it just never gets to run at a
+ * magnifying ratio. Turning both `jl` into unconditional `jmp` skips the clamps and
+ * lets it do what it was written to do. Two bytes.
+ *
+ * The steppers are derived from source/destination ratio, so the source pointer stays
+ * inside the movie buffer at any destination size -- the clamp is not what was keeping
+ * the read in bounds. */
+static int patch_blit_scale(void)
+{
+    static const BYTE SIG[]  = {0x3b,0xf2, 0x7c,0x06, 0x8b,0xf2, 0x89,0x74,0x24,0x20,
+                                0x8b,0x54,0x24,0x1c, 0x2b,0xcf, 0x3b,0xd1, 0x7c,0x04,
+                                0x89,0x4c,0x24,0x1c, 0x8b,0x0d,0,0,0,0};
+    static const BYTE MASK[] = {   1,   1,    1,   1,    1,   1,    1,   1,   1,   1,
+                                   1,   1,   1,   1,    1,   1,    1,   1,    1,   1,
+                                   1,   1,   1,   1,    1,   1,0,0,0,0};
+    BYTE *at = find_unique_masked(SIG, MASK, sizeof SIG, g_text, g_textlen, "movie blit clamps");
+    if (!at) { logf_("[x] [blit] clamp signature not found"); return 0; }
+    BYTE jmp_ = 0xEB;
+    if (!poke(at + 2, &jmp_, 1) || !poke(at + 18, &jmp_, 1)) {
+        logf_("[x] [blit] VirtualProtect failed"); return 0;
+    }
+    logf_("[+] [blit] destination clamps at %p removed (jl -> jmp): the movie scaler"
+          " may now magnify past the source size", (void *)at);
+    return 1;
+}
+
 static int patch_hud_probe(void)
 {
     BYTE *at = find_unique_masked(HUD_SIG, HUD_MASK, sizeof HUD_SIG,
@@ -2381,4 +3244,149 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     maybe_start_cliplog();
     maybe_start_hudprobe();
     return TRUE;
+}
+
+/* ==================================================== s67 Bink instrumentation
+ *
+ * WHY. The startup movie does not play. The proxy replaces binkw32.dll, so the
+ * proxy was the first suspect -- and it was EXONERATED by a control run with the
+ * stock DLL, which behaves identically. That leaves two possibilities that look
+ * the same from the outside:
+ *
+ *   (a) the game never asks for the movie -- a config, a table flag, or a branch
+ *   (b) the game asks and Bink refuses -- most likely audio: the game opens Bink
+ *       sound through BinkOpenMiles (Mss32.dll), and Bink will fail BinkOpen
+ *       outright when its sound system did not initialise
+ *
+ * Those need opposite fixes, so guessing between them is worthless. We own the
+ * DLL the game calls, which makes this a two-line measurement: stop forwarding the
+ * handful of entry points that matter and log what actually crosses the boundary,
+ * then tail-call the real Bink so behaviour is unchanged.
+ *
+ * Only these four are real functions; the other 77 exports stay pure forwarders. */
+
+static HMODULE g_bink;
+static int g_bink_logged;
+
+static HMODULE bink_orig(void)
+{
+    if (!g_bink) {
+        /* The forwarders will already have pulled it in; only fall back to an
+         * explicit load if we somehow got here first. Load by FULL PATH -- a bare
+         * name would search the DLL path and could find something else entirely. */
+        g_bink = GetModuleHandleA("binkw32_orig.dll");
+        if (!g_bink) {
+            char p[MAX_PATH];
+            snprintf(p, sizeof p, "%s\\binkw32_orig.dll", g_dir);
+            g_bink = LoadLibraryA(p);
+        }
+        if (!g_bink) logf_("  [bink] cannot reach binkw32_orig.dll -- calls will fail");
+    }
+    return g_bink;
+}
+
+typedef void * (__stdcall *BinkOpen_t)(const char *, DWORD);
+typedef char * (__stdcall *BinkGetError_t)(void);
+typedef int    (__stdcall *BinkOpenMiles_t)(void *);
+typedef int    (__stdcall *BinkSetSoundSystem_t)(void *, DWORD);
+
+static const char *bink_err(void)
+{
+    HMODULE m = bink_orig();
+    if (!m) return "(no binkw32_orig)";
+    BinkGetError_t f = (BinkGetError_t)(void *)GetProcAddress(m, "_BinkGetError@0");
+    if (!f) return "(no BinkGetError)";
+    const char *e = f();
+    return e ? e : "(none)";
+}
+
+void * __stdcall my_BinkOpen(const char *name, DWORD flags);
+void * __stdcall my_BinkOpen(const char *name, DWORD flags)
+{
+    HMODULE m = bink_orig();
+    BinkOpen_t f = m ? (BinkOpen_t)(void *)GetProcAddress(m, "_BinkOpen@8") : NULL;
+    void *r = f ? f(name, flags) : NULL;
+    if (g_bink_logged < 64) {
+        g_bink_logged++;
+        /* Log the RESULT, not just the attempt. "asked and failed" and "asked and
+         * succeeded but was never drawn" are different bugs with different fixes. */
+        /* The CALLER is the point of this log now that Bink is exonerated. The
+         * movies that do play name the player function, and from there the intro's
+         * missing call site is a short walk up the call graph -- much shorter than
+         * chasing an indirect string table through the disassembly. */
+        logf_("  [bink] BinkOpen(\"%s\", 0x%08lx) -> %p   caller=%p%s%s",
+              name ? name : "(null)", flags, r, __builtin_return_address(0),
+              r ? "" : "   FAILED: ", r ? "" : bink_err());
+    }
+    return r;
+}
+
+int __stdcall my_BinkOpenMiles(void *p);
+int __stdcall my_BinkOpenMiles(void *p)
+{
+    HMODULE m = bink_orig();
+    BinkOpenMiles_t f = m ? (BinkOpenMiles_t)(void *)GetProcAddress(m, "_BinkOpenMiles@4") : NULL;
+    int r = f ? f(p) : 0;
+    logf_("  [bink] BinkOpenMiles(%p) -> %d%s%s", p, r,
+          r ? "" : "   FAILED: ", r ? "" : bink_err());
+    return r;
+}
+
+int __stdcall my_BinkSetSoundSystem(void *open, DWORD param);
+int __stdcall my_BinkSetSoundSystem(void *open, DWORD param)
+{
+    HMODULE m = bink_orig();
+    BinkSetSoundSystem_t f = m ? (BinkSetSoundSystem_t)(void *)GetProcAddress(m, "_BinkSetSoundSystem@8") : NULL;
+    int r = f ? f(open, param) : 0;
+    logf_("  [bink] BinkSetSoundSystem(%p, 0x%08lx) -> %d", open, param, r);
+    return r;
+}
+
+/* BinkCopyToBuffer(bink, dest, destpitch, destheight, destx, desty, flags).
+ *
+ * Forcing the menu into 1920x1080 made the intro render as a 640-wide image tiled
+ * across the top third -- the signature of rows being written with a pitch of 640
+ * pixels into a 1920-wide surface. This logs what the game actually passes so the
+ * stale value can be identified rather than guessed at. */
+typedef int (__stdcall *BinkCopyToBuffer_t)(void *, void *, int, unsigned, unsigned, unsigned, unsigned);
+
+int __stdcall my_BinkCopyToBuffer(void *b, void *dest, int pitch, unsigned h,
+                                  unsigned x, unsigned y, unsigned flags);
+int __stdcall my_BinkCopyToBuffer(void *b, void *dest, int pitch, unsigned h,
+                                  unsigned x, unsigned y, unsigned flags)
+{
+    /* MEASURED: the game passes pitch = movie_width * 2 (1280 for a 640-wide movie at
+     * 16bpp). The destination surface's real pitch follows the MODE, not the movie --
+     * 3840 at 1920x1080 -- so every source row advances only a third of a destination
+     * row: three copies across and a third of the height used. That is exactly the
+     * tiling seen once the menu was forced out of 640x480, and it is invisible at
+     * 640x480 because there the two happen to be equal.
+     *
+     * Correct it to mode_width * 2. Gated on the ini because it rests on the surface
+     * pitch tracking the mode width, which is true for a DirectDraw primary/back
+     * buffer but is an inference, not something we can query through this interface. */
+    int orig = pitch;
+    if (g_bink_pitch && g_vt_xs_va) {
+        int mw = (int)(*(float *)(SIZE_T)g_vt_xs_va * 3200.0f + 0.5f);
+        if (mw > 0 && pitch < mw * 2) pitch = mw * 2;
+    }
+    static int n;
+    if (n < 12) {
+        n++;
+        logf_("  [bink] CopyToBuffer dest=%p pitch=%d%s destheight=%u at (%u,%u)"
+              " flags=0x%08x caller=%p",
+              dest, pitch, (pitch != orig) ? " (was tiling; corrected)" : "", h, x, y,
+              flags, __builtin_return_address(0));
+    }
+    HMODULE m = bink_orig();
+    BinkCopyToBuffer_t f = m ? (BinkCopyToBuffer_t)(void *)GetProcAddress(m, "_BinkCopyToBuffer@28") : NULL;
+    return f ? f(b, dest, pitch, h, x, y, flags) : 0;
+}
+
+char * __stdcall my_BinkGetError(void);
+char * __stdcall my_BinkGetError(void)
+{
+    HMODULE m = bink_orig();
+    BinkGetError_t f = m ? (BinkGetError_t)(void *)GetProcAddress(m, "_BinkGetError@0") : NULL;
+    return f ? f() : NULL;
 }

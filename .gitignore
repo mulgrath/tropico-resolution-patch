@@ -9,3 +9,14 @@
 
 # raw traces are large; commit them gzipped
 logs/*.log
+
+# Generated UI art is DERIVED GAME ART, not our code -- same rule as the binaries
+# above. It is reproducible from the user's own archives in one command:
+#   tools/tropico-set-resolution.sh WIDTH HEIGHT
+known-good/menu-art-*/
+known-good/fonts-scale*/
+*.i06
+*.i08
+*.i10
+*.i12
+*.i16

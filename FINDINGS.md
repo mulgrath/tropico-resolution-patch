@@ -4457,3 +4457,480 @@ tooling and §64.2 stand on their own and cost nothing to keep.
 
 Not recommended before packaging: chasing what Reduce changes. It is a real lead, but it is an
 engine investigation with no bounded end, spent on one cosmetic panel.
+
+## 65. SOLVED: rotated tab text — the draw path, and why the box is 25% too tall
+
+The tabs on the F2 settings window and the almanac now place their rotated labels
+correctly at 1920x1080, confirmed in game. The route there refuted an inherited
+"fact" and four of my own hypotheses; both are recorded, because the wrong turns are
+the reusable part.
+
+### 65.1 The path
+
+```
+FUN_004526d0  0x4526d0   printf wrapper
+FUN_00450b10  0x450b10   THE ROTATED-TEXT DRAWER
+  |- FUN_00453ef0 0x453ef0  renders the string HORIZONTALLY into an offscreen
+  |                         surface, with the box's two axes SWAPPED
+  |- software: FUN_00500e70 0x500e70  transposing copy (modes 1 and 3)
+  |            FUN_00500d30 0x500d30  flip copy        (mode 4)
+  '- hardware: FUN_004fb5c0 with the corner table at 0x595048
+```
+
+`FUN_00500e70` **is** the inverted stepping pattern the handoff asked for — source
+`+1` per pixel, destination `+pitch` per pixel — it is simply not a leaf of
+`FUN_00501b90`. Its only caller in the binary is `FUN_00450b10`.
+
+`param_17` selects orientation: **1 and 3 rotate**, 4 flips, anything else is upright.
+
+**There are exactly four call sites, and no address-taken references:**
+
+| site | window | mode | labels |
+|---|---|---|---|
+| `0x40741e` | almanac tabs | 1 | ids from `0x585628` |
+| `0x49179e` | F2 settings tabs | 1 | ids from `0x59b8c4` = 557..561 Overview/Graphics/Memory/Dummy 2/Dummy 3 |
+| `0x494aea` | map selection | 3 | "Elevation" (id 2668) |
+| `0x5034d8` | — | 4 | a flip, not a rotation |
+
+So `bldgdtl`'s "Owner"/"Wages" are **NOT** rotated text — nothing else can reach this
+path. The handoff's assumption that they are is wrong, and `bldgdtl.i16` holds no
+tall-narrow sprite either, so they are neither engine-rotated nor baked art. Open.
+
+### 65.2 The coordinate space
+
+Four float globals written together at `0x51505e`-`0x5150b8` from the resolution table
+at `0x5a0fa0`, against constants that read 1/3200, 3200, 1/2400, 2400:
+
+| global | value | role |
+|---|---|---|
+| `DAT_005a0ffc` | `W / 3200` | virtual -> px, X |
+| `DAT_005a0ff8` | `3200 / W` | px -> virtual, X |
+| `DAT_005a1004` | `H / 2400` | virtual -> px, Y |
+| `DAT_005a1000` | `2400 / H` | px -> virtual, Y |
+
+### 65.3 The actual defect: the engine measures the label on the wrong axis
+
+Instrumented, not inferred (`[VText] Probe=1`, section 65.5). The drawer is handed the
+tab's `.WIN` widget rect — `w=88 h=256` — and the label is CENTRED along the box's long
+axis. But the length it centres against is computed by converting the label to virtual
+units with `3200/W` and back with `H/2400`, i.e. through **X on the way in and Y on the
+way out**. Measured, at 1920x1080:
+
+```
+label_top = box_top + 0.5 * box_h - 0.375 * label_px
+                                    ^^^^^ should be 0.5
+0.375 / 0.5 = 0.75 = ys/xs = 0.45/0.60
+```
+
+The engine therefore believes every rotated label is **25% shorter than it is**, centres
+it against that, and pushes it down and off the bottom. At 4:3 `ys == xs`, the factor is
+1, and PopTop never saw it. This is the same class as sections 30 and 47: a value
+consumed in the wrong coordinate space.
+
+It also yields the fit-or-clip threshold, which matches every observation:
+
+```
+room = 0.5 * box_h + 0.375 * label_px      ->     fits iff box_h >= 1.25 * label_px
+```
+
+Stock `h=256` gives 115 px at 1080 against a ~91 px label, needing 114 — marginal, which
+is exactly the "barely clipping" the owner reported.
+
+### 65.4 Four hypotheses that died, and the measurement that killed each
+
+| hypothesis | killed by |
+|---|---|
+| **Global font scale.** Rotated text overflows because glyph px are resolution-invariant | `--font-scale-x 0.90` changed nothing visible. The label was not too long; it was misplaced |
+| **`.WIN` `cy`.** Shrink the widget so the box matches the tab | The probe showed the drawer still handed `88x256` after the file was patched to `48x167` — **loose `.WIN` overrides do not load** (65.6) |
+| **An outer-clip clamp** pinning the label's top | `clipT-boxY = 0` at every resolution. Nothing is clamped |
+| **`BoxH` buys a third of its height in room** | Fitted to runs where my own hook let the clip drift above the box, so it described a bug, not the geometry |
+
+The `DY`/`ClipH` immediates at `0x4916fa`/`0x4916fd` (`lea ebx,[esi+5]`, `add esi,0x123`)
+feed the **clip**, which `FUN_00450b10` re-intersects with the box — so they can crop the
+label but never move it. That asymmetry is what made the clamp story look right.
+
+### 65.5 The fix: rewrite the drawer's arguments
+
+`proxy/` gains a trampoline on the call at **site+0xA9** (identical offset at both tab
+sites, so one signature serves both). It logs the seventeen stack arguments and can
+rewrite them, then tail-jumps to the real target with the stack byte-exact — `pushad`/
+`popad` restore ECX, which carries `this`, and the return address is untouched.
+
+```ini
+[VText]
+Enable=1
+Fix=1
+FixW=1920      ; the correction is applied ONLY at this mode
+FixH=1080
+BoxH=300       ; box height in virtual units (stock 256)
+BoxDY=-63      ; box y shift in virtual units
+```
+
+**Gating on the mode is not optional.** The stock modes are correct as shipped, and the
+game climbs 640x480 -> ... -> target on every launch, so an ungated correction visibly
+breaks every mode on the way up. The code refuses `Fix=1` without `FixW`/`FixH`.
+
+The hook widens the clip past the box in both directions and lets the engine's own
+intersection pin it to the box. Without that, `BoxDY` drags the precomputed clip above
+the box and a TALLER box clips MORE — measured: `BoxH=336 BoxDY=-107` put the clip floor
+at 219 against a box bottom of 238.
+
+Confirmed in game at 1920x1080 with `BoxH=300 BoxDY=-63` plus the width-0.90 font set.
+The two knobs are independent once the clip tracks the box: `BoxDY` moves the label
+rigidly, `BoxH` buys room.
+
+### 65.6 REFUTED: section 64.2 — loose `.WIN` overrides do not load
+
+64.2 recorded this as "established by positive control". It is wrong, and inheriting it
+cost three runs. Proven by instrument: after patching `SETTINGS.WIN` to `48x167` and
+shipping it in all four letter cases, the drawer was still handed `88x256`.
+
+`FUN_004ef4b0` hashes the asset name and dispatches by TYPE to four separate loaders
+(`FUN_00510d50`, `FUN_0051f380`, `FUN_004518e0`, `FUN_00532860`), so "loose files win" is
+a property of each loader individually. Confirming it for `.i16` art (section 63.1, which
+IS solid) proves nothing about `.WIN`.
+
+**Rule earned:** a positive control is only valid for the channel it was run on.
+
+### 65.7 State
+
+- `proxy/binkw32_vtext.dll`, installed as `app/binkw32.dll`. Previous build saved as
+  `binkw32.dll.pre-vtext`.
+- `data/`: the 78-asset 1920x1080 set with fonts at `--font-scale-x 0.90`.
+  `tools/tropico-artset.py` gained `--font-scale-x` / `--font-scale-y`; the identity
+  oracle still passes 78/78. Stock fonts saved in `known-good/fonts-scale1.00/`.
+- No loose `.WIN` files. `px.PK2` still stock, never opened for writing.
+- Superseded by §66: "Owners"/"Wages" **is** rotated text, from a third call site.
+
+---
+
+## 66. The building panel's contextual label — the third rotated site
+
+§65.1 enumerated four call sites into the rotated drawer and identified two as the
+settings and almanac tabs. Of the other two it recorded `0x494aea` as the map-selection
+screen's "Map Size"/"Elevation" and `0x5034d8` as "a flip". §65.7 then closed out
+"Owner"/"Wages" as *"not rotated text, mechanism unknown"*.
+
+**`0x5034d8` is the building panel's contextual label, and it is rotated.** The owner
+said so from screenshots; the identification I had was inference, never measured.
+
+### 66.1 How it was settled
+
+The §65 probe hooks the two tab **call sites**, so its silence on the building panel
+meant "not one of those two sites" — not "not rotated". Absence of evidence from an
+instrument that cannot see the thing is not evidence of absence, and treating it as such
+is what produced the wrong closure in §65.7.
+
+The fix was to instrument one level deeper. `patch_vtext_entry()` detours the entry of
+the wrapper `FUN_004526d0` itself, so **every** rotated draw in the game is logged with
+its caller's return address. The wrapper opens with `mov eax,0x3aa4`, exactly five bytes,
+so the detour relocates with no instruction-boundary guesswork; it is located by following
+the call at site+0xA9 through its jump thunk, so no address is hardcoded.
+
+The claim it tested was strong and still holds structurally — `FUN_00450b10` has exactly
+one caller, that caller has exactly four, and neither address appears as data anywhere in
+the image, so no function pointer can reach it. The claim was never wrong; my *labelling*
+of two of the four sites was. Measured, first run:
+
+```
+[vte] ret=005034dd "Wages"  rot=2 | box x=2440 y=1990 w=46 h=189 | clip T=0 B=1080
+[vte] ret=005034dd "Owners" rot=2 | box x=2440 y=1798 w=46 h=180 | clip T=0 B=1080
+[vte] ret=004917a3 "Overview" rot=3 | box x=2326 y=241 w=88 h=300 | clip T=104 B=245
+```
+
+A 46x189 box at the bottom-right of the virtual canvas is a tall narrow rotated label.
+
+**Trap, hit twice now:** the first version of this probe deduped on the return address
+alone, so each site logged once — at 640x480, the first rung of the F2 ladder — and then
+suppressed every draw at the mode actually under test. The call-site probe had already
+hit the identical trap with a plain counter. Dedupe on `(caller, y, scale)`.
+
+### 66.2 The mechanism, and why it is the same defect
+
+`rot` selects the transform: `1` and `3` set the axis-swap flag at `0x450cd5`, `2` does
+not, so the two sites take different branches — but they share the §65 shape, a length
+measured through one axis and re-applied through the other.
+
+What distinguishes this site is that **the caller passes no clip at all** (`T=0 B=1080`,
+the whole screen). Nothing outside the drawer was cropping the label; the only thing that
+could cut it is the drawer's own box intersection at `0x450cf6`, which clamps the clip to
+the box. So the box is the whole lever here, and the clip needs no separate handling —
+which is what makes this correction simpler than the tab one, where the call site
+precomputes a clip that has to be made to follow the box.
+
+### 66.3 The correction
+
+Gated on `rot == 2` rather than on a return address, so it can never touch the tabs
+(`rot == 3`, corrected at their own call sites) and survives a build where the site moved.
+Gated on the mode for the §65 reason: the F2 ladder climbs through the stock modes on
+every launch.
+
+```
+BldgDH  grow the box.  The floor drops by the whole amount, the label follows only
+        part way, and the difference is the room gained.
+BldgDY  translate the box.  Label and clip move together: position, not room.
+```
+
+Shipping values, tuned in game at 1920x1080: `BldgDH=67 BldgDY=-84` (virtual units;
+x0.45 for pixels here). **Confirmed by the owner:** Owners / Wages / Rent centred in
+their slots with no letters cut.
+
+The anchor was determined by measurement rather than derivation — one run with
+`BldgDH=189`, roughly doubling the box, moved the labels *down*, which fixes the sign and
+the rough rate in a single observation. Three tuning runs followed.
+
+### 66.4 The font scale was a workaround, and it came back out
+
+Both corrections were first dialled against a font set condensed to 0.90. With the
+placement fixed at the source, the owner asked the obvious question: does the shrink
+still earn its place? Regenerated at `--font-scale-x 1.0 --font-scale-y 1.0` — which
+reproduces `known-good/fonts-scale1.00/` byte-for-byte, a free check that the generator
+has not drifted — the longest labels ("Overview", "Owners") clipped slightly.
+
+They were recovered on the **room dials alone**: `BoxH` 300 -> 340, `BldgDH` 67 -> 107,
+about 18 px each, with the position dials paying back the drift. **Full-size fonts ship.**
+The 0.90 set is not needed by anything and is not installed.
+
+`BoxDX` was added in the same pass — the horizontal translation had never been wired into
+the hook, only into the un-gated `DX` immediate. It is applied *before* the clip is
+rebuilt from the box, so the clip follows it and a sideways move cannot crop.
+
+Frozen for 1920x1080, all confirmed in game:
+
+| | tabs (rot=3) | building panel (rot=2) |
+|---|---|---|
+| room | `BoxH=340` | `BldgDH=107` |
+| position Y | `BoxDY=-99` | `BldgDY=-111` |
+| position X | `BoxDX=-14` | — |
+
+**These are per-mode.** They are gated on `FixW x FixH` and are correct only there;
+2560x1440 will need its own pass. The ini carries the conversion (`units = px * 2400/H`
+vertical, `px * 3200/W` horizontal) and the procedure. Deriving them from the scale ratio
+instead of dialling them is the obvious next improvement and has not been attempted.
+
+### 66.5 Dead end recorded: the stacked-glyph theory
+
+Before the entry probe, the screenshots were read as *upright stacked letters* — ordinary
+horizontal text wrapped to one character per line — and a fix was derived from it: shrink
+the glyphs vertically by 1080/1200 so five lines fit again. `--font-scale-y 0.90` was
+generated and installed on that basis. **The theory was wrong**; the labels are rotated.
+
+The font set was never the thing that fixed it, and the vertical scale was retained only
+because both corrections are now tuned against it and it restores the correct glyph aspect
+ratio (the previous set was condensed 10% horizontally and not at all vertically).
+
+### 66.6 State
+
+- `[VText]` now carries both corrections and is **frozen for 1920x1080**; the ini
+  documents the dials and how to re-dial for another mode. `Entry=1` is **required**, not
+  diagnostic: the wrapper-entry hook is what carries the `rot=2` correction.
+- `known-good/binkw32.dll` and `known-good/tropico-fix-1080p.ini` are this build.
+- `Probe` now means "log every rotated draw" only. The hooks install whenever `Fix=1`.
+- `data/`: the 78-asset 1920x1080 set at **font scale 1.00 on both axes**.
+- All four rotated call sites are now accounted for by measurement:
+  `0x40741e` almanac tabs, `0x49179e` settings tabs, `0x5034d8` building panel label,
+  `0x494aea` still unmeasured (believed map-selection; **do not treat that as settled** —
+  that is exactly the kind of claim this section had to undo).
+
+---
+
+## 67. Bink instrumentation: the proxy is the boundary we own
+
+The startup movie did not play, and the proxy replaces `binkw32.dll` — the video
+library — so the proxy was suspect #1. **Control run with the stock DLL: identical
+behaviour.** Proxy exonerated before any theorising. (`tools/tropico-stock-run.sh`
+does that swap, verifies it took, and restores on any exit; a hand-typed
+`mv A B && cp C A` had already produced a run that tested nothing when the `cd`
+silently failed and `&&` short-circuited.)
+
+That left two possibilities that look identical from outside and need opposite fixes:
+the game never asks, or the game asks and Bink refuses. So four of the 81 exports
+were changed from forwarders into real functions that log and tail-call the original:
+`BinkOpen`, `BinkOpenMiles`, `BinkSetSoundSystem`, `BinkGetError`. The other 77 still
+forward untouched.
+
+Mechanics, since the def-file form is not obvious: a forwarder line
+`_BinkOpen@8 = binkw32_orig._BinkOpen@8` becomes `_BinkOpen@8 = my_BinkOpen@8`, and
+MinGW emits a real export. An `__asm__("_BinkOpen@8")` label on the C function does
+**not** work — the linker rejects it as undefined.
+
+Answer, first run: `BinkOpenMiles` and `BinkSetSoundSystem` both succeed, the menu
+movies open and play, and `intro_01` is **never requested**. Nothing was failing.
+
+`BinkOpen` also logs `__builtin_return_address(0)`, which named the player
+(`FUN_00531270`, called from `0x531516`) and turned a stalled static hunt through an
+indirect string table into a short walk up the call graph.
+
+## 68. The startup movie is a one-shot, not a missing feature
+
+Path: `FUN_005170b0` (WinMain, `ret 0x10`) -> `FUN_00458c90` -> `FUN_0047c370`, which
+plays movie `0x68` then movie `1` from the movie table at `0x5a0360` — 104 entries,
+**11-byte stride**, `{char *name; BYTE flags[7]}`. Index 1 is `intro_01`, index 0x68 is
+`preintro`. (The code's indices are one higher than the table's, since entry 0 of the
+code's base is a dummy.)
+
+`FUN_0047c370` opens with two guards:
+
+```
+mov eax,[0x59a654] / test eax,eax / je skip     <- ships as 1, never written anywhere
+mov eax,[0x5f2170] / mov ecx,[eax+0xc]
+test ecx,ecx       / je skip                    <- this one is closed
+mov [eax+0xc],0                                 <- and the next instruction CLEARS it
+```
+
+The field the second guard tests is cleared by the instruction immediately after it.
+**It is a one-shot.** The intro is not disabled and not broken; it has already been
+spent. `0x5f2170` is a widely-used config singleton, so the flag is presumably set
+once at first run and persisted.
+
+`[Intro] Force=1` NOPs that one `je` (6 bytes at guard+23, found by a masked signature
+with the absolutes and both rel32s wildcarded). **Confirmed in game 2026-08-21:** the
+intro plays on every launch and click-to-skip still reaches the main menu normally.
+
+Off by default — playing the intro every launch is a preference, not a bug fix.
+
+`preintro.bik` is **not present** in this install. Predicted that its `BinkOpen` would
+fail; it does not — no `BinkOpen` is issued for it at all, so the game tests for the
+file first and drops it. The missing file is a non-issue.
+
+**Related, found on the way and needed for ROADMAP item 10:** `FUN_00515d30` is
+"play movie #i". It early-outs when `0x61aec4` says a movie is already playing, then
+picks one of three layouts — `videowi4.win` when the entry's `flags[0]` is 0,
+otherwise `videowin.win` if `[0x612fec+0x1c]` is 0 (fullscreen) or `videowi2.win` if
+not. **The 640x480 clamp at `0x515e58` is on the `videowi2` path only** — the
+`videowin` path jumps to `0x515f86` and bypasses it. That is the lever for the
+main-menu window.
+
+---
+
+## 69. The main menu's 640x480 corner — a presentation problem, not a layout one
+
+**Not solved.** Recorded because four theories died here and the survivors are worth
+knowing before anyone tries again.
+
+### 69.1 What it is not
+
+- **Not the window layout.** `videowin.win`'s video widget is `x=0 y=0 w=3200 h=2400`
+  — the full virtual canvas. The layout already asks for the whole screen.
+- **Not the 640x480 clamp at `0x515e58`.** That clamp is real, and `FUN_00515d30` even
+  centres the window itself (`x=(3200-w)/2` via message `0x68`). But the movie probe
+  showed both the intro and the menu take the **`videowin.win` branch, which jumps to
+  `0x515f86` and bypasses the clamp, the SetWH and the centring together**. Patching it
+  to a pillarboxed 1440x1080 changed nothing, as predicted by the probe and not by me.
+- **Not the CFG resolution index.** Writing `0x242 = 4` leaves the menu at 640x480.
+
+### 69.2 What it is
+
+```
+game mode 640x480 | desktop 1920x1080
+```
+
+The game renders a correct 640x480 frame. Wine performs no real mode switch on a
+Wayland compositor, so that frame is presented 1:1 into the corner of a 1080p panel.
+Nothing inside the exe is misplacing anything.
+
+`0x52fafa` is the **only** writer of the screen descriptor in the whole image, and it
+runs with `[0x612fec]+0x18` (the same field as CFG `0x242`) still 0 — the display is
+brought up before the CFG is applied.
+
+### 69.3 Two failed attempts at forcing the mode, and what each taught
+
+**(a) Hook the per-screen assignment** in `FUN_004e9f30`. Installed cleanly and
+**never fired** — install line in the log, zero calls. A clean negative: that write is
+not on the startup path.
+
+**(b) Substitute the slot at its point of use.** Crashed. `FUN_0052e480` reads
+`[settings]+0x18` **three** times — width, height, and the DirectDraw mode set — and
+only the first was patched, producing width 1920, height 480 and a 640x480 mode.
+
+> **Rule earned:** substituting a value at its point of use is only safe when there is
+> exactly ONE use. Count the reads first, or write the field instead.
+
+**(c) Write the field once**, so all three reads agree. Correct, and still fails —
+with **DDERR_INVALIDRECT (#150)**, the same error section 17 chased for weeks. The
+mode cannot be set that early in startup, before the window and surfaces exist.
+
+### 69.4 SOLVED: the startup explicitly ASKS for 640x480
+
+Every attempt above assumed the menu ends at 640x480 by default. It does not.
+`FUN_0047c370` calls the engine's own apply-video-settings routine `FUN_00515450`
+and asks for slot 0 **by name**, twice.
+
+The five settings map 1:1 onto `ecx, edx, arg1, arg2, arg3` -> fields `+0xc, +0x10,
++0x14, +0x18, +0x1c`. Read off a real call rather than derived: at `0x46175c` the game
+loads `ecx=[obj+0xc]`, `edx=[obj+0x10]` and pushes `[obj+0x14]` last, which fixes arg1
+as `+0x14` and therefore **arg2 as `+0x18`, the resolution slot**. `-1` means "keep".
+
+So the fix is one byte per site: `push 0` -> `push <slot>`. It works where the
+bring-up patch could not, because it runs through the engine's own
+release-and-recreate path at a moment the engine considers safe. Both calls sit
+BEFORE the intro's guards, so it applies whether or not `[Intro] Force` is on.
+`[Menu] Slot=4`. **Confirmed in game: menu at 1920x1080, art loads, buttons hit.**
+
+### 69.5 Why it asked: the menu art only exists at 640x480
+
+Forcing the mode surfaced `Error opening pack file item 'setuplb.i16'`. Inventorying
+every asset referenced by all 38 `.WIN` files in the archives plus the exe's own list:
+of ~58 assets, exactly **seven exist only as `.i06`** -- `setuplb`, `setupran`,
+`stpruler`, `hiscore`, `foldmisc`, `foldmis2`, `credloge`: the menu, ranking, hall of
+fame, folder screens and credits. **PopTop authored those at 640x480 and nothing else**,
+which is why the startup asks for slot 0. That is the real reason every earlier
+approach was doomed.
+
+`tools/tropico-artset.py` gained `--src-ext` / `--src-size` / `--missing-only` to
+synthesise them from the `.i06` originals. Identity oracle still **78/78
+byte-identical**. A 3x upscale is soft, but it is information-identical to stretching a
+640x480 buffer to 1080p -- the same pixels, done in the asset pipeline instead of a
+compositor.
+
+### 69.6 SOLVED: the movie blit clamps its destination to the source size
+
+The menu/intro movie renders as three copies across the top ~160 px. That is exactly a
+destination advance of 640 px per source row against a 1920 px screen row.
+
+Bink is innocent. `BinkCopyToBuffer` is called with `pitch=1280 destheight=480` from
+`0x531ef5` in `FUN_00531690`, and **overriding the pitch to 3840 CRASHES** -- proving
+1280 is correct for that destination and Bink fills its buffer properly. The tiling is
+in the game's own blit of that buffer, immediately after the call, which reads screen
+width from `ds:0x60c18c` at `0x531efd`.
+
+Probed rather than guessed: the **scaling** path runs (`[esp+0x30]=1`), with
+destination rect `0..1919 x 0..1079` and movie `640x480`. The machinery is engaged and
+still tiles.
+
+The blit then clamps its DESTINATION extent down to the SOURCE extent, at `0x532063`
+(height) and `0x532073` (width):
+
+```
+mov edx,[esp+0x1c]   ; destination width = 1920
+sub ecx,edi          ; source available  = 640
+cmp edx,ecx / jl keep
+mov [esp+0x1c],ecx   ; destW = 640
+```
+
+Correct for a 1:1 copy, fatal for a magnifying one, and **invisible at 640x480 where
+the two are equal** -- the §26/§30 family again. It accounts for the picture exactly:
+the destination row remainder was computed as `screenW - destW = 0` BEFORE the clamp,
+so afterwards the loop writes 640 px per row and advances by 0. Rows lay end to end,
+three per screen row, and 480 source rows land in 160 screen rows.
+
+The inner loop steps the source with 16.16 fixed-point increments derived from the
+source/destination ratio (`0x532006`, `0x53202c`), so it is a real scaler that simply
+never got to run at a magnifying ratio. `[Menu] FixMovieScale=1` turns both `jl` into
+`jmp`. **Two bytes. Confirmed in game: intro and menu correct at 1920x1080.**
+
+Note the owner's hypothesis -- that this was an aspect-ratio problem needing an
+upscaled movie -- was worth testing and was wrong: a wrong aspect stretches, it cannot
+duplicate an image. Tiling is always a stride/extent bug. Re-encoding the .bik files
+would also not have helped, because the game allocates `movieW*movieH*2` and Bink
+scales at most 2x; the engine's own scaler was the right tool and was already present.
+
+### 69.7 Where that leaves it
+
+The remaining options are all outside the exe: an upscaling compositor (gamescope —
+not packaged for this system, would need building or a flatpak runtime), a DirectDraw
+wrapper that scales (dgVoodoo2 — a third-party binary, which sits badly with "a patch,
+not a redistribution"), or accepting the 640x480 menu.
+
+A fourth, unexplored: force the mode change **after** the menu exists rather than
+during bring-up. That avoids #150 by construction but needs a trigger point.
