@@ -5052,3 +5052,88 @@ rather than tuned.
 
 Pre-existing, not introduced. The menu never ran above 640x480 until §69, so this path
 had never been exercised at a non-stock resolution.
+
+## 71. SOLVED: the build-menu portrait — 182 assets the name harvest never saw
+
+The circular building portrait in the build menu sat flush against the left of its stone
+ring and left an unpainted crescent down the right, through which the terrain showed
+(ROADMAP item 8, reported with a screenshot 2026-08-21). It is not an offset and not a
+rect: **the portrait is drawn at its stock 1600x1200 size into a hole that is now
+1920x1080.**
+
+### 71.1 Measured off the screenshot, not inferred
+
+The owner's two crops carry enough geometry to settle it without a run.
+
+`int_main.i16` sprite 0 (the bottom bar) holds the ring's hole as a transparent ellipse.
+Stock it is 269 px across; the regenerated 1920x1080 bar has it at **323 x 242**, top-left
+at screen (1547, 670) — the ellipse's right vertex is therefore at x=1869, and matching
+that vertex to the crop puts the crop origin at (1476, 594). Every other measurement then
+falls out of the same origin, so nothing below is fitted independently:
+
+| feature | measured in the crop | screen |
+|---|---|---|
+| hole, right vertex | x=393, y=194 | 1869 |
+| hole, left edge | x=71 | 1547 |
+| portrait, right vertex | x=342 | 1818 |
+| portrait, left edge | x=70 (stone/art seam) | 1546 |
+
+So the portrait is **left-flush with the hole and 51 px short on the right**: it is ~276 px
+wide where the hole is 323. Fitting the visible arc discriminates cleanly — a 277-wide disc
+predicts the arc within 2-6 px at every sampled row, a correctly-scaled 332-wide one is out
+by 30-50 px. Shifting was ruled out by the left edge: a displaced 332 disc would overhang
+the stone by 55 px, and the seam is where the hole starts.
+
+> When a picture shows a gap on one side, measure the OTHER side before calling it an
+> offset. Flush-on-one-side is a size symptom; a real offset shows on both.
+
+### 71.2 The cause: `brNN.imm`, and only `br00` is written down anywhere
+
+The portraits are `br00.i16` … `br205.i16`, **183 assets, one per building type**, each a
+single 280x280 sprite (`br01.i12` is 224x239 — 0.800 x 0.853, exactly §11's per-resolution
+ratios, so they are ordinary art in all five classes).
+
+§48.2's harvest reads names out of the exe strings and the `.WIN` files. `br00.imm` and
+`brempty.imm` appear in `MAINWIN.WIN` because they are the idle ring; the other 182 names
+the game **builds at runtime from the building index**, so they appear in neither source.
+They were never regenerated, the loose-file override never covered them, and the game fell
+back to the archived 1600x1200 art — 280x280 dropped into a 323x242 hole, anchored at
+widget 3's top-left, which is precisely the picture.
+
+`MAINWIN.WIN` widget 3 (class 0x10, rect 2570,1480,555,555 virtual) is the ring holder and
+widget 8's siblings 6/13/15 carry no art name — the portrait's name is assigned at runtime,
+which is the same fact seen from the layout side.
+
+### 71.3 The fix: a third name source
+
+`tools/tropico-artset.py` gains `numeric_family()`: any harvested name ending in digits is
+expanded over its numbered family, and a candidate is kept only if the archive holds it.
+Deliberately narrow — run against the shipped archives it adds **exactly the 182 missing
+`brNN` and nothing else**; the point-size-suffixed font names (`comi07`, `copp10`,
+`cour03`) have no such siblings, so they are untouched.
+
+Verified:
+
+* `--identity` now regenerates **260 assets byte-identical** at 1600x1200 (was 78), so the
+  182 newcomers round-trip exactly through the §62 codec.
+* At 1920x1080 `br05.i16` comes out **336 x 252** — 560 virtual units through the real
+  screen size, which covers the 323x242 hole with the same margin the stock set had.
+* All 85 previously-installed assets regenerate **byte-identical**; the change is purely
+  additive. 267 files, 34 MB.
+
+**Not yet confirmed in game** — the geometry is measured, the picture is not.
+
+### 71.4 What the same scan says is still missing
+
+Art blobs can be recognised without their names: magic `0x27D8` and `region_start[0] ==
+region_start[6]` (one mip level) picks out **1383 UI-art entries** across the four archives.
+78 named assets x5 + 7 menu-only + 183 `brNN` x5 accounts for 1307 of them. **76 entries
+remain unnamed**, and their shapes say what they are: several 71-sprite and 41-sprite
+families whose dimensions climb in font-like steps, twenty 32x32 sprites in `px2.PK2`, and
+ten 640x480 single-sprite images in `px.PK2`. Fonts are left stock by design (§63.5), so
+most of this is probably inert — but it is the honest residual, and it is the reason to
+prefer a structural inventory over a name harvest next time.
+
+Note the hash cannot be walked backwards: `h = h*0x41C64E6E + toupper(c) + 0x3039` and
+`0x41C64E6E` is even, so it is not invertible mod 2^32 and a name's suffix cannot be
+stripped off a hash. Identification has to come from the blob, not the index.

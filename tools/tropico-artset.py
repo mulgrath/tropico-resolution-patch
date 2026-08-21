@@ -265,6 +265,35 @@ def rescale(d, to_w, to_h, from_w=STOCK_W, from_h=STOCK_H, verbose=False,
     return bytes(out)
 
 
+def numeric_family(names, idx):
+    """Expand every harvested name that ends in digits over its whole numbered family.
+
+    THIRD source, and it is not optional either. Section 48.2 recovered names by reading
+    them out of the exe and the .WIN files, but a name the game BUILDS at runtime appears
+    in neither. The build-menu building portraits are `brNN.imm`, one per building type,
+    and only `br00.imm` is written down anywhere -- it is the idle ring in MAINWIN.WIN.
+    The other 182 were therefore never regenerated, so at a non-stock mode the game fell
+    back to the archived 1600x1200 art: a 280x280 disc dropped into the 323x242 hole the
+    regenerated bottom bar now has, left- and top-anchored, leaving an unpainted crescent
+    down the right-hand side.
+
+    The rule is deliberately narrow: alpha prefix + trailing digits, and a candidate is
+    kept only if the archive actually holds it. Run against the shipped archives it adds
+    exactly the 182 missing `brNN` and nothing else -- the point-size-suffixed font names
+    (`comi07`, `copp10`, `cour03`) have no such siblings.
+    """
+    out = set()
+    for n in names:
+        m = re.match(r'^([A-Za-z_]+)(\d+)\.imm$', n)
+        if not m:
+            continue
+        for i in range(1000):
+            cand = '%s%02d' % (m.group(1), i)
+            if pk2.name_hash(cand + '.i16') in idx:
+                out.add(cand + '.imm')
+    return out
+
+
 def asset_names(exe, idx, src_ext='i16', missing_only=False, out_ext='i16'):
     """Every .imm name we can recover, that has an .i16 entry in an archive.
 
@@ -283,6 +312,7 @@ def asset_names(exe, idx, src_ext='i16', missing_only=False, out_ext='i16'):
                 continue                      # not a .WIN record
             for m in re.finditer(rb'[A-Za-z0-9_\-]{1,20}\.imm', d):
                 names.add(m.group(0).decode())
+    names |= numeric_family(names, idx)
     out = []
     for n in sorted(names):
         base = n[:-4]

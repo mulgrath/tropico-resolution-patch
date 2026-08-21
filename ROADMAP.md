@@ -188,12 +188,14 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
    unit conversions and the procedure, so it is a dialling job, not a research one.
    Deriving them from the scale ratio would remove the pass entirely; not attempted.
 
-8. **Build-menu preview offset.** The circular building preview in the build menu sits a
-   few pixels left of its stone-ring surround, leaving an unpainted sliver at the right
-   edge through which the terrain shows. Reported with a screenshot 2026-08-21. Not yet
-   investigated; expected to be the §11/§26 family (a rect computed at the stock width).
-   Needs the offset measured at two resolutions to tell a fixed pixel error from a
-   scale-proportional one.
+8. ~~**Build-menu preview offset.**~~ **SOLVED — §71**, and it was a size, not an offset.
+   The portrait is left-flush with its ring and 51 px short on the right because it is
+   drawn at the stock 280x280 into the regenerated 323x242 hole. Cause: the portraits are
+   `brNN.imm`, 183 of them, and only `br00` is written down anywhere — the rest are named
+   at runtime, so §48.2's exe+`.WIN` harvest never saw them and they were never
+   regenerated. `tropico-artset.py` gains `numeric_family()`, a third name source; the
+   identity run now covers 260 assets byte-identical instead of 78. Geometry verified,
+   **not yet confirmed in game**. §71.4 records 76 UI-art entries that are still unnamed.
 
 9. ~~Startup movie does not play.~~ **SOLVED AND CONFIRMED IN GAME — §67, §68.**
    Not broken and not disabled: the intro is a **one-shot**. `FUN_0047c370` (reached
