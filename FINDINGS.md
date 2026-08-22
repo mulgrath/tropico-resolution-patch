@@ -5937,3 +5937,64 @@ With the 4K mode refused, the picker chose **1600x900** on a 2560x1440 screen ra
 than the panel's own mode. Not investigated -- the probe was about the clamp -- but the
 fallback looks more conservative than it needs to be, and `slot 4 -> 1600x900` on a
 1440p display is worth a second look before anyone trusts the fallback path.
+
+## 82. The world-painter size gate skips its own fix on any mode wider than 3200
+
+The world painter's stub is entered on every draw through the world's call site, and a
+size gate decides whether to apply the four writes:
+
+```asm
+cmp [ecx+0x10], guard     ; the CURRENT image pixel width
+jb  skip                  ; below the guard? apply nothing
+```
+
+The gate exists for a good reason (s46): the zoomed detail preview in the corner is
+drawn through the same call, and `Force=1` was overwriting *its* size with the full mode
+and displacing it to the north-west. The guard defaulted to **half the mode width**,
+justified in the comment as "the main viewport is always 2666/3200 = 83% of the mode
+width, and the preview is a small panel, so half the screen separates them at every mode
+without knowing either stock value."
+
+**That premise is false, and it is false because of the very bug the stub exists to fix.**
+`[ecx+0x10]` at gate time is the value the engine computed *before* the patch touches it
+-- the stock **1600**, whatever the mode. So the gate does not ask "is this viewport 83%
+of the screen"; it asks `1600 >= m.w/2`, which is true only while `m.w <= 3200`.
+
+| mode | guard = m.w/2 | 1600 >= guard | outcome |
+|------|---------------|---------------|---------|
+| 1920x1080 | 960  | yes | fix applies |
+| 2560x1440 | 1280 | yes | fix applies |
+| 3200x1800 | 1600 | yes (exactly) | fix applies |
+| **3440x1440** | **1720** | **no** | **stock 1600x864** |
+| **3840x2160** | **1920** | **no** | **stock 1600x864** |
+
+### 82.1 Why it hid for so long
+
+The install log says the patch applied, because that is logged when the stub is
+*written*. The gate rejects at *draw* time, and nothing logs that. A run therefore
+reports `world painter ... viewport width 1600 -> 3840` and then paints 1600x864.
+
+It also cannot be seen on any panel narrower than 3200. Measured on a 3840x2160 nested
+display (s83): the world painted exactly **1600x864** of a 3840x2160 screen -- terrain
+right edge at x=1599, bottom edge at y=864 on every sampled column -- with the remainder
+showing uninitialised surface speckle. Pinning `[WorldFix] Guard=1600` in the ini, one
+variable and no rebuild, made the same run paint to x=3838/y=2159.
+
+**This is not a 4K curiosity.** Every mode wider than 3200 is affected, including the
+3440x1440 and 3840x1600 ultrawides that people own today.
+
+### 82.2 The fix
+
+```c
+UINT auto_guard = (UINT)m.w / 2;
+if (auto_guard > WORLD_STOCK_W) auto_guard = WORLD_STOCK_W;   /* WORLD_STOCK_W = 1600 */
+```
+
+Cap the guard at the stock width it is compared against. Every mode <= 3200 computes a
+bit-for-bit identical value, so nothing previously verified changes; wider modes stop the
+guard climbing past the value it is testing. The preview panel s46 exists to exclude is
+far narrower than 1600, so it is still filtered.
+
+Verified on the compiled default with no ini override: `gated on viewport width >= 1600`,
+world painted to the last column of every sampled row and the last row of every sampled
+column at 3840x2160.

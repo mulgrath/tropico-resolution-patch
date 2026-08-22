@@ -247,6 +247,9 @@ static const DWORD TABLE_SIG[10] = {640,480, 800,600, 1024,768, 1280,1024, 1600,
  *   s7   the mode must actually exist, or the game cannot set it.
  */
 #define ART_WIDTH_CAP 1600
+/* s42/s82: the world image's stock pixel width. The size gate compares against this
+ * value, so the gate's threshold must never exceed it. */
+#define WORLD_STOCK_W 1600
 
 typedef struct { DWORD w, h; } mode_t;
 
@@ -619,9 +622,32 @@ static void apply_patches(void)
              * Height out; a silent half-fix the moment it stopped doing so. */
             if (!nh) nh = (UINT)m.h;
             int force = GetPrivateProfileIntA("WorldFix", "Force", 1, ip);
-            /* -1 = auto (half the mode width); 0 = no gate at all. */
+            /* -1 = auto; 0 = no gate at all.
+             *
+             * s82: auto was plain m.w/2, justified as "the main viewport is always
+             * 2666/3200 = 83% of the mode width".  That premise is false, and it is
+             * false BECAUSE OF THE BUG THIS PATCH FIXES: the value the gate compares
+             * (`[ecx+0x10]`, the image pixel width) is the STOCK 1600 at gate time,
+             * whatever the mode.  So the gate really asks `1600 >= m.w/2`, which
+             * holds only while m.w <= 3200.  Wider than that and the gate skips its
+             * own fix and the terrain stays 1600x864 -- while the install log still
+             * says the patch applied, because that is logged at install time and the
+             * gate rejects at draw time.
+             *
+             * Measured at 3840x2160 (s82): guard 1920 > 1600, world painted
+             * 1600x864 of a 3840x2160 screen.  With the guard pinned to 1600 the
+             * same run painted 3839x2159.  This is NOT 4K-only: every mode wider
+             * than 3200 is affected, which includes 3440x1440 and 3840x1600
+             * ultrawides that people actually own.
+             *
+             * Capping at the stock width keeps every mode <= 3200 bit-for-bit
+             * identical to what was verified before, and stops the gate climbing
+             * past the very value it is testing.  The zoomed detail preview this
+             * gate exists to exclude (s46) is far narrower than 1600. */
             int gi = GetPrivateProfileIntA("WorldFix", "Guard", -1, ip);
-            UINT guard = force ? (gi < 0 ? (UINT)m.w / 2 : (UINT)gi) : 0;
+            UINT auto_guard = (UINT)m.w / 2;
+            if (auto_guard > WORLD_STOCK_W) auto_guard = WORLD_STOCK_W;
+            UINT guard = force ? (gi < 0 ? auto_guard : (UINT)gi) : 0;
             /* Force writes unconditionally, so Width defaulting to the mode is
              * exactly right and is not a no-op. */
             if (force && nw == mw) mw = 0;
