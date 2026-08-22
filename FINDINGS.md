@@ -5551,28 +5551,44 @@ error number to be decoded.
 §74 and §75 chased window placement from inside the process and lost. This section
 records what replaced it, and the two measurements that decided it.
 
-### 76.1 Placement follows the PRIMARY, not the mouse and not the terminal
+### 76.1 CORRECTED: placement follows the LAUNCH CONTEXT; size follows the primary
 
-The §74.5 design read the pointer's output and sized the game for that monitor. Measured,
-it is the wrong signal:
+This section first concluded "placement follows the primary". **That was wrong, and the
+way it was wrong is the lesson.** The evidence for it was:
 
 ```
 pointer on DP-3, launcher asked for 2560x1440
-  [*] desktop as Wine sees it: 1920x1080     <- it opened on HDMI, the PRIMARY, anyway
-```
-
-and with the primary actually moved:
-
-```
+  [*] desktop as Wine sees it: 1920x1080     <- opened on the 1080p PRIMARY anyway
 DP-3 made primary
-  [*] desktop as Wine sees it: 2560x1440     <- agrees, every time
+  [*] desktop as Wine sees it: 2560x1440     <- agrees
 ```
 
-So the rule is **Tropico runs on your primary monitor**, and `--monitor` has to *move* the
-primary rather than merely read another monitor's size. Reading without moving is what
-produced a 2560x1440 game inside a clamped 1920x1080 desktop: intro audio over a black
-screen. Pointer detection was deleted rather than kept as a fallback — a signal that is
-right only when it agrees with the primary is not a fallback, it is a coin toss.
+Both runs were **headless**, started from a background shell with no window on any
+monitor. With no launch context the compositor falls back to the primary — so the
+experiment could only ever produce the answer it produced. It measured the test rig.
+
+The owner's report is the control that breaks it: with the primary on the 1080p monitor
+and the game started from the 1440p one, **it opened on the 1440p monitor at 1080p**.
+Placement went to the launching screen; only the size came from the primary.
+
+So there are two mechanisms, not one:
+
+| | decided by |
+|---|---|
+| which monitor the window opens on | the launch context — the terminal, or the screen whose menu was clicked |
+| what size the game can be | the PRIMARY, because Wine measures only that (§18) |
+
+They disagree exactly when the main monitor is not the primary, and the symptom is the
+quiet one: right screen, wrong resolution. The launcher therefore reads which monitor it
+is being launched from and **makes that one primary for the run**, restoring the previous
+primary on exit. Pointer position is the proxy for launch context, and it was deleted once
+on the strength of the headless result before being restored.
+
+> **Rule earned:** a measurement taken by the automation is not a measurement of the
+> user's situation. Headless runs have no window, no focus and no pointer context, so any
+> conclusion about where a window *goes* is about the harness. TESTING.md already said
+> "keep one untouched known-good path"; this adds: when the question is about the desktop
+> environment, the human's run IS the control.
 
 ### 76.2 The virtual desktop removes the failure mode instead of fighting it
 

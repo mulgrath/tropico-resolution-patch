@@ -34,11 +34,15 @@ Launching from one monitor while another is primary is the DirectDraw **#150** e
 
 ### Which monitor it runs on
 
-**Tropico runs on your primary monitor.** That is measured, not a preference: the window
-follows the primary, not the mouse and not the terminal you started it from
-(`FINDINGS.md` §76). The game runs inside a borderless, fullscreen Wine virtual desktop
-sized to that monitor, which is also why the DirectDraw **#150** error cannot occur — the
-game sees a single screen with origin (0,0).
+**Launch it from the monitor you want to play on.** The desktop opens the window on the
+screen you started it from, while Wine can only size the game for the *primary* monitor —
+so the launcher makes the monitor you launched from primary for that run, and puts your
+primary back afterwards (`FINDINGS.md` §76). Without that, a main monitor that is not the
+primary gives you the right screen at the wrong resolution.
+
+The game runs inside a borderless, fullscreen Wine virtual desktop sized to that monitor,
+which is also why the DirectDraw **#150** error cannot occur — the game sees a single
+screen with origin (0,0).
 
 To play on a different monitor for one launch:
 

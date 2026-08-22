@@ -6,12 +6,20 @@
 #   tropico --list           show monitors, modes and installed art sets
 #   tropico --log            capture a trace next to the game, for bug reports
 #
-# THE RULE: TROPICO RUNS ON YOUR PRIMARY MONITOR.
+# THE RULE: LAUNCH IT FROM THE MONITOR YOU WANT TO PLAY ON.
 #
-# Measured, not assumed (FINDINGS 76): the window follows the PRIMARY monitor, not
-# the mouse and not the terminal it was started from. So the primary is what the
-# game is sized for. --monitor makes another monitor primary for one run and puts
-# it back afterwards.
+# Two different things decide the outcome and they must be made to agree
+# (FINDINGS 76):
+#
+#   PLACEMENT  the desktop opens the window on the monitor you launched from --
+#              the terminal, or the screen whose applications menu you clicked.
+#   SIZE       Wine measures only the PRIMARY monitor, so that is what the game
+#              can be sized for.
+#
+# Left alone they disagree the moment your main monitor is not the primary: the
+# game opens on the right screen at the wrong resolution. So the launcher reads
+# which monitor you are on and makes THAT one primary for the run, restoring your
+# primary afterwards. --monitor overrides the choice.
 #
 # The game runs inside a BORDERLESS Wine virtual desktop sized to that monitor,
 # with the artwork generated for the same size.
@@ -51,7 +59,7 @@ while [ $# -gt 0 ]; do
     --monitor|-m) MONITOR="${2:-}"; shift 2 ;;
     --log)        LOG=1; shift ;;
     --list|-l)    LIST=1; shift ;;
-    --help|-h)    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --help|-h)    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "!! unknown option '$1' (try --help)" >&2; exit 1 ;;
   esac
 done
@@ -83,6 +91,12 @@ restore_primary() {
   _p="$RESTORE_PRIMARY"; RESTORE_PRIMARY=""
   xrandr --output "$_p" --primary 2>/dev/null || true
 }
+# Default to the monitor the pointer is on -- the best available proxy for "the
+# screen this was launched from", and the thing that was missing when the game
+# opened on the right monitor at the primary's resolution.
+if [ -z "$MONITOR" ]; then
+  MONITOR="$(tropico_pointer_output || true)"
+fi
 if [ -n "$MONITOR" ]; then
   tropico_outputs | awk -v o="$MONITOR" '$1==o{f=1} END{exit !f}' \
     || fail "'$MONITOR' is not a connected monitor. Run 'tropico --list' to see them."
