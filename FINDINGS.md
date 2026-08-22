@@ -5998,3 +5998,104 @@ far narrower than 1600, so it is still filtered.
 Verified on the compiled default with no ini override: `gated on viewport width >= 1600`,
 world painted to the last column of every sampled row and the last row of every sampled
 column at 3840x2160.
+
+## 83. Testing a mode wider than any panel you own: the nested-X rig
+
+s81 established that a Wine virtual desktop cannot exceed the host panel. The way
+around it is not to defeat the clamp but to remove what it clamps against: give Wine a
+display server that genuinely is that size.
+
+```
+Xephyr :N -ac -screen 3840x2160 -softCursor
+DISPLAY=:N LIBGL_ALWAYS_SOFTWARE=1 wine explorer /desktop=Tropico,3840x2160 Tropico.EXE
+```
+
+`Xephyr` is a nested X server: a real X display rendered into a window. On `:N` the
+physical screen IS 3840x2160, so Wine has nothing to clamp to and reports
+`desktop as Wine sees it: 3840x2160`.
+
+The window is 4K on a smaller panel, so only a corner is visible -- which does not
+matter, because `import -window root -display :N` captures the **whole framebuffer**
+regardless of what is on screen. That capture, not the window, is the point of the rig.
+`-softCursor` draws the pointer into the framebuffer so cursor alignment is captured too;
+a hardware cursor is invisible to `import`.
+
+### 83.1 What it tests, and what it cannot
+
+**Tests honestly:** art sets, HUD geometry, world extents, clipping, text overhang,
+VText dials -- everything positional. This is how s82 was found and fixed.
+
+**Cannot test:** anything about real graphics hardware. There is no GPU behind a nested
+server, so GL runs on llvmpipe. Two consequences, both measured (s84): it is far slower
+than real hardware, and every texture lives in the win32 process's 2-3 GB address space
+instead of in VRAM.
+
+### 83.2 What 4K actually looks like
+
+At 3840x2160, in **Software 3D**: the menu renders correctly, the HUD bar spans the full
+width, and after s82 the world paints to the last column of every row and the last row of
+every column. The art pipeline generalises to 4K with no changes -- `--stage 3840 2160`
+produced the same 267 files as every other mode.
+
+Not established: the VText dials (`no dials for 3840x2160`; 1920x1080 is still the only
+dialled mode), and Hardware 3D on real 4K hardware, which nobody here owns.
+
+**Honest status: 4K is promising, not supported.**
+
+## 84. The Hardware 3D toggle crash is the rig, not the game -- and it needed both halves
+
+Toggling **Hardware 3D -> Software 3D -> Hardware 3D** inside the rig crashes:
+
+```
+err:d3d:wined3d_debug_callback "GL_OUT_OF_MEMORY in glBufferStorage"
+err:d3d:wined3d_debug_callback "GL_INVALID_VALUE in glMapBufferRange(offset 0 +
+                                length 67108864 > buffer_size 0)"
+err:d3d:wined3d_context_gl_map_bo_address Failed to map bo.
+--> wined3d_streaming_buffer_upload memcpy's 128 bytes to NULL -> page fault
+```
+
+The trace timeline shows why. `wined3d_guess_card` is printed on every adapter init, so
+it marks each device creation:
+
+```
+  3,5,6,10  DEVICE CREATED x4      (startup)
+ 11         resource_unload: tore down resource 01A22FE8 WHILE MAPPED
+1180        DEVICE CREATED
+5718        DEVICE CREATED
+5719        resource_unload: tore down resource 01F763D8 WHILE MAPPED
+6888        DEVICE CREATED         <- the toggle back to Hardware
+8068        GL_OUT_OF_MEMORY
+```
+
+**Every 3D-mode switch recreates the D3D device**, and the teardown is unclean. After
+enough churn the GL allocator cannot obtain a 64 MB chunk, `glBufferStorage` fails,
+the buffer is created at size 0, the map returns NULL -- and **Wine 9.0 does not check
+the map result before memcpy'ing into it** (`dlls/wined3d/buffer.c:1834`). A failed
+allocation becomes a null-pointer write. That is a Wine robustness bug, upstream, not
+ours.
+
+### 84.1 It takes BOTH halves, which is why it was misdiagnosed twice
+
+The obvious readings are each wrong on their own:
+
+- *"4K resource pressure"* -- no. It reproduces at 2560x1440 in the rig. Resolution only
+  decides how many cycles are needed.
+- *"a rig artifact of software rendering"* -- no, not by itself. Hardware 3D runs fine in
+  the rig; only the **toggle cycle** kills it.
+
+It needs device churn AND a renderer with no VRAM. Under llvmpipe every texture is in the
+32-bit process's address space, so the churn exhausts it: a 64 MB allocation failed on a
+machine with **21 GB free**, which is address space, not memory. On real hardware those
+textures are in VRAM and the same churn costs nothing.
+
+**Measured on the real display, no rig: 7+ toggle cycles at 2560x1440, no crash, and far
+smoother.** The rig is the variable.
+
+### 84.2 Not actionable, but worth knowing
+
+Nothing to fix in the mod. Worth recording for two reasons: anyone using the rig will hit
+it and should not spend a day on it, and it is a standing reminder that the rig speaks for
+layout and never for the graphics stack.
+
+One asymmetry to keep in mind: this crash is only *reachable* because s16 makes the game
+accept Hardware 3D at all. Stock, the signed VRAM compare refuses it on any modern card.
