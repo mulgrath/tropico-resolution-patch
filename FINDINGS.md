@@ -5899,3 +5899,41 @@ this whole project exists -- the big art set is the point.
 Making the virtual desktop resize *and* the game follow it would mean a live mode change
 with matching art, i.e. the entire #150 minefield of s74-s76 re-entered at runtime. Not
 worth it for a cosmetic option.
+
+## 81. A Wine virtual desktop cannot be larger than the panel -- Wine clamps it, not the WM
+
+s80 showed the game is indifferent to the X window being a different size from the
+screen. The tempting generalisation: ask for a `3840x2160` virtual desktop on a 1440p
+monitor, pan around it, and test 4K without owning a 4K display. It does not work.
+
+Measured, `wine explorer /desktop=Tropico,3840x2160` on a 2560x1440 primary:
+
+```
+[*] desktop as Wine sees it: 2560x1440
+[x] CONFIGURED MODE DOES NOT FIT. tropico-fix.ini asks for 3840x2160 but the screen
+    this is running on is 2560x1440.
+```
+
+**The distinction that matters:** that number is `GetSystemMetrics(SM_CXSCREEN)`, i.e.
+the size of the *virtual screen Wine built*, not the size of an X window some WM
+resized afterwards. Wine clamped the desktop to the host panel at creation. There is no
+oversized desktop sitting behind the monitor waiting to be panned -- it was never made.
+So s80's lesson does not generalise: the game tolerates a mismatched *X window*, but the
+*virtual screen* is not ours to oversize.
+
+The mod's own fit guard caught this unaided and fell back rather than producing the
+black-screen-with-intro-audio symptom that guard exists to prevent. Working as designed.
+
+**Consequence for testing a resolution larger than any panel you own:** it has to come
+from a display server that really is that size. A nested X server (`Xephyr -screen
+3840x2160`) or a headless one (`Xvfb`) does not clamp, because there the requested size
+*is* the physical size. The cost is that GL goes through llvmpipe, so such a run tests
+LAYOUT -- art sets, HUD placement, VText dials -- and does NOT test the Hardware 3D path
+of s43/s52.
+
+### 81.1 Open question, noticed in passing
+
+With the 4K mode refused, the picker chose **1600x900** on a 2560x1440 screen rather
+than the panel's own mode. Not investigated -- the probe was about the clamp -- but the
+fallback looks more conservative than it needs to be, and `slot 4 -> 1600x900` on a
+1440p display is worth a second look before anyone trusts the fallback path.
