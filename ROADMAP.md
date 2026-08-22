@@ -21,7 +21,7 @@ hand to another person.
 | 1600x900 world render | correct, true 16:9, full screen, no shear — confirmed on both a 1080p and a 1440p panel |
 | 1600x900 HUD chrome | broken — art authored for a 1200-tall screen |
 | 1920x1080 world render | **works** (§44) — full-width terrain and void on Software and Hardware, reduce-shifting either way. Needs `[Resolution] 1920x1080` + `[WorldFix] ObjW=3200`; the auto-picker still will not choose it because `ART_WIDTH_CAP` is 1600 |
-| 1920x1080 HUD chrome | **WORKS — confirmed in game (§63).** `tools/tropico-artset.py` generates the full 79-asset set from the user's own `px.PK2`; delivered as loose `data/*.i16`. Residual: rotated text overhangs ~11%, which is 16:9 geometry, not the pipeline (§63.5). |
+| 1920x1080 HUD chrome | **WORKS — confirmed in game (§63).** `tools/tropico-artset.py` generates the full 79-asset set from the user's own `px.PK2`; delivered as loose `data/*.i16`. Rotated-text overhang, once the residual here, is fixed at every 16:9 mode (§65, §66, §86). |
 | Arbitrary-resolution world render | **works** (§47) — verified at 1920x1080 and 2560x1440, same binary, every renderer. Four writes at `0x526220`. Known-good build archived in `known-good/` |
 | HUD / UI at any non-stock mode | broken in game, but **no longer blocked**. The engine will not scale HUD art by any route (§50/§60/§61), so a derived art set is required — and §62 decoded the `.iNN` packet format, so that set can now be generated at any width from the user's own files. Remaining work is pipeline and verification, not research. |
 | Zoomed detail preview (bottom right) | **fixed** (§47) — was ours, caused by an unguarded write; a size gate separates it from the main viewport at any mode |
@@ -190,9 +190,14 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
    all mode-gated: `BoxH=340 BoxDY=-99 BoxDX=-14` for the tabs, `BldgDH=107 BldgDY=-111`
    for the building panel.
 
-   **Open:** the dials are per-mode. 2560x1440 needs its own pass — the ini carries the
-   unit conversions and the procedure, so it is a dialling job, not a research one.
-   Deriving them from the scale ratio would remove the pass entirely; not attempted.
+   **CLOSED 2026-08-22 — §86.** The dials are no longer per-mode. Scaling the fonts by
+   `H/1080` makes the correction scale with the label, which cancels the virtual-unit
+   conversion exactly, so the same five numbers are right at every 16:9 mode — 1366x768
+   through 4K — and the C gates on aspect instead of on `1920x1080`. Confirmed in game at
+   2560x1440 twice: stock fonts with the dials transported by `1080/H`, and `H/1080`
+   fonts with the 1080p values. 4:3 needs no correction at all. Only a third aspect
+   (16:10) is still stock, and §86.6 carries its predicted set — one probe run to
+   confirm, covering every 16:10 resolution at once.
 
 8. ~~**Build-menu preview offset.**~~ **SOLVED — §71**, and it was a size, not an offset.
    The portrait is left-flush with its ring and 51 px short on the right because it is
@@ -298,12 +303,13 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
     (`13 applied, 0 failed`, identical), a byte-identical swap round trip, and a clean
     uninstall (288 files, nothing left behind, archives untouched).
 
-    **Deriving the `[VText]` dials is a NEGATIVE RESULT, not an open task — §72.4.** The
-    defect scales with the label's own pixel length, which the argument-rewrite hook
-    cannot see, so no formula over the scale ratio is exact for more than one label. The
-    five dials stay measurements and now default ON only at 1920x1080. Any other mode
-    leaves rotated text stock (~11% overhang) and says so in the log and the installer
-    output. The dialling procedure lives in §72.4.
+    **The `[VText]` dials were reopened and CLOSED — §86, correcting §72.4.** 72.4's
+    negative result holds only for a rewrite exact for *every* label; the dials really do
+    stay hand-fitted measurements. But transporting that compromise to another mode is a
+    different question and it closes, so the "per-mode dialling pass" 72.4 left behind is
+    gone. Fonts now scale by `H/1080` (§86.2), which also fixed glyphs reading undersized
+    above 1080p, and the dials fall out as aspect-only constants. Every 16:9 mode arms
+    from the defaults; 4:3 has no defect; 16:10 is predicted in §86.6 and unconfirmed.
 
 ## Ground rules
 

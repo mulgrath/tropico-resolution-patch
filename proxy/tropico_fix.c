@@ -999,17 +999,40 @@ static void apply_patches(void)
                 fail++;
             } else if (patch_vtext(dy, dx, ch, dy != -1000, dx != -1000, ch != -1000)) ok++;
             else fail++;
-            /* THE FIVE DIALS ARE MEASUREMENTS, NOT A FORMULA (FINDINGS 72).
-             * They were hand-dialled against 1920x1080 and confirmed in game, and
-             * the defect they correct scales with the LABEL's pixel length, which
-             * the hook cannot see -- so no rewrite of these arguments is exact for
-             * every label, and one dialled set cannot be rescaled to another mode.
-             * They are therefore the default ONLY at the mode they were dialled
-             * for. Anywhere else the geometry is left stock: rotated labels
-             * overhang by about 11%, nothing else is affected, and the log says so.
-             * An explicit ini value always wins, which is how a new mode gets
-             * dialled -- the procedure is in FINDINGS 72. */
-            const int vt_dialled = (g_mode_w == 1920 && g_mode_h == 1080);
+            /* THE FIVE DIALS DEPEND ON THE ASPECT ALONE (FINDINGS 86, correcting 72.4).
+             *
+             * 72.4 recorded these as un-derivable. What it actually refuted is a
+             * rewrite that is exact for EVERY label: the defect is
+             *     0.5 * (1 - ys/xs) * label_px
+             * and the hook is handed the box, never label_px, so one rewrite cannot
+             * suit every string. That still stands -- the set below is a compromise
+             * sized for the longest label, and it stays a measurement.
+             *
+             * TRANSPORTING that compromise to another mode is a different question,
+             * and it closes. Two things carry it:
+             *   - ys/xs is 0.75 at EVERY 16:9 mode, so the fractional error is fixed;
+             *   - tropico-setmode.sh scales the fonts by H/1080, so label_px scales
+             *     by f = H/1080 and the correction in pixels scales with it.
+             * The dials are VIRTUAL units and convert to pixels by ys, so a correction
+             * that scales by f needs a dial scaled by f * (1080/H) = 1. The mode term
+             * CANCELS: the numbers below are right at every 16:9 mode, unchanged.
+             *
+             * CONFIRMED IN GAME AT 2560x1440, both branches: stock fonts with the
+             * dials transported by 1080/H, and H/1080 fonts with these values.
+             *
+             * GATED ON ASPECT, not on a mode, and 16:9 only. At 4:3 ys/xs is 1, the
+             * defect is zero and PopTop's geometry is already right. Any other aspect
+             * has a different (1 - ys/xs) and no confirmed set, so it is left stock:
+             * rotated labels overhang, nothing else is affected, and the log says so.
+             * The predicted 16:10 set is in FINDINGS 86 -- one probe run to confirm,
+             * not a dialling pass. An explicit ini value always wins.
+             *
+             * THE ART MUST MATCH. These values assume fonts at H/1080. A set staged by
+             * a pre-86 build has stock fonts and would be mis-dialled by that factor;
+             * tropico-setmode.sh stamps the scale it built at and rebuilds any set
+             * whose stamp is missing or stale, so such a set cannot reach this code. */
+            const double vt_ar = g_mode_h ? (double)g_mode_w / (double)g_mode_h : 0.0;
+            const int vt_dialled = (vt_ar > 1.77 && vt_ar < 1.79);
             g_vt_fix   = GetPrivateProfileIntA("VText", "Fix",   vt_dialled, ip);
             g_vt_fw    = GetPrivateProfileIntA("VText", "FixW",  (int)g_mode_w, ip);
             g_vt_fh    = GetPrivateProfileIntA("VText", "FixH",  (int)g_mode_h, ip);
@@ -1018,9 +1041,10 @@ static void apply_patches(void)
             g_vt_boxdx = GetPrivateProfileIntA("VText", "BoxDX", vt_dialled ?  -14 : 0, ip);
             g_vt_entry = GetPrivateProfileIntA("VText", "Entry", vt_dialled, ip);
             if (!vt_dialled && !g_vt_boxh && !g_vt_boxdy)
-                logf_("[-] [vtext] no dials for %ux%u -- rotated labels left STOCK"
-                      " (they will overhang ~11%%). Dial them per FINDINGS 72.",
-                      g_mode_w, g_mode_h);
+                logf_("[-] [vtext] no dials for %ux%u (aspect %.4f; only 16:9 is confirmed)"
+                      " -- rotated labels left STOCK and will overhang."
+                      " See FINDINGS 86 for the predicted set and how to confirm it.",
+                      g_mode_w, g_mode_h, vt_ar);
             /* Probe now means "log every rotated draw", not "install the hooks":
              * the hooks ARE the fix, so Fix=1 installs them either way. */
             g_vt_log   = GetPrivateProfileIntA("VText", "Probe", 0, ip);
@@ -1032,8 +1056,8 @@ static void apply_patches(void)
                 fail++;
             } else if (GetPrivateProfileIntA("VText", "Probe", 0, ip) || g_vt_fix) {
                 if (g_vt_fix)
-                    logf_("[*] [vtext] fix armed for %dx%d: BoxH=%d BoxDY=%d",
-                          g_vt_fw, g_vt_fh, g_vt_boxh, g_vt_boxdy);
+                    logf_("[*] [vtext] fix armed for %dx%d (aspect %.4f): BoxH=%d BoxDY=%d",
+                          g_vt_fw, g_vt_fh, vt_ar, g_vt_boxh, g_vt_boxdy);
                 if (patch_vtext_probe()) ok++; else fail++;
                 if (g_vt_entry) { if (patch_vtext_entry()) ok++; else fail++; }
             }

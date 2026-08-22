@@ -156,6 +156,19 @@ HORZRES=1920  adapter1 at (1920,-360)   ->   HORZRES=2560  adapter0 at (0,0)
 an EXIT trap and `kill -9` strands the user's desktop on the wrong monitor. The script only
 `exec`s wine when it has nothing to restore, for the same reason.
 
+**The second symptom is silent, and worse.** #150 at least announces itself. But
+`tropico-gog.sh` also treats the primary's mode as authoritative: it rewrites
+`tropico-fix.ini` and swaps `data/` to the primary's art set before launching (§72.2,
+§85). So omitting `TROPICO_DISPLAY` does not merely paint on the wrong screen — it
+**retargets the entire run**, and a fix gated on the mode you meant to test then never
+arms. The log says `fix armed for 1920x1080` when you were testing 1440p, which reads
+exactly like a fix that does not work.
+
+Cost 2026-08-22: one wasted 1440p `[VText]` run, diagnosed only by noticing
+`desktop as Wine sees it: 1280x1024` in a log that should have said 2560x1440.
+**Before interpreting any mode-gated result, read back the mode from the log** — the same
+rule as Trap 2's CFG readback, applied to the display instead of the config.
+
 ## Testing a mode larger than any panel you own — the nested rig
 
 You cannot test 3840x2160 by asking for a 3840x2160 virtual desktop on a smaller screen.

@@ -5214,6 +5214,12 @@ and the new cross-check line.
 
 ### 72.4 NEGATIVE RESULT: the five VText dials cannot be derived from the scale ratio
 
+> **CORRECTED BY §86 (2026-08-22).** The claim below is true only of a rewrite that is
+> exact for *every* label. Transporting the fitted compromise to another mode is a
+> different question and it closes; with the fonts scaled by `H/1080` the mode term
+> cancels entirely and the dials depend on the aspect alone. Both branches confirmed in
+> game at 2560x1440. Read §86 before acting on anything in this subsection.
+
 The plan was to compute `BoxH / BoxDY / BoxDX / BldgDH / BldgDY` from `xs`/`ys` so a new
 mode needs no hand-dialling. **It does not close, and the reason is structural rather than
 a missing measurement.**
@@ -5238,7 +5244,9 @@ virtual against the dialled -99, and closing that gap needs `[VText] Probe=1` ge
 per label per site, which only an in-game session produces. No probe log from §65/§66
 survives in `logs/`.
 
-**So the dials stay measurements**, and the C defaults them **only at 1920x1080** — the
+**So the dials stay measurements** — that much still holds, they are hand-fitted rather
+than evaluated. What §86 changed is that a measurement can be TRANSPORTED. At the time of
+writing the C defaulted them **only at 1920x1080** — the
 mode they were dialled for and confirmed in. At any other mode the geometry is left stock,
 the log says so, and the installer prints the cost: rotated tab and building-panel labels
 overhang by about 11%, and nothing else is affected.
@@ -6196,3 +6204,152 @@ via the same `active_artset_is()` the fallback uses, and names the remedy
 
 A warning that is always wrong is a warning nobody reads, which makes it worse than none:
 it is the line that would have said something real the day the art genuinely did not match.
+
+## 86. The VText dials ARE derivable -- 72.4 refuted a different question
+
+§72.4 recorded the five `[VText]` dials as un-derivable and defaulted them only at
+1920x1080. That conclusion is too broad. What 72.4 actually refuted is a rewrite that is
+exact for *every* label; transporting the fitted compromise to another mode is a separate
+question, and it closes. Both halves were confirmed in game at 2560x1440 on 2026-08-22.
+
+### 86.1 What 72.4 got right, and what it over-claimed
+
+The defect, from §65.3, is
+
+```
+label_top = box_top + 0.5*box_h - c*label_px      c = 0.5 * ys/xs
+correct is c = 0.5, so the label sits 0.5 * (1 - ys/xs) * label_px too low
+```
+
+`c` is fixed by the two scale globals and the hook is handed the box, never `label_px`.
+So no argument rewrite suits every string, and the shipped set remains a compromise sized
+for the longest label. **That part stands.**
+
+The over-claim is "and therefore one dialled set cannot be rescaled to another mode". The
+compromise does not need re-deriving to move -- it needs its *units* converted, and both
+terms in that conversion are knowable:
+
+* `ys/xs = (4/3)/aspect`, so it is **0.75 at every 16:9 mode**. The fractional error is
+  identical at 1080p, 1440p and 2160p.
+* Fonts were byte-identical to PopTop at every art set, so `label_px` was the same number
+  of **pixels** at every mode. The correction was therefore constant in pixels.
+
+The dials are VIRTUAL units and convert by `*ys`, so a pixel-constant correction scales by
+`ys_1080/ys_new = 1080/H`. `BoxH` is absolute (`a[5] = BoxH`) and transports on its delta
+from the stock virtual box height of 256 -- which the §66 entry probe already recorded as
+`w=88 h=256`, and `256*0.45 = 115px` matches the measured 136..250px box at 1080p.
+
+**Confirmed in game at 2560x1440** with `BoxH=319 BoxDY=-74 BoxDX=-11 BldgDH=80
+BldgDY=-83`: "The positions for all vertical text look fine."
+
+### 86.2 The fonts were too small, and fixing that removes the mode term entirely
+
+Glyphs are fixed-size bitmaps; the chrome around them is scaled per mode. At 1920x1080 the
+chrome lands at `(1.20, 0.90)` from the 1600x1200 source and stock glyphs read correctly
+against it -- which is why §63 chose scale 1.0. At 2560x1440 the chrome is `(1.60, 1.20)`
+and the same glyphs are visibly undersized; at 4K they would be half their 1080p relative
+size.
+
+§63's "no single font size fits" was an **aspect** argument -- 4:3 to 16:9 grew one axis
+20% and shrank the other 10%. 1080p to 1440p is a pure resolution change at the same
+aspect, both axes scaling by exactly 4/3, so a uniform 4/3 font scale has no tradeoff to
+split. `tropico-setmode.sh` now generates every set with `--font-scale H/1080`, uniform.
+
+This is not merely cosmetic. Scaling the font by `f` scales `label_px` by `f` and so scales
+the correction by `f`, while the virtual dial still converts by `1080/H`:
+
+```
+dial_new = dial_1080 * f * (1080/H)      and with f = H/1080,  f * (1080/H) = 1
+```
+
+**The mode term cancels.** Every dial reverts to its 1920x1080 value, `BoxH` included
+(`256 + 84*1 = 340`), and the set stops being per-mode at all -- it depends on the
+**aspect alone**. Confirmed in game at 2560x1440 with the 1080p constants: "Yeah, they sat
+fine."
+
+So both branches of one formula now have in-game evidence at the same mode.
+
+### 86.3 Why the font scale is NOT clamped at 1.0
+
+`max(1.0, H/1080)` looks tidier -- a mode at or below the reference keeps PopTop's bytes
+untouched -- and it is wrong. The cancellation above holds only if `f` really is `H/1080`
+at *every* mode. Clamping breaks it below the reference and would silently mis-dial a
+1366x768 laptop panel by 1.4x. The clamp was written and then removed for exactly this
+reason; do not reintroduce it without also teaching the C to read the scale back.
+
+### 86.4 Nearest-neighbour vs box, and the one free case
+
+`tropico-artset.py` gained `--font-filter {box,nn}`. Fonts are 100% alpha-run class
+(§63.4), so either filter is meaningful on them -- an alpha is a number.
+
+* **At 4/3, nearest-neighbour was rejected in game.** It duplicates every third row and
+  column, so stems alternate between one and two pixels: "too pixelated and uneven at the
+  same time." Box-filtered at the same 1.3333 was accepted.
+* **At exactly 2.0 the two filters are byte-identical** -- each destination cell falls
+  wholly inside one source pixel, so the box filter degenerates to selection. Verified on
+  real assets: 2,841,552 glyph pixels across five fonts, zero deviation from an exact
+  pixel-double of stock. **4K therefore gets a lossless font double from the default
+  filter and needs no special case.**
+
+Box is the default. `nn` is kept because it is the right filter for a future integer
+upscale, and because the negative result above is worth being able to reproduce.
+
+### 86.5 The stamp is a cache key, not a note
+
+The dials assume art with fonts at `H/1080`. A set staged by a pre-86 build has stock
+fonts, and pairing it with the current defaults throws every rotated label off by that
+factor. Since `tropico-setmode.sh` only ever generated a set that was *missing*, upgrading
+the mod over an existing install would have reused stale art and silently broken exactly
+what this section fixed.
+
+So the scale each set was built at is stamped to `artsets/<WxH>.font`, and a set whose
+stamp is missing or stale is **rebuilt rather than reused**. Two details matter:
+
+* The stamp is a **sibling** of the set directory, never a file inside it: the set is
+  installed with `cp "$SET"/*` and its manifest is a plain `ls`, so anything living in
+  there would be copied into `data/` and counted as an asset.
+* The stamp is written **after** the `mv`, so an interrupted run leaves an unstamped set,
+  which reads as stale and rebuilds. The same shape as the existing `.tmp` staging rule.
+
+Verified: the pre-86 sets read as unstamped, the rebuild produced byte-identical output to
+the set confirmed in game, and a second run correctly skipped.
+
+### 86.6 Gated on aspect, and what 16:10 would cost
+
+The C gate is now `1.77 < W/H < 1.79` rather than `w == 1920 && h == 1080`, so every 16:9
+mode -- 1366x768, 1600x900, 1080p, 1440p, 2160p -- arms from the defaults. At 4:3 `ys/xs`
+is 1, the defect is zero, and PopTop's geometry is already right.
+
+Any other aspect is left stock and the log says so. The prediction for 16:10, from
+`(1 - ys/xs)` alone:
+
+```
+aspect   ys/xs    1 - ys/xs   vs 16:9
+4:3      1.0000   0.0000      no defect
+16:10    0.8333   0.1667      2/3
+16:9     0.7500   0.2500      1  (confirmed)
+```
+
+so 16:10 is the 1080p set times 2/3: `BoxH=312` (`256 + 84*2/3`), `BoxDY=-66`, `BoxDX=-9`,
+`BldgDH=71`, `BldgDY=-74`. **One probe run to confirm, not a dialling pass** -- and because
+the font rule removed the mode term, that one confirmation covers 1280x800, 1920x1200,
+2560x1600 and 3840x2400 together. Hold the two ROOM dials (`BoxH`/`BldgDH`) as the less
+certain half: room is about the label fitting the box, not about centring, so it is
+plausibly the same factor but it is not the same argument.
+
+### 86.7 What this cost, and the trap that nearly repeated
+
+Two runs to confirm both branches, plus one to confirm the defaults arm with no ini keys
+at all (`fix armed for 2560x1440 (aspect 1.7778): BoxH=340 BoxDY=-99`).
+
+The trap worth recording is not technical. §72.4 was a correct measurement wearing a
+conclusion one size too large: it tested "can the compromise be *computed*" and recorded
+"the dials cannot be *derived*". The second claim blocked the first useful question --
+"can the compromise be *moved*" -- for long enough that it was written into the C as a
+hardcoded mode check. **State what was refuted, not what it felt like.**
+
+A launcher note, learned the same day and written up as the second half of TESTING.md
+Trap 7: testing a mode on a SECONDARY monitor needs `TROPICO_DISPLAY=<output>`. Without it
+`tropico-gog.sh` retargets the whole run to the primary -- ini rewritten, art swapped --
+and the mode-gated dials never arm. That is §74/§77 behaving correctly, and it looks
+exactly like a broken fix.

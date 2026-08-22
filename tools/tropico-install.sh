@@ -270,13 +270,21 @@ echo "   PLAY:               $SELF/tropico   (or the Tropico entry in your appli
 echo "   switch resolution:  $(basename "$SELF")/tropico-setmode.sh W H"
 echo "   what is staged:     $(basename "$SELF")/tropico-setmode.sh --list"
 echo "   undo everything:    $(basename "$0") --uninstall"
-if [ "$ACTIVE" != "1920x1080" ]; then
+# The [VText] dials depend on the ASPECT alone now (FINDINGS 86), so every 16:9 mode
+# arms from the defaults and 4:3 has no defect to correct. Only a third aspect -- 16:10
+# is the realistic one -- is still left stock, and it wants confirming once rather than
+# per mode. Warn on that case only, and say what it would take.
+if ! awk -v a="$ACTIVE" 'BEGIN {
+        split(a, d, "x"); r = d[1] / d[2]
+        exit !((r > 1.77 && r < 1.79) || (r > 1.32 && r < 1.34))
+     }'; then
   cat <<MSG
 
 !! Rotated tab labels will be left STOCK at $ACTIVE.
-   The five [VText] dials are measurements taken in game at 1920x1080, not a
-   formula, so they do not carry to another mode (FINDINGS 72). The cost is an
-   ~11% overhang on the vertical tab and building-panel labels; everything else
-   is correct. Dialling them is a 3-4 run procedure documented in FINDINGS 72.
+   The [VText] dials are confirmed for 16:9, and 4:3 needs no correction at all.
+   $ACTIVE is neither, so its rotated tab and building-panel labels will overhang;
+   everything else is correct. The predicted set for that aspect is in FINDINGS 86
+   and needs ONE probe run to confirm -- and because the dials no longer depend on
+   the resolution, confirming it once covers every mode at that aspect.
 MSG
 fi

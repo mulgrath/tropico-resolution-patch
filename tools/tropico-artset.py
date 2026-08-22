@@ -129,6 +129,21 @@ def box_resample(grid, w, h, nw, nh):
     return out
 
 
+def nn_resample(grid, w, h, nw, nh):
+    """Nearest-neighbour over opacity. Emits through the same alpha path as the box
+    filter, so only the FILTER differs -- the row encoding is the proven one.
+
+    WHY OFFER THIS AT ALL. Box-filtering is the correct antialiaser and is what a
+    DOWNscale needs. Scaling a bitmap font UP is the opposite case: 1440p wants
+    1080/1440 = 4/3 and 4K wants exactly 2.0, and at those ratios area-averaging
+    spreads every stem across a fractional pixel and reads soft. Nearest-neighbour
+    keeps the stems at full opacity. At 2.0 it is lossless -- an exact pixel double.
+    Chosen in game by the project owner at 1440p (section 86)."""
+    cols = pick(w, nw)
+    rows = pick(h, nh)
+    return [[to_alpha(grid[y][x]) for x in cols] for y in rows]
+
+
 def is_font(d, r):
     """True when every pixel in the container is alpha-run class."""
     seen = 0
@@ -164,14 +179,15 @@ def pick(n_src, n_dst):
     return [min(n_src - 1, ((2 * i + 1) * n_src) // (2 * n_dst)) for i in range(n_dst)]
 
 
-def rescale_font_sprite(d, s, nw, nh):
-    """Uniformly scaled, box-filtered. Only valid because every pixel is alpha class."""
+def rescale_font_sprite(d, s, nw, nh, filt=box_resample):
+    """Uniformly scaled. Only valid because every pixel is alpha class -- an alpha is a
+    NUMBER, so either filter may average or select it and still mean something."""
     offs, term = row_offsets(d, s)
     if d[term] != 0xC0:
         raise hs.PacketError('sprite %d: terminator is %#x, not 0xC0' % (s['index'], d[term]))
     grid = [[opacity(e) for e in hs.decode_row(d, offs[y], s['w'])[0]] for y in range(s['h'])]
     out = bytearray()
-    for r, line in enumerate(box_resample(grid, s['w'], s['h'], nw, nh)):
+    for r, line in enumerate(filt(grid, s['w'], s['h'], nw, nh)):
         out += hs.emit_row(line, term=None if r == nh - 1 else 0x00)
     out.append(0xC0)
     return bytes(out)
@@ -206,7 +222,8 @@ def rescale_sprite(d, s, nw, nh):
 
 
 def rescale(d, to_w, to_h, from_w=STOCK_W, from_h=STOCK_H, verbose=False,
-            font_scale=None, font_scale_x=None, font_scale_y=None):
+            font_scale=None, font_scale_x=None, font_scale_y=None,
+            font_filter='box'):
     r = hs.parse(d)
     if not r['exact']:
         raise ValueError('container chain ends at %d, file is %d -- refusing'
@@ -249,7 +266,12 @@ def rescale(d, to_w, to_h, from_w=STOCK_W, from_h=STOCK_H, verbose=False,
             nh = max(1, int(round(s['h'] * ys)))
             nx = int(round(s['x'] * xs))
             ny = int(round(s['y'] * ys))
-            payload = (rescale_font_sprite if font else rescale_sprite)(d, s, nw, nh)
+            if font:
+                payload = rescale_font_sprite(
+                    d, s, nw, nh,
+                    filt=nn_resample if font_filter == 'nn' else box_resample)
+            else:
+                payload = rescale_sprite(d, s, nw, nh)
             hs.check(payload, nw, nh, s['index'])      # oracle, before it leaves the function
             if verbose:
                 print('     [%3d] %4dx%-4d -> %4dx%-4d  y %5d -> %-5d  %8d -> %8d'
@@ -369,6 +391,11 @@ def main():
                          '(section 65)')
     ap.add_argument('--font-scale-y', type=float, default=None,
                     help='vertical-only scale for font assets, overriding --font-scale')
+    ap.add_argument('--font-filter', choices=('box', 'nn'), default='box',
+                    help='resampling filter for font assets. box (default) area-averages '
+                         'and is right for a DOWNscale; nn keeps stems crisp and is right '
+                         'for an upscale -- lossless at an exact 2.0 (section 86). No '
+                         'effect at --font-scale 1.0, where fonts are not resampled.')
     ap.add_argument('-v', '--verbose', action='store_true')
     a = ap.parse_args()
 
@@ -417,7 +444,8 @@ def main():
             fw, fh = (640, 480) if name in MENU_SRC[0] else (src_w, src_h)
             new = rescale(d, w, h, from_w=fw, from_h=fh, verbose=a.verbose,
                           font_scale=a.font_scale,
-                          font_scale_x=a.font_scale_x, font_scale_y=a.font_scale_y)
+                          font_scale_x=a.font_scale_x, font_scale_y=a.font_scale_y,
+                          font_filter=a.font_filter)
         except Exception as ex:
             if isinstance(ex, ValueError) and 'chain ends' in str(ex):
                 # section 26's known exception: glastube has extra sections before and
