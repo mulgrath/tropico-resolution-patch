@@ -91,11 +91,13 @@ restore_primary() {
   _p="$RESTORE_PRIMARY"; RESTORE_PRIMARY=""
   xrandr --output "$_p" --primary 2>/dev/null || true
 }
-# Default to the monitor the pointer is on -- the best available proxy for "the
-# screen this was launched from", and the thing that was missing when the game
-# opened on the right monitor at the primary's resolution.
+# Default to the monitor this is being LAUNCHED FROM -- the active window's screen,
+# which is what the desktop keys on when it decides where to open the game. The
+# pointer alone is not good enough: move the mouse to another monitor without
+# clicking anything and it holds no focus, so the mouse says one screen and the
+# desktop uses another (FINDINGS 77).
 if [ -z "$MONITOR" ]; then
-  MONITOR="$(tropico_pointer_output || true)"
+  MONITOR="$(tropico_launch_output || true)"
 fi
 if [ -n "$MONITOR" ]; then
   tropico_outputs | awk -v o="$MONITOR" '$1==o{f=1} END{exit !f}' \

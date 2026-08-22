@@ -77,42 +77,19 @@ tropico_layout() {
       split(geo, a, "+")
       printf "%s %s %sx%s %s\n", $1, a[1], a[2], a[3], (/ primary /?"primary":"-") }'
 }
-# ------------------------------------------------------- which monitor am I on
-# The xrandr output the pointer is currently over, or nothing if it cannot be
-# determined. Used to honour the rule "the game runs on the monitor you launch it
-# from": the launcher makes that output primary, because Wine measures ONLY the
-# primary (FINDINGS 18) and the compositor decides placement on its own.
+
+# --------------------------------------------------- which monitor am I launched from
+# The output the game is being launched from -- which is what the desktop uses to
+# decide where to open the window, and therefore what the primary has to be made
+# to match (FINDINGS 77).
 #
-# Asks the X server directly through libX11/ctypes rather than shelling out to
-# xdotool, which is not installed here and is refused by many Wayland compositors
-# anyway. Coordinates come back in X root space, which is the same space xrandr
-# reports geometry in, so they can be compared without conversion.
-tropico_pointer_output() {
-  _pos="$(DISPLAY="${DISPLAY:-:1}" python3 - <<'PY' 2>/dev/null
-import ctypes, ctypes.util, sys
-n = ctypes.util.find_library('X11')
-if not n: sys.exit(1)
-x = ctypes.CDLL(n)
-x.XOpenDisplay.restype = ctypes.c_void_p
-d = x.XOpenDisplay(None)
-if not d: sys.exit(1)
-x.XDefaultRootWindow.restype = ctypes.c_ulong
-x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
-r = x.XDefaultRootWindow(d)
-a = ctypes.c_ulong(); b = ctypes.c_ulong()
-rx = ctypes.c_int(); ry = ctypes.c_int(); wx = ctypes.c_int(); wy = ctypes.c_int()
-m = ctypes.c_uint()
-x.XQueryPointer.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
-    ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
-    ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
-    ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
-    ctypes.POINTER(ctypes.c_uint)]
-if not x.XQueryPointer(d, r, ctypes.byref(a), ctypes.byref(b), ctypes.byref(rx),
-                       ctypes.byref(ry), ctypes.byref(wx), ctypes.byref(wy), ctypes.byref(m)):
-    sys.exit(1)
-print("%d %d" % (rx.value, ry.value))
-PY
-)"
+# The point comes from tropico-launchpoint.py: the ACTIVE WINDOW's centre, falling
+# back to the pointer. Not the pointer alone -- the mouse can rest on a monitor that
+# holds no focus, and then the two disagree silently.
+tropico_launch_output() {
+  _sf="$(dirname "${BASH_SOURCE[0]:-$0}")/tropico-launchpoint.py"
+  [ -f "$_sf" ] || return 1
+  _pos="$(DISPLAY="${DISPLAY:-:1}" python3 "$_sf" 2>/dev/null)"
   [ -n "$_pos" ] || return 1
   set -- $_pos
   xrandr --query 2>/dev/null | awk -v px="$1" -v py="$2" '

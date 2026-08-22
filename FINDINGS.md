@@ -5634,3 +5634,39 @@ The desktop entry sets `Terminal=false`, so everything the launcher printed went
 including the reason the game did not start. It now mirrors output to
 `tropico-launcher.log` beside the game and raises real problems through `zenity` when
 there is no tty. A launcher that fails silently is worse than one that fails.
+
+## 77. "Which monitor am I launched from" is the ACTIVE WINDOW, not the pointer
+
+Owner, closing the last hole in §76: *"I can break it very easily by launching from a
+monitor without clicking something on it first. It's not obvious to a user what their
+primary monitor is until they launch."*
+
+That is exactly right, and it is the difference between two signals that usually agree:
+
+| signal | what it means | when it is wrong |
+|---|---|---|
+| pointer position | where the mouse rests | the mouse can sit on a monitor holding no focus — move it across without clicking and it points at a screen the desktop is ignoring |
+| `_NET_ACTIVE_WINDOW` | which window has focus | this is what the desktop itself keys on when placing a new window |
+
+§76 used the pointer, so moving the mouse to a second monitor and launching there
+produced the silent split the owner describes: the launcher sizes for the monitor the
+mouse is on, the desktop opens the game on the focused one.
+
+`tools/tropico-launchpoint.py` reads `_NET_ACTIVE_WINDOW`, translates its centre to root
+coordinates, and falls back to the pointer only when there is no active window. The
+launcher maps that point to an xrandr output and makes it primary for the run.
+
+Two things had to be got right:
+
+* **X errors are fatal by default.** `_NET_ACTIVE_WINDOW` can name a window that has
+  already gone, and `XGetGeometry` on a stale id raised `BadDrawable`, which killed the
+  helper outright. An error handler that swallows them is required, plus an `XSync` and a
+  sanity check on the geometry, because a swallowed error leaves garbage in the outputs.
+* **Window coordinates are parent-relative.** Under a reparenting window manager
+  `XGetGeometry` returns a position inside the frame, not the screen, so
+  `XTranslateCoordinates` against the root is needed before the point means anything.
+
+**Why this is the honest fix rather than another guess:** every earlier attempt tried to
+predict or override where the desktop would put the window. This one asks the desktop
+what it is already looking at, and then aligns the *one* thing we do control — which
+monitor is primary, and therefore what Wine measures — with that answer.
