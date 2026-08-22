@@ -5833,3 +5833,69 @@ when a call moves the engine *out* of windowed mode -- and the first startup cal
 exactly that on purpose (`mov [eax+0x1c],1` at `0x47c388`, then arg3=0). Normal
 behaviour, not a symptom. Worth recording because it is the kind of diff that invites a
 second, wrong fix.
+
+## 80. Can the WM give us a windowed mode the engine cannot? Measured: safe, and useless
+
+s79 took the "Fullscreen" checkbox away because the engine's own windowed path bricks
+the install. The obvious consolation prize: the game already runs inside a Wine virtual
+desktop that `tools/tropico-fullscreen.py` pins with an EWMH `_NET_WM_STATE_ADD
+_NET_WM_STATE_FULLSCREEN` message. Sending `_REMOVE` instead is a one-word change.
+Could the checkbox drive *that* -- a real windowed view, delivered entirely outside
+DirectDraw, with the engine never leaving exclusive fullscreen?
+
+Probed against a live 2560x1440 session on a 4480x1440 dual-head X screen. The probe was
+a throwaway ctypes/libX11 script using the same ClientMessage as the shipping helper.
+
+### 80.1 What actually happens
+
+```
+before    geom=1920,0 2560x1440   screen=4480x1440   state=FULLSCREEN
++0.5s     geom=320,495 1280x720   screen=4480x1440   state=-
+   ...    (stable for the full 5 s sample)
+```
+
+Three things this settles:
+
+**It is safe.** No #150, no crash, no black screen, no lost session. The game kept
+running and a subsequent clean restart was fine. `screen=` never moved, so no XRandR
+mode change occurred, and -- the part that matters -- **Wine did not propagate the X
+window resize into the running game as a display change.** The engine is oblivious. That
+was the failure mode worth fearing and it does not happen.
+
+**It does not scale.** The X window dropped to 1280x720 while the virtual desktop stayed
+2560x1440, and the game did not fit itself to the smaller window. You get a viewport onto
+a game still drawing at full size, not a smaller game. That alone disqualifies it: a
+"windowed" mode showing a fraction of the HUD is worse than no windowed mode.
+
+**The restore size is the WM's, not ours.** 1280x720 at 320,495 is a geometry nothing in
+this project chose -- it is whatever the window manager had recorded as the pre-fullscreen
+state. There is no size we can promise the user.
+
+### 80.2 Two traps for anyone who revisits this
+
+**`Decorated=N` means there is nothing to grab.** The launcher strips Wine's decorations
+so the fullscreen desktop does not arrive wrapped in a title bar. The consequence only
+shows up here: the un-fullscreened window has no title bar and no resize border, so it
+cannot be moved or resized with the mouse at all. Recovery took the WM's keyboard
+move/resize (Alt+arrows). Turning decorations back on to fix that would put a title bar
+around the *fullscreen* case, which is the thing they were turned off for.
+
+**`_REMOVE FULLSCREEN` is a no-op on a MAXIMIZED window.** After the window was rescued
+by keyboard-maximizing it, two further `off` runs changed nothing and printed
+`state=MAXIMIZED_VERT,MAXIMIZED_HORZ`. Maximized is not fullscreen. Any real toggle would
+have to clear both, and read the current state rather than assume it.
+
+### 80.3 Verdict
+
+Not built. The mechanism works and is harmless, but what it produces -- an arbitrarily
+sized, undraggable, unscaled crop -- is not a feature, and wiring it to a control labelled
+"Fullscreen" would trade s79's brick for a different kind of confusion.
+
+The honest windowed mode already exists and needs no code: **launch a smaller art set than
+the monitor.** Then the virtual desktop genuinely is smaller than the screen, and the
+window is a complete, correctly-scaled game. The reason that is unsatisfying is the reason
+this whole project exists -- the big art set is the point.
+
+Making the virtual desktop resize *and* the game follow it would mean a live mode change
+with matching art, i.e. the entire #150 minefield of s74-s76 re-entered at runtime. Not
+worth it for a cosmetic option.
