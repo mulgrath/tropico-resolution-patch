@@ -113,6 +113,7 @@ static int g_slot_log;
 static int g_pin_primary = 1;
 static int g_pin_done;
 static int g_pin_seen_ok;
+static int g_pin_moves;
 static DWORD g_applyvideo_va;
 static DWORD g_vt_ys_va, g_vt_xs_va;
 /* The mode slot 4 was actually set to. Written once, where slot 4 is patched;
@@ -440,6 +441,13 @@ static void apply_patches(void)
         return;
     }
     DWORD table_va = (DWORD)(ULONG_PTR)tbl;
+    /* What Wine believes the screen is, logged UNCONDITIONALLY. Everything the
+     * patch computes is relative to this, and when it is stale -- a wineserver that
+     * outlived an xrandr change caches the old geometry into the prefix -- the
+     * symptom is DDERR_INVALIDRECT on the next launch and nothing says why
+     * (FINDINGS 75). One line here turns that into an obvious diagnosis. */
+    logf_("[*] desktop as Wine sees it: %dx%d", GetSystemMetrics(SM_CXSCREEN),
+          GetSystemMetrics(SM_CYSCREEN));
     logf_("[*] resolution table at 0x%08lx  (GOG build has 0x005a0fa0; a different value here"
           " just means a different build, which is fine)", table_va);
     memcpy(GATE_SIG + 1, &table_va, 4);
@@ -2717,7 +2725,7 @@ static BOOL CALLBACK dump_window(HWND w, LPARAM lp)
     return TRUE;
 }
 
-static void pin_window_to_primary(void)
+static void pin_window_to_primary(const char *src)
 {
     HWND w;
     HMONITOR m, prim;
@@ -2761,9 +2769,9 @@ static void pin_window_to_primary(void)
         static int nlog;
         RECT wr; GetWindowRect(w, &wr);
         if (nlog < 4 || (nlog % 50) == 0)
-            logf_("[!] [display] window %ld,%ld %ldx%ld resolves to the monitor at"
+            logf_("[!] [display] (%s) window %ld,%ld %ldx%ld resolves to the monitor at"
                   " %ld,%ld %ldx%ld, but Wine measures the PRIMARY at %ld,%ld %ldx%ld",
-                  wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
+                  src, wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
                   mi.rcMonitor.left, mi.rcMonitor.top,
                   mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
                   pi.rcMonitor.left, pi.rcMonitor.top,
@@ -2775,7 +2783,17 @@ static void pin_window_to_primary(void)
                  SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     m = MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST);
     if (m == prim) {
-        if (!g_pin_done) { logf_("[+] [display] window moved onto the primary monitor"); g_pin_done = 1; }
+        if (!g_pin_done) logf_("[+] [display] (%s) window moved onto the primary monitor", src);
+        g_pin_done = 1;
+        /* Moving it is not the same as it STAYING moved. Measured (FINDINGS 75):
+         * the fullscreen window is positioned from the surface's PHYSICAL output,
+         * which the compositor owns, so a move can be undone within 100 ms and the
+         * run still fails with #150. Say so once, with the command that does work,
+         * instead of letting the user read an error number. */
+        if (++g_pin_moves == 10)
+            logf_("[x] [display] the desktop keeps putting the window back on the other"
+                  " monitor -- this run will probably fail with DirectDraw #150."
+                  " Launch with:  tropico --exclusive --monitor <that monitor>");
     } else {
         /* Say what went wrong in words. A bare #150 later tells the user nothing,
          * and this failure has exactly one human-facing remedy. */
@@ -2796,7 +2814,7 @@ static DWORD WINAPI pin_thread(LPVOID p)
     for (i = 0; i < 200; i++) {
         HWND w = find_game_window();
         if (w) {
-            pin_window_to_primary();
+            pin_window_to_primary("watcher");
         } else if (!logged_none && i > 20) {
             logf_("  [display] no window of class 'Tropico' after 2 s. Every top-level"
                   " window visible to this process:");
@@ -2812,7 +2830,7 @@ static DWORD WINAPI pin_thread(LPVOID p)
 
 static void __cdecl slotprobe_hook(DWORD *a)
 {
-    pin_window_to_primary();
+    pin_window_to_primary("apply-video");
     /* a[] from the trampoline: 0 flags, 1 EDI, 2 ESI, 3 EBP, 4 ESP, 5 EBX,
      * 6 EDX, 7 ECX, 8 EAX, 9 return address, 10 arg1, 11 arg2, 12 arg3. */
     /* THE FIX (s73). Returning to the main menu from a map re-applies the FRONTEND

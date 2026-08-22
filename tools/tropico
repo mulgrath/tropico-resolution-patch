@@ -4,6 +4,7 @@
 #   tropico                  play
 #   tropico --monitor NAME   run on a specific monitor, just for this launch
 #   tropico --list           show monitors, modes and installed art sets
+#   tropico --exclusive      turn the other monitors off for the run (see below)
 #   tropico --log            capture a trace next to the game, for bug reports
 #
 # THE RULE: LAUNCH IT FROM THE MONITOR YOU WANT TO PLAY ON.
@@ -22,10 +23,11 @@ set -eu
 SELF="$(cd "$(dirname "$0")" && pwd)"
 . "$SELF/tropico-common.sh"
 
-MONITOR=""; LOG=0
+MONITOR=""; LOG=0; EXCLUSIVE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --monitor|-m) MONITOR="${2:-}"; shift 2 ;;
+    --exclusive|-x) EXCLUSIVE=1; shift ;;
     --log)        LOG=1; shift ;;
     --list|-l)    LIST=1; shift ;;
     --help|-h)
@@ -56,10 +58,26 @@ fi
 # primary for this run only and restored on ANY exit, including Ctrl-C -- leaving
 # someone's primary monitor moved because a game crashed is not acceptable.
 RESTORE_PRIMARY=""
+RESTORE_LAYOUT=""
 restore_primary() {
-  [ -n "$RESTORE_PRIMARY" ] || return 0
-  xrandr --output "$RESTORE_PRIMARY" --primary 2>/dev/null || true
-  RESTORE_PRIMARY=""
+  # Outputs first, then primary: turning a monitor back on can reset which output
+  # is primary, so restoring primary before the layout would be undone.
+  if [ -n "$RESTORE_LAYOUT" ]; then
+    OLD="$IFS"; IFS='
+'
+    for _r in $RESTORE_LAYOUT; do
+      IFS="$OLD"; set -- $_r
+      xrandr --output "$1" --mode "$2" --pos "$3" 2>/dev/null || true
+      IFS='
+'
+    done
+    IFS="$OLD"
+    RESTORE_LAYOUT=""
+  fi
+  if [ -n "$RESTORE_PRIMARY" ]; then
+    xrandr --output "$RESTORE_PRIMARY" --primary 2>/dev/null || true
+    RESTORE_PRIMARY=""
+  fi
 }
 if [ -z "$MONITOR" ]; then
   # Not an error if this fails -- on a single-monitor machine, or anywhere the X
@@ -77,6 +95,36 @@ if [ -n "$MONITOR" ] && command -v xrandr >/dev/null 2>&1; then
     RESTORE_PRIMARY="$CUR"
     xrandr --output "$MONITOR" --primary
     echo "== $MONITOR is now primary for this run (was $CUR; it will be put back)"
+  fi
+fi
+
+# --exclusive: turn every OTHER monitor off for the run.
+#
+# This exists because placement cannot be won from inside. Measured (FINDINGS 75):
+# the game's fullscreen window is positioned from the surface's PHYSICAL output,
+# which the compositor owns -- at mode-set time the window is on the right monitor,
+# and it is moved to the other one afterwards, undoing any SetWindowPos within
+# 100 ms. With one output enabled there is nowhere else for it to go.
+#
+# The layout is restored on ANY exit including Ctrl-C. It is still a blunt
+# instrument: windows on the disabled monitor reflow and are not put back.
+if [ "$EXCLUSIVE" = 1 ] && [ -n "$MONITOR" ]; then
+  SAVE=""; OTHERS=""
+  while read -r name mode prim; do
+    [ "$mode" = "-" ] && continue
+    SAVE="$SAVE$name $mode $(xrandr --query | awk -v o="$name" '$1==o{for(i=3;i<=NF;i++) if($i ~ /^[0-9]+x[0-9]+\+/){sub(/^[0-9]+x[0-9]+/,"",$i); sub(/^\+/,"",$i); gsub(/\+/,"x",$i); print $i; exit}}')
+"
+    [ "$name" != "$MONITOR" ] && OTHERS="$OTHERS $name"
+  done <<SAVEEOF
+$(tropico_outputs)
+SAVEEOF
+  if [ -n "$OTHERS" ]; then
+    trap restore_primary EXIT INT TERM HUP
+    RESTORE_LAYOUT="$SAVE"
+    for o in $OTHERS; do
+      echo "== turning $o off for this run"
+      xrandr --output "$o" --off 2>/dev/null || true
+    done
   fi
 fi
 

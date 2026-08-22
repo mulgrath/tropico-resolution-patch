@@ -5482,3 +5482,66 @@ folder, both removed on uninstall.
 Note for anyone regenerating the icon: a `.ico` holds several frames, and converting the
 file as a whole writes **one PNG per frame** (`tropico-patch-0.png`, `-1.png`, ...), not
 the single file the desktop entry names. Pick the largest frame explicitly.
+
+## 75. Switching monitors between sessions: placement is physical, and it is not ours
+
+Reported by the owner: launch on one monitor, exit, launch on the other — **#150**. Launch
+again on the same monitor and it works. Reproduced headlessly, so this is measured.
+
+### 75.1 The hypothesis that was wrong
+
+The obvious reading — "it reuses the previous run's resolution" — is **refuted**. A new
+unconditional log line reports what Wine believes the screen is, and it is correct on
+every run including the first after a switch:
+
+```
+--monitor HDMI-A-5 -> 1920x1080   slot4=1920x1080
+--monitor DP-3     -> 2560x1440   slot4=2560x1440    <- first run on the other monitor
+--monitor DP-3     -> 2560x1440   slot4=2560x1440
+```
+
+The ini, the art set, the slot-4 patch and Wine's own measurement all agree. Nothing is
+stale. That log line is worth keeping for its own sake: everything the patch computes is
+relative to that number, and it was previously only printed on the path that does *not*
+run when the ini names a mode.
+
+### 75.2 What actually happens, with the source tagged
+
+Tagging the pin's two call sites settles it. **Only the watcher ever sees the bad
+window; the apply-video hook never does:**
+
+```
+  [display] game window at 637,142 600x400 is on the primary monitor -- nothing to do
+[!] [display] (watcher) window -1920,360 1920x1080 resolves to the monitor at -1920,360
+              1920x1080, but Wine measures the PRIMARY at 0,0 2560x1440
+[+] [display] (watcher) window moved onto the primary monitor        <- and back again, every 100 ms
+```
+
+At mode-set time the window is **correct**. It is moved afterwards, to the previous
+session's monitor at the previous session's size, and every `SetWindowPos` we make is
+undone within 100 ms.
+
+So the fullscreen window is positioned from the surface's **physical output**, which the
+compositor owns. Wine's logical coordinates are downstream of that, not upstream. This is
+why §74's pinning helps but cannot guarantee: we are arguing with the wrong layer, and no
+amount of moving windows from inside the process will win it.
+
+### 75.3 The fix is to remove the choice, not to win the argument
+
+`tropico --exclusive --monitor NAME` turns every other output off for the run. With one
+output enabled the compositor has nowhere else to put the surface. Measured on the same
+sequence that reproduced the bug: **no mismatch line at all**, and the layout — modes,
+positions and primary — restored exactly afterwards, on `EXIT INT TERM HUP`.
+
+It is deliberately opt-in and deliberately not the default: windows on the disabled
+monitor reflow and are not put back, which is too rude to inflict on someone who only
+has one monitor's worth of problem.
+
+The watcher stays as the cheap defence, and now says the useful thing when it is losing:
+after ten undone moves it prints the exact command that works, rather than leaving a bare
+error number to be decoded.
+
+> **The general shape, and it is the third time this project has met it:** when a value is
+> owned by a layer below you, detect and adapt — do not overwrite and hope. §30 and §47
+> were the same lesson about coordinate spaces; this is the same lesson about window
+> placement.
