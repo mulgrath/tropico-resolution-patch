@@ -6175,3 +6175,24 @@ The same run reported `peak address space: 2639 MB` at **2560x1440** under llvmp
 already near the 2-3 GB ceiling of a 32-bit process, with no 3D-mode toggling at all.
 That is independent corroboration of s84: under a VRAM-less renderer the address space is
 the binding constraint, and it is close to exhausted before any device churn begins.
+
+### 85.5 The art-cap warning, made honest
+
+`ini_override()` warned unconditionally whenever the configured width exceeded
+`ART_WIDTH_CAP`:
+
+```
+ini: WARNING width 2560 exceeds the 1600 art cap; expect an unpainted strip (s11)
+```
+
+It fired on every 2560x1440 launch, and there is no unpainted strip at 2560x1440 -- the
+art set is generated for that exact width. s11's cap describes STOCK art, and the ini
+path has been generating art per mode for a long time.
+
+It now asks the question it meant to ask -- *does `data\` hold art built for this mode?* --
+via the same `active_artset_is()` the fallback uses, and names the remedy
+(`tools/tropico-setmode.sh W H`) rather than only the symptom. Verified absent on a normal
+1440p launch, with the fallback correctly silent on the same run.
+
+A warning that is always wrong is a warning nobody reads, which makes it worse than none:
+it is the line that would have said something real the day the art genuinely did not match.

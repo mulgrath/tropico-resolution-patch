@@ -325,6 +325,29 @@ static int staged_dir(char *out, size_t n, DWORD w, DWORD h)
     return snprintf(out, n, "%s\\artsets\\%lux%lu", g_dir, w, h) > 0;
 }
 
+/* Is data\ currently holding the art generated for exactly this mode? Reads the marker
+ * tropico-setmode.sh writes. Used by two callers that both got this wrong on their own:
+ * the fallback (which must not re-copy a set that is already active) and the s11 art-cap
+ * warning (which must not cry about an unpainted strip when the art fits perfectly). */
+static int active_artset_is(DWORD w, DWORD h)
+{
+    char mk[MAX_PATH], active[64] = {0}, want[64];
+    DWORD rd = 0;
+    size_t wl;
+    HANDLE hm;
+    snprintf(mk, sizeof mk, "%s\\data\\ARTSET-MODE.txt", g_dir);
+    hm = CreateFileA(mk, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                     FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hm == INVALID_HANDLE_VALUE) return 0;
+    ReadFile(hm, active, sizeof active - 1, &rd, NULL);
+    CloseHandle(hm);
+    snprintf(want, sizeof want, "%lux%lu", w, h);
+    wl = strlen(want);
+    /* Terminator required: a bare prefix compare reads "2560x14400" as "2560x1440". */
+    return strncmp(active, want, wl) == 0
+           && (active[wl] == '\0' || active[wl] == '\n' || active[wl] == '\r');
+}
+
 static int mode_is_staged(DWORD w, DWORD h)
 {
     char path[MAX_PATH];
@@ -484,8 +507,14 @@ static int ini_override(mode_t *m)
     if (g_ini_mode_unusable) return 0;   /* does not fit this screen -- see above */
     if (w % 4) { logf_("  ini: width %u is not a multiple of 4 -- ignoring (would shear)", w); return 0; }
     if (collides_with_stock(w)) { logf_("  ini: width %u collides with a stock slot -- ignoring (would be unreachable)", w); return 0; }
-    if (w > ART_WIDTH_CAP)
-        logf_("  ini: WARNING width %u exceeds the %d art cap; expect an unpainted strip (FINDINGS s11)", w, ART_WIDTH_CAP);
+    /* s11's art cap describes STOCK art. Art is generated per mode now, so a width past
+     * the cap only means an unpainted strip when data\ does NOT hold the set built for
+     * this mode. Unconditional, this fired on every 2560x1440 launch -- a mode with no
+     * strip whatsoever -- and a warning that is always wrong is a warning nobody reads. */
+    if (w > ART_WIDTH_CAP && !active_artset_is(w, h))
+        logf_("  ini: WARNING width %u exceeds the %d stock art cap and data\\ holds no"
+              " art set built for %ux%u -- expect an unpainted strip (FINDINGS s11)."
+              " Fix: tools/tropico-setmode.sh %u %u", w, ART_WIDTH_CAP, w, h, w, h);
     m->w = w; m->h = h;
     logf_("  ini override: %ux%u", w, h);
     return 1;
@@ -669,34 +698,14 @@ static void apply_patches(void)
          * thing that can make the fallback look right rather than merely run. On the
          * normal ini path the launcher already matched them and this is skipped. */
         if (g_ini_mode_unusable && g_staged_fallback && mode_is_staged(m.w, m.h)) {
-            char active[64] = {0};
-            char mk[MAX_PATH];
-            DWORD rd = 0;
-            HANDLE hm;
-            snprintf(mk, sizeof mk, "%s\\data\\ARTSET-MODE.txt", g_dir);
-            hm = CreateFileA(mk, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                             FILE_ATTRIBUTE_NORMAL, NULL);
-            if (hm != INVALID_HANDLE_VALUE) {
-                ReadFile(hm, active, sizeof active - 1, &rd, NULL);
-                CloseHandle(hm);
-            }
-            {
-                char want[64];
-                snprintf(want, sizeof want, "%lux%lu", m.w, m.h);
-                /* Require a terminator after the match. A bare prefix compare would
-                 * read "2560x14400" as "2560x1440" and silently skip the switch --
-                 * and a skipped switch looks exactly like a HUD bug, not like a bug
-                 * here. Cheap insurance against the worst failure mode this has. */
-                size_t wl = strlen(want);
-                if (strncmp(active, want, wl) == 0
-                    && (active[wl] == '\0' || active[wl] == '\n' || active[wl] == '\r')) {
-                    logf_("  [artset] %s art is already active -- nothing to switch", want);
-                } else {
-                    int n = activate_artset(m.w, m.h);
-                    if (n)
-                        logf_("[+] [artset] switched data\\ to the staged %s set (%d files)"
-                              " -- the fallback now has art that matches its mode (s85)", want, n);
-                }
+            if (active_artset_is(m.w, m.h)) {
+                logf_("  [artset] %lux%lu art is already active -- nothing to switch", m.w, m.h);
+            } else {
+                int n = activate_artset(m.w, m.h);
+                if (n)
+                    logf_("[+] [artset] switched data\\ to the staged %lux%lu set (%d files)"
+                          " -- the fallback now has art that matches its mode (s85)",
+                          m.w, m.h, n);
             }
         }
         BYTE *chain = find_unique(CHAIN_SIG, sizeof CHAIN_SIG, g_text, g_textlen, "chain");
