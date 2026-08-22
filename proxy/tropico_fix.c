@@ -110,6 +110,9 @@ static void find_applyvideo(void);
 static DWORD WINAPI pin_thread(LPVOID);
 static DWORD g_preset_ret;   /* return address of the preset-apply call site */
 static int g_slot_log;
+static int patch_force_fullscreen(void);
+static int g_force_fs = 1;   /* s79: never let the engine enter windowed mode */
+static int g_fs_clamped;     /* how many times the clamp has fired */
 static int g_ini_mode_unusable;
 static int g_pin_primary = 1;
 static int g_pin_done;
@@ -750,7 +753,13 @@ static void apply_patches(void)
                   " Wine measures (FINDINGS 74)");
             CloseHandle(CreateThread(NULL, 0, pin_thread, NULL, 0, NULL));
         }
-        if (g_menu_slot >= 0 || g_slot_log) {
+        /* s79: windowed mode is the documented failure path (FINDINGS 6), and one
+         * click of the F2 "Fullscreen" box persists it into TROPICO.CFG and bricks
+         * every later launch. On by default; Display ForceFullscreen=0 restores the
+         * stock behaviour, checkbox and all. */
+        g_force_fs = GetPrivateProfileIntA("Display", "ForceFullscreen", 1, ip);
+        if (g_force_fs) { if (patch_force_fullscreen()) ok++; else fail++; }
+        if (g_menu_slot >= 0 || g_slot_log || g_force_fs) {
             if (!g_vt_xs_va || !g_vt_ys_va) {
                 static const BYTE CS[]  = {0x66,0x3d,0x80,0x02, 0x7e,0x0a,
                                            0xc7,0x44,0x24,0x10,0x80,0x02,0x00,0x00};
@@ -2869,6 +2878,30 @@ static void __cdecl slotprobe_hook(DWORD *a)
      * theirs, and ONLY for this call site. A blanket "slot 0 becomes slot 4" would
      * also override a deliberate 640x480 chosen from the F2 settings screen, which
      * is a legal choice arriving through a different caller. */
+    /* THE FIX (s79). arg3 is the windowed flag (+0x1c). The F2 video screen's
+     * "Fullscreen" checkbox is the only thing that ever passes 1, and windowed is
+     * not a mode this game supports in any useful sense -- FINDINGS 6 measured it:
+     * windowed means DDSCL_NORMAL, no SetDisplayMode, and a clipper blit into an
+     * offscreen surface. Unchecking the box mid-game therefore hands DirectDraw a
+     * destination rect for a screen that no longer exists and it answers #150.
+     *
+     * Worse, the flag PERSISTS to TROPICO.CFG file offset 0x246, and the startup
+     * sequence at 0x47c375 reads it and JUMPS OVER the whole video bring-up when
+     * it is set -- including the two slot requests patch_menu_slot() rewrites. So
+     * one click leaves the install permanently at 640x480 with no intro and a #150
+     * on every map load. That is what makes this worth clamping rather than
+     * documenting: the failure outlives the session that caused it.
+     *
+     * Clamp here rather than at the checkbox because every caller funnels through
+     * this one routine, and -1 ("keep") must pass through untouched. */
+    if (g_force_fs && (int)a[12] > 0) {
+        a[12] = 0;
+        if (++g_fs_clamped <= 4)
+            logf_("  [fullscreen] caller %08lx asked for windowed mode (arg3=1)"
+                  " -- forced back to fullscreen (FINDINGS 79)%s",
+                  (unsigned long)a[9],
+                  g_fs_clamped == 4 ? "  [further clamps not logged]" : "");
+    }
     if (g_menu_slot >= 0 && g_preset_ret && a[9] == g_preset_ret && (int)a[11] == 0) {
         a[11] = (DWORD)g_menu_slot;
         if (!g_slot_log) return;
@@ -3202,6 +3235,72 @@ static int patch_menu_slot(void)
     if (!n) { logf_("[x] [menu] startup slot-request sites not found"); return 0; }
     logf_("[+] [menu] %d startup slot request(s) redirected to slot %d"
           " (via the engine's own FUN_00515450 apply path)", n, g_menu_slot);
+    return 1;
+}
+
+/* ------------------------------------------- s79 the windowed flag is a trap
+ *
+ * Unchecking "Fullscreen" on the F2 video screen sets [0x612fec+0x1c] and the
+ * setting is written to TROPICO.CFG at file offset 0x246. From then on the very
+ * first thing the startup sequence does is:
+ *
+ *     mov eax,[0x612fec]
+ *     mov ecx,[eax+0x1c]      ; the persisted windowed flag
+ *     test ecx,ecx
+ *     jne  <past the video setup>      <-- 7 bytes, the two lines above plus this
+ *     push 0 / push 0 / push -1 / ... / call apply-video     ; slot request #1
+ *
+ * So a windowed CFG makes the game skip its ENTIRE video bring-up, including the
+ * two slot requests patch_menu_slot() rewrites. Symptoms, all from this one bit:
+ * a 640x480 menu, no intro movie, and DirectDraw #150 the moment a map loads and
+ * something finally tries to draw at the real mode. Deleting the CFG fixes it,
+ * which is exactly the kind of remedy nobody finds on their own.
+ *
+ * The clamp in slotprobe_hook() stops the flag being SET. This clears one that is
+ * already set, and it is the same 7 bytes: the gate is replaced with the store
+ * that zeroes the field. eax already holds the settings object, and the encoding
+ * is the one the engine itself uses 20 bytes further down, so nothing is invented
+ * here. The old `jne` is gone with it -- which is the point, since the branch it
+ * takes is never one we want.
+ *
+ * Anchored to the startup slot-request signature rather than an address, like
+ * every other patch here, so the Steam build gets it too. */
+static int patch_force_fullscreen(void)
+{
+    static const BYTE SIG[]  = {0x6a,0, 0x6a,0x00, 0x6a,0xff,
+                                0x83,0xca,0xff, 0x83,0xc9,0xff,
+                                0xc7,0x40,0x1c,0,0x00,0x00,0x00, 0xe8};
+    static const BYTE MASK[] = {   1,0,    1,   1,    1,   1,
+                                   1,   1,   1,    1,   1,   1,
+                                   1,   1,   1,0,   1,   1,   1,    1};
+    /* mov ecx,[eax+0x1c] / test ecx,ecx / jne rel8 -- the 7 bytes to overwrite. */
+    static const BYTE GATE[] = {0x8b,0x48,0x1c, 0x85,0xc9, 0x75,0};
+    static const BYTE GM[]   = {   1,   1,   1,    1,   1,    1,0};
+    static const BYTE FIX[]  = {0xc7,0x40,0x1c, 0x00,0x00,0x00,0x00};  /* mov [eax+0x1c],0 */
+    int n = 0;
+    for (SIZE_T i = 12; i + sizeof SIG <= g_textlen; i++) {
+        SIZE_T k = 0;
+        for (; k < sizeof SIG; k++) if (MASK[k] && g_text[i + k] != SIG[k]) break;
+        if (k != sizeof SIG) continue;
+        /* Only the FIRST of the two startup sites carries the gate, and it must be
+         * preceded by the load of the settings object -- otherwise eax is not what
+         * the replacement store assumes and we would corrupt an unrelated struct. */
+        if (g_text[i - 12] != 0xa1) continue;
+        for (k = 0; k < sizeof GATE; k++)
+            if (GM[k] && g_text[i - 7 + k] != GATE[k]) break;
+        if (k != sizeof GATE) continue;
+        if (!poke(g_text + i - 7, FIX, sizeof FIX)) continue;
+        logf_("[+] [fullscreen] startup windowed-gate at %p replaced with"
+              " `mov [obj+0x1c],0` -- a CFG left in windowed mode now heals itself",
+              (void *)(g_text + i - 7));
+        n++;
+    }
+    if (!n) {
+        logf_("[x] [fullscreen] startup windowed-gate not found -- a TROPICO.CFG"
+              " saved in windowed mode will still boot to a 640x480 menu."
+              " Remedy: zero byte 0x246 of app\\data2\\TROPICO.CFG, or delete it");
+        return 0;
+    }
     return 1;
 }
 

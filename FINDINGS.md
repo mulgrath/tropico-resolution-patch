@@ -5759,3 +5759,77 @@ not a workaround -- it is the only way the standard advice can be followed at al
 
 Sources: pop-os/cosmic-epoch#2817 (no GUI setting); pop-os/cosmic-epoch#815 (xrandr by
 hand, lost when monitors are turned off).
+
+---
+
+## 79. The "Fullscreen" checkbox is a one-click brick — and the CFG remembers it
+
+**Reported from play, 2026-08-21.** Unchecking *Fullscreen* on the F2 video screen
+during a game gave an immediate DirectDraw **#150**. Restarting did not recover: the
+menu came up at 640x480, the intro did not play, and loading a map raised #150 again as
+the screen tried to grow. Three symptoms, one bit.
+
+### 79.1 The bit
+
+`FUN_00515450` (apply-video, s69.4) takes five settings, of which **arg3 is `+0x1c`, the
+windowed flag** -- 0 fullscreen, 1 windowed. That is the field s6 identified from traces
+and never followed up on. The checkbox is its only user-facing writer; the write lands at
+`0x5155b8`, and the value is persisted to `TROPICO.CFG` **file offset 0x246** (s5's
+video block, `+0x1c` of `[0x612fec]`).
+
+Why the immediate #150: s6 measured what windowed actually means here -- `DDSCL_NORMAL`,
+**no `SetDisplayMode`**, and a clipper blit into an offscreen surface. Flipping it live
+tears down the exclusive mode the world is being drawn at and leaves every rect the
+engine has already computed pointing at a screen that no longer exists.
+`DDERR_INVALIDRECT` is the honest answer to that (s18).
+
+### 79.2 Why it survives a restart -- the part that matters
+
+The startup sequence's first act, `FUN_0047c370`:
+
+```
+47c370: mov  eax,[0x612fec]
+47c375: mov  ecx,[eax+0x1c]        ; the flag, straight out of the CFG
+47c378: test ecx,ecx
+47c37a: jne  0x47c3b5              ; windowed? skip the ENTIRE video bring-up
+47c37c: push 0 / push 0 / push -1 / ... / call 0x515450    ; slot request #1
+47c39d: push 1 / push 0 / push -1 / ... / call 0x515450    ; slot request #2
+```
+
+A windowed CFG makes the game **jump over its own video setup**, including the two slot
+requests `patch_menu_slot()` rewrites to slot 4 (s69.4). Hence a 640x480 menu with no
+mod in evidence. The intro goes with it: the branch lands on the `0x59a654` gate, which
+the skipped block is what arms. And the map load raises #150 because nothing ever set a
+mode. Every symptom falls out of the one `jne`.
+
+**This is the failure mode to fear**: it is not a bad frame or a lost session, it is an
+install that stays broken until someone thinks to delete a binary config file.
+
+### 79.3 The fix, in two halves
+
+**Stop it being set.** `slotprobe_hook()` already sees the argument list of every
+apply-video call, and every caller funnels through that one routine. `arg3 > 0` is
+rewritten to 0; `-1` ("keep") passes through untouched. The checkbox still moves, and
+nothing else changes.
+
+**Heal a CFG that already has it.** `patch_force_fullscreen()` replaces the seven bytes
+of the gate above with `c7 40 1c 00 00 00 00` = `mov [eax+0x1c],0` -- same length, `eax`
+already holds the settings object, and the encoding is the one the engine itself uses
+twenty bytes further down at `0x47c3a9`. The flag is cleared *and* the branch is gone,
+which is the point: the path it takes is never one we want. Found by signature off the
+startup slot-request pattern, with the `mov eax,imm32` before it checked so the store
+cannot land on an unrelated struct; verified statically to match **exactly one** site.
+
+`[Display] ForceFullscreen=0` disables both halves and restores stock behaviour.
+
+**Manual remedy, for a CFG saved by an older build:** zero byte `0x246` of
+`app/data2/TROPICO.CFG`, or delete the file (the game rewrites it).
+
+### 79.4 What was NOT damage
+
+`+0x24` and `+0x2c` (file `0x24e`/`0x256`) also differ from a stock CFG. They are
+written by the block at `0x515522`, which snapshots `+0xc..+0x18` into `+0x20..+0x2c`
+when a call moves the engine *out* of windowed mode -- and the first startup call does
+exactly that on purpose (`mov [eax+0x1c],1` at `0x47c388`, then arg3=0). Normal
+behaviour, not a symptom. Worth recording because it is the kind of diff that invites a
+second, wrong fix.
