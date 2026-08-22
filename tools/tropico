@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Tropico -- launcher.
+#
+#   tropico                  play
+#   tropico --monitor NAME   run on a specific monitor, just for this launch
+#   tropico --list           show monitors, modes and installed art sets
+#   tropico --log            capture a trace next to the game, for bug reports
+#
+# THE RULE: Tropico runs on your PRIMARY monitor, whichever screen you start it
+# from. Wine measures only the primary (FINDINGS 18), so that is the only monitor
+# the game can size itself for; the patch moves the window there if the desktop
+# opens it somewhere else. To change it permanently, set your primary monitor in
+# your desktop settings -- the art set follows automatically on the next launch.
+#
+# This is the SHIPPING launcher. tools/tropico-gog.sh is the test harness and is
+# NOT interchangeable: it defaults to a Wine virtual desktop and exposes a dozen
+# research knobs.
+set -eu
+
+SELF="$(cd "$(dirname "$0")" && pwd)"
+. "$SELF/tropico-common.sh"
+
+MONITOR=""; LOG=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --monitor|-m) MONITOR="${2:-}"; shift 2 ;;
+    --log)        LOG=1; shift ;;
+    --list|-l)    LIST=1; shift ;;
+    --help|-h)
+      sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) echo "!! unknown option '$1' (try --help)" >&2; exit 1 ;;
+  esac
+done
+
+GAMEDIR="$(tropico_find_dir)"
+if [ -z "$GAMEDIR" ]; then
+  echo "!! Could not find Tropico. Set TROPICO_DIR to the folder holding Tropico.EXE." >&2
+  exit 1
+fi
+
+if [ "${LIST:-0}" = 1 ]; then
+  echo "Monitors:"
+  xrandr --query 2>/dev/null | awk '/ connected/{
+      mode="?"; for(i=3;i<=NF;i++) if($i ~ /^[0-9]+x[0-9]+\+/){ split($i,a,"+"); mode=a[1]; break }
+      printf "   %-12s %-10s%s\n", $1, mode, (/ primary /?"  (primary)":"") }'
+  echo
+  "$SELF/tropico-setmode.sh" --list
+  exit 0
+fi
+
+# --monitor: make it primary for this run only. Restored on ANY exit, including
+# Ctrl-C -- leaving someone's primary monitor moved because a game crashed is not
+# acceptable.
+RESTORE_PRIMARY=""
+restore_primary() {
+  [ -n "$RESTORE_PRIMARY" ] || return 0
+  xrandr --output "$RESTORE_PRIMARY" --primary 2>/dev/null || true
+  RESTORE_PRIMARY=""
+}
+if [ -n "$MONITOR" ]; then
+  command -v xrandr >/dev/null 2>&1 || { echo "!! --monitor needs xrandr" >&2; exit 1; }
+  if ! xrandr --query | grep -q "^${MONITOR} connected"; then
+    echo "!! '$MONITOR' is not a connected monitor. Try --list." >&2
+    exit 1
+  fi
+  CUR="$(xrandr | awk '/ primary /{print $1; exit}')"
+  if [ "$CUR" != "$MONITOR" ]; then
+    trap restore_primary EXIT INT TERM
+    RESTORE_PRIMARY="$CUR"
+    xrandr --output "$MONITOR" --primary
+  fi
+  echo "== running on $MONITOR (your primary will be restored afterwards)"
+fi
+
+# Match the art set to the monitor the game is about to measure. Staged sets make
+# this a fraction of a second; an unstaged one is generated once and then staged.
+WANT="$(tropico_primary_mode || true)"
+HAVE="$(cat "$GAMEDIR/data/ARTSET-MODE.txt" 2>/dev/null || true)"
+if [ -n "$WANT" ] && [ -n "$HAVE" ] && [ "$WANT" != "$HAVE" ]; then
+  echo "== switching to $WANT"
+  "$SELF/tropico-setmode.sh" "${WANT%x*}" "${WANT#*x}" >/dev/null
+fi
+
+case "$GAMEDIR" in
+  *steamapps*) TAG="steam" ;;
+  *)           TAG="gog"   ;;
+esac
+export WINEPREFIX="${WINEPREFIX:-$HOME/.wine-tropico-$TAG}"
+export WINEARCH=win32
+export DISPLAY="${DISPLAY:-:1}"
+
+if [ "$LOG" = 1 ]; then
+  export WINEDEBUG="+ddraw"
+  TRACE="$GAMEDIR/tropico-trace.log"
+  echo "== tracing to $TRACE"
+else
+  export WINEDEBUG="${WINEDEBUG:--all}"
+  TRACE=""
+fi
+
+# No Wine virtual desktop: the game talks to the real display. This is the tier-1
+# configuration (FINDINGS 13) and it is why the game can reach a real mode at all.
+# The `wine reg` call itself starts wineserver, so the kill afterwards is required
+# or the next launch silently joins a stale desktop.
+wine reg delete 'HKCU\Software\Wine\Explorer' /v Desktop /f >/dev/null 2>&1 || true
+wineserver -k 2>/dev/null || true
+wineserver -w 2>/dev/null || true
+
+echo "== Tropico  ${WANT:-?}"
+cd "$GAMEDIR"
+if [ -n "$TRACE" ]; then
+  wine Tropico.EXE >"$TRACE" 2>&1 || true
+else
+  wine Tropico.EXE >/dev/null 2>&1 || true
+fi
+wineserver -w 2>/dev/null || true

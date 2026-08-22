@@ -73,6 +73,9 @@ if [ "$UNINSTALL" = 1 ]; then
   rm -rf "$GAMEDIR/artsets"
   echo "   removed $a active + $b menu art file(s), and every staged set"
   rm -f "$GAMEDIR/tropico-fix.ini"
+  rm -f "$HOME/.local/share/applications/tropico-patch.desktop"
+  rm -f "$HOME/.local/share/icons/tropico-patch.png"
+  echo "   removed the desktop entry and its icon"
   echo "== uninstalled. TROPICO.CFG and px*.PK2 are untouched."
   exit 0
 fi
@@ -190,8 +193,50 @@ done
 # ------------------------------------------------------------------- activate
 "$SELF/tropico-setmode.sh" "${ACTIVE%x*}" "${ACTIVE#*x}"
 
+# ------------------------------------------------------------- desktop entry
+# The only thing this patch writes outside the game folder and its own directory.
+# Both files are removed by --uninstall. GOG ships an .ico we can convert; the
+# Steam layout does not, so there the entry simply has no icon.
+APPS="$HOME/.local/share/applications"
+ICONS="$HOME/.local/share/icons"
+ICON=""
+if command -v convert >/dev/null 2>&1; then
+  SRC="$(ls "$GAMEDIR"/goggame-*.ico 2>/dev/null | head -1 || true)"
+  if [ -n "$SRC" ]; then
+    mkdir -p "$ICONS"
+    # An .ico holds several frames, and converting the file as a whole writes ONE
+    # PNG PER FRAME (tropico-patch-0.png, -1.png, ...) rather than the single file
+    # the desktop entry names. Pick the largest frame explicitly and convert only
+    # that one.
+    FRAME="$(identify -format '%[fx:w*h] %p\n' "$SRC" 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2)"
+    if [ -n "${FRAME:-}" ] && convert "${SRC}[${FRAME}]" -resize 256x256 -background none \
+               -gravity center -extent 256x256 "$ICONS/tropico-patch.png" 2>/dev/null \
+       && [ -f "$ICONS/tropico-patch.png" ]; then
+      ICON="tropico-patch"
+    else
+      rm -f "$ICONS"/tropico-patch-*.png
+    fi
+  fi
+fi
+mkdir -p "$APPS"
+{
+  echo "[Desktop Entry]"
+  echo "Type=Application"
+  echo "Name=Tropico"
+  echo "Comment=Tropico, widescreen-patched"
+  echo "Exec=$SELF/tropico"
+  [ -n "$ICON" ] && echo "Icon=$ICON"
+  echo "Terminal=false"
+  echo "Categories=Game;StrategyGame;"
+} > "$APPS/tropico-patch.desktop"
+if command -v desktop-file-validate >/dev/null 2>&1; then
+  desktop-file-validate "$APPS/tropico-patch.desktop" || echo "   (desktop entry validation warned; it will still work)"
+fi
+echo "   desktop entry installed$([ -n "$ICON" ] && echo " with icon")"
+
 echo
 echo "== installed and running at $ACTIVE."
+echo "   PLAY:               $SELF/tropico   (or the Tropico entry in your applications menu)"
 echo "   switch resolution:  $(basename "$SELF")/tropico-setmode.sh W H"
 echo "   what is staged:     $(basename "$SELF")/tropico-setmode.sh --list"
 echo "   undo everything:    $(basename "$0") --uninstall"

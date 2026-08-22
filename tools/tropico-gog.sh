@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# TEST HARNESS -- not the launcher. Players run `tools/tropico`.
+#
+# This script exists to vary things under test, and its defaults reflect that: it
+# brings up a Wine VIRTUAL DESKTOP unless TROPICO_NODESK=1, and exposes a dozen
+# research knobs (TROPICO_RES, TROPICO_LOG, TROPICO_FIX_DISABLE, ...). TESTING.md
+# depends on all of it. Do not "clean it up" into a launcher, and do not hand it
+# to anyone who just wants to play -- the virtual-desktop default alone is the
+# configuration section 13 proved we do not need.
+#
 # Launch the DRM-free GOG Tropico under a dedicated wineprefix.
 # Usage:  ./tropico-gog.sh [WIDTHxHEIGHT]      (default 1280x1024)
 #

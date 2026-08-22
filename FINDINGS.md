@@ -5371,3 +5371,77 @@ defect at a different point in the sequence and named the frontend row instead.
 TESTING.md's rule was written for exactly this and still earns its place: **keep one
 untouched known-good path, and re-run it whenever a result depends on a value your own
 harness wrote.**
+
+## 74. #150 across monitors: Wine measures one screen, the compositor places on another
+
+Reported by the owner, 2026-08-21, running `--monitor DP-3` from a terminal on the
+*other* panel: DirectDraw error #150. §18 had called this solved. It was half solved.
+
+### 74.1 The measurement
+
+`probes/moniprobe.c` prints what Wine MEASURES and where a window is PLACED, under each
+primary:
+
+| primary | GetDeviceCaps | where the OTHER monitor sits |
+|---|---|---|
+| HDMI-A-5 | 1920x1080 | `1920,`**`-360`** |
+| DP-3 | 2560x1440 | **`-1920`**`,360` |
+
+**Wine renormalises the PRIMARY to (0,0)**, which puts every other monitor at negative
+coordinates. Making the target monitor primary does not remove the negative origin — it
+moves it from the y axis to the x axis. So §18's `TROPICO_DISPLAY` fixes what the game
+*measures* and does nothing about where the window *lands*, and if those disagree the
+engine computes rects for a screen the window is not on. DirectDraw refuses them:
+`DDERR_INVALIDRECT`, #150.
+
+That is why the same flag worked in the §72 validation (launched from the target screen)
+and failed here (launched from the other one). The variable was never the flag.
+
+### 74.2 Why the outside-in fixes were all guesses
+
+Making a monitor primary, launching from the right screen, warping the pointer — every
+one of them is an attempt to predict what the compositor will do. On Wayland it is worse
+than a guess: there is no `xdotool` or `wmctrl` on this box, and compositors generally
+refuse pointer warping outright.
+
+Pointer-following was designed and **rejected** on the owner's objection, which is the
+right one: the terminal and the cursor can be on different monitors, so it trades a
+reliable failure for an unpredictable one — and the resolution would change from launch
+to launch depending on where the mouse happened to be. #150 is infamous precisely because
+its cause is invisible; a fix that makes the cause *vary* is worse than the bug.
+
+### 74.3 The fix: correct it from inside, where the truth is knowable
+
+The proxy already detours the apply-video routine (§73), which runs on every mode change.
+`MonitorFromWindow` there is not a prediction — it is where the window actually is. If it
+is not the primary, `SetWindowPos` to the primary's origin, then re-check.
+
+```
+window on monitor at -1920,360 1920x1080, Wine measures PRIMARY at 0,0 2560x1440
+  -> moved onto the primary monitor
+```
+
+If the move does not take, the log says so **in words** naming both monitors and the one
+human remedy, instead of leaving a bare #150 to be decoded. `[Display] PinToPrimary=0`
+disables it.
+
+**The rule this settles, and it is now one sentence:** *Tropico runs on your primary
+monitor.* Not "whichever screen you launched from", not "the biggest one" — the primary,
+because that is the only monitor Wine will size the game for.
+
+### 74.4 The launcher is not the test harness
+
+`tools/tropico-gog.sh` defaults to a **Wine virtual desktop** and exposes `TROPICO_RES`,
+`TROPICO_LOG`, `TROPICO_FIX_DISABLE`, `TROPICO_NODESK` and more. It is a rig for varying
+things under test and TESTING.md depends on every bit of it — but its default is the
+configuration §13 proved unnecessary, so handing it to a player ships the wrong config.
+
+`tools/tropico` is the shipping launcher: no virtual desktop, one line of output, art set
+reconciled to the primary's mode before launch, `--monitor` / `--list` / `--log` / `--help`.
+`tropico-install.sh` also writes a desktop entry and an icon into
+`~/.local/share/{applications,icons}` — the only files this patch places outside the game
+folder, both removed on uninstall.
+
+Note for anyone regenerating the icon: a `.ico` holds several frames, and converting the
+file as a whole writes **one PNG per frame** (`tropico-patch-0.png`, `-1.png`, ...), not
+the single file the desktop entry names. Pick the largest frame explicitly.

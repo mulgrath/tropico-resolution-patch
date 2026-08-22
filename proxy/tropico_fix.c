@@ -109,6 +109,8 @@ static int patch_slot_probe(void);
 static void find_applyvideo(void);
 static DWORD g_preset_ret;   /* return address of the preset-apply call site */
 static int g_slot_log;
+static int g_pin_primary = 1;
+static int g_pin_done;
 static DWORD g_applyvideo_va;
 static DWORD g_vt_ys_va, g_vt_xs_va;
 /* The mode slot 4 was actually set to. Written once, where slot 4 is patched;
@@ -704,6 +706,9 @@ static void apply_patches(void)
          * moment you return to it from a map. [Menu] SlotProbe=1 additionally logs
          * every apply-video call and its caller, which is how this was found. */
         g_slot_log = GetPrivateProfileIntA("Menu", "SlotProbe", 0, ip);
+        /* s74: keep the window on the monitor Wine measures. On by default --
+         * the failure it prevents is DDERR_INVALIDRECT, which is unreadable. */
+        g_pin_primary = GetPrivateProfileIntA("Display", "PinToPrimary", 1, ip);
         if (g_menu_slot >= 0 || g_slot_log) {
             if (!g_vt_xs_va || !g_vt_ys_va) {
                 static const BYTE CS[]  = {0x66,0x3d,0x80,0x02, 0x7e,0x0a,
@@ -2635,8 +2640,72 @@ static int patch_vtext_entry(void)
  * The address is not hardcoded. It is read from the rel32 of the call that ends
  * the startup-slot signature, so it survives a build whose addresses moved --
  * which is the whole reason the Steam build patches at all. */
+/* ------------------------------------------------ s74 pin the window to primary
+ *
+ * WHY THIS EXISTS. Wine measures ONLY the primary monitor and renormalises it to
+ * (0,0), which pushes every other monitor to NEGATIVE coordinates -- measured:
+ * with HDMI primary the second monitor sits at (1920,-360); with the second one
+ * primary, HDMI sits at (-1920,360). The negative axis moves, it never goes away.
+ *
+ * Placement is decided separately, by the compositor, from the launching context.
+ * So if the game's window lands on a monitor that is not the one Wine measured,
+ * the engine computes its rects for a screen the window is not on, and DirectDraw
+ * rejects them with DDERR_INVALIDRECT -- the infamous #150 (FINDINGS 18, 74).
+ *
+ * Every earlier attempt at this tried to control PLACEMENT from outside the game
+ * (make the target monitor primary, launch from the right screen). That is a
+ * guess about the compositor. Correcting it from INSIDE, at a moment we already
+ * hook, is not: MonitorFromWindow says where the window actually is, and
+ * SetWindowPos to the primary's origin is a request the X server honours.
+ *
+ * Runs on the apply-video path, which is every mode change, and is a no-op on a
+ * single-monitor machine and whenever the window is already right. */
+static HWND find_game_window(void)
+{
+    HWND w = GetActiveWindow();
+    if (w && GetWindow(w, GW_OWNER) == NULL && IsWindowVisible(w)) return w;
+    return NULL;
+}
+
+static void pin_window_to_primary(void)
+{
+    HWND w;
+    HMONITOR m, prim;
+    MONITORINFO mi, pi;
+    if (!g_pin_primary) return;
+    w = find_game_window();
+    if (!w) return;                       /* too early -- no window yet */
+    m    = MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST);
+    prim = MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    if (!m || !prim || m == prim) return; /* already right, or single monitor */
+
+    mi.cbSize = sizeof mi; pi.cbSize = sizeof pi;
+    if (!GetMonitorInfoA(m, &mi) || !GetMonitorInfoA(prim, &pi)) return;
+    logf_("[!] [display] the game window is on the monitor at %ld,%ld %ldx%ld, but Wine"
+          " measures the PRIMARY at %ld,%ld %ldx%ld -- moving it, or DirectDraw would"
+          " reject the rect (#150)",
+          mi.rcMonitor.left, mi.rcMonitor.top,
+          mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+          pi.rcMonitor.left, pi.rcMonitor.top,
+          pi.rcMonitor.right - pi.rcMonitor.left, pi.rcMonitor.bottom - pi.rcMonitor.top);
+
+    SetWindowPos(w, NULL, pi.rcMonitor.left, pi.rcMonitor.top, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    m = MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST);
+    if (m == prim) {
+        if (!g_pin_done) { logf_("[+] [display] window moved onto the primary monitor"); g_pin_done = 1; }
+    } else {
+        /* Say what went wrong in words. A bare #150 later tells the user nothing,
+         * and this failure has exactly one human-facing remedy. */
+        logf_("[x] [display] could NOT move the window onto the primary monitor."
+              " The game will fail with DirectDraw error #150. Launch it from your"
+              " primary monitor, or make this monitor primary in your desktop settings.");
+    }
+}
+
 static void __cdecl slotprobe_hook(DWORD *a)
 {
+    pin_window_to_primary();
     /* a[] from the trampoline: 0 flags, 1 EDI, 2 ESI, 3 EBP, 4 ESP, 5 EBX,
      * 6 EDX, 7 ECX, 8 EAX, 9 return address, 10 arg1, 11 arg2, 12 arg3. */
     /* THE FIX (s73). Returning to the main menu from a map re-applies the FRONTEND
