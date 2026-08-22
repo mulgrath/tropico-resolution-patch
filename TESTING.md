@@ -155,3 +155,50 @@ HORZRES=1920  adapter1 at (1920,-360)   ->   HORZRES=2560  adapter0 at (0,0)
 **If you flip the primary by hand, do not kill the launcher with SIGKILL** — the restore is
 an EXIT trap and `kill -9` strands the user's desktop on the wrong monitor. The script only
 `exec`s wine when it has nothing to restore, for the same reason.
+
+## Testing a mode larger than any panel you own — the nested rig
+
+You cannot test 3840x2160 by asking for a 3840x2160 virtual desktop on a smaller screen.
+Wine **clamps the desktop to the host panel at creation** (FINDINGS 81), so you silently
+get the panel's size back and there is no oversized desktop to pan around. The mod says
+so itself: `desktop as Wine sees it: 2560x1440` alongside `CONFIGURED MODE DOES NOT FIT`.
+
+The way past it is to remove what the clamp measures against — a nested X server whose
+physical screen genuinely *is* that big:
+
+```sh
+tools/tropico-rig.sh                 # 3840x2160 by default
+tools/tropico-rig.sh 3440x1440       # any mode that passes tropico_validate_mode
+tools/tropico-rigshot.sh :9 world    # capture the WHOLE frame, not the visible corner
+```
+
+The rig window is larger than your monitor, so you only ever see a corner of it. **That
+does not matter** — `tropico-rigshot.sh` grabs the nested server's *root window*, so the
+capture is the full frame regardless. Shots land in `<gamedir>/rig-shots/`.
+
+It restores the active art set and kills the wineserver bound to the nested display on
+exit (leaving one attached to a dead server breaks the *next* normal launch — Trap 1).
+
+### What it is good for, and what it will lie to you about
+
+**Good for:** anything positional — art sets, HUD geometry, world extents, clipping, text
+overhang, VText dials. FINDINGS 82 was found this way: a world-painter gate that skipped
+its own fix on every mode wider than 3200, invisible on any panel narrower than that.
+
+**Will lie to you about:** the graphics stack. There is no GPU behind a nested server, so
+GL runs on llvmpipe — much slower, and every texture lives in the win32 process's 2–3 GB
+address space instead of VRAM. A clean rig run is **not** evidence that a mode works on
+real hardware.
+
+### Two rig-only behaviours, so you do not chase them
+
+- **Hardware 3D → Software 3D → Hardware 3D crashes** in wined3d (FINDINGS 84). Each
+  switch recreates the D3D device; under llvmpipe the churn exhausts the address space,
+  and Wine 9.0 memcpy's into a failed mapping without checking it. Verified absent on
+  real hardware over 7+ cycles. Not a bug in the game or the patch.
+- **It is slow.** At 4K llvmpipe rasterises ~8.3M pixels per frame on the CPU. Judge
+  correctness here, never performance.
+
+`TROPICO_TRACE=1 tools/tropico-rig.sh` adds Wine's d3d channels (bounded to the last
+40 MB) when you need to know what failed *before* a crash — a backtrace says where it
+died, never why.
