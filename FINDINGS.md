@@ -5729,3 +5729,33 @@ all.
 > hover without clicking, launch, see where it lands — and it was available the whole
 > time. When two mechanisms predict the same thing in the common case, the only useful
 > experiment is the one where they disagree.
+
+### 78.4 How a monitor is actually made primary on COSMIC — and why the user could not
+
+Asked directly by the owner, and the answer explains the whole confusion: **COSMIC has no
+primary-display setting in its GUI at all.** It is an open feature request
+(pop-os/cosmic-epoch#2817), and a second issue (#815) records that the XWayland primary
+has to be set by hand with `xrandr` and is *lost when monitors are turned off*.
+
+So on this desktop "your primary monitor" is not something the user chose, cannot see, and
+cannot change through any UI. It is whatever XWayland defaulted to. Every instruction of
+the form "just set your gaming monitor as primary" -- which is the standard advice in
+78.1 -- is unfollowable here.
+
+Measured, on the two available tools:
+
+| tool | effect on the compositor's record | effect on what X (and therefore Wine) reports |
+|---|---|---|
+| `xrandr --output NAME --primary` | — | **immediate** |
+| `cosmic-randr xwayland --primary NAME` | immediate | **did not propagate** within several seconds; it only appeared after the *next* change |
+
+So the compositor's own API is the wrong tool for this job, despite being the native one:
+Wine reads X, and X is what `xrandr` sets. `xrandr` it is, and the launcher verifies by
+reading back from `xrandr` rather than trusting the write.
+
+This also settles the UX question. Since the user cannot set a primary through the
+desktop, a launcher that sets it for the duration of the run and restores it afterwards is
+not a workaround -- it is the only way the standard advice can be followed at all.
+
+Sources: pop-os/cosmic-epoch#2817 (no GUI setting); pop-os/cosmic-epoch#815 (xrandr by
+hand, lost when monitors are turned off).
