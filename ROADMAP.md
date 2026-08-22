@@ -199,6 +199,17 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
    (16:10) is still stock, and §86.6 carries its predicted set — one probe run to
    confirm, covering every 16:10 resolution at once.
 
+7b. ~~**Bottom-bar readouts are grey and hard to read.**~~ **SOLVED — §87.** Not a font
+   or art problem: the engine's text carries inline markup, and Treasury / Swiss Bank /
+   Population are drawn from strings that literally begin `[C2]`, a colour tag resolving
+   through an RGB555 table to (197,197,197). Repainting that one 16-bit entry to white
+   fixes all four — the untagged Date included, since it inherits the persisting style
+   from the draws before it. Ships as `[Text] Enable`, on by default.
+
+   **The blast-radius estimate was a lower bound, not a count.** A static scan found five
+   `[C2]` literals; in game the building panel's Owners / Wages / Rent also changed,
+   because their tag is assembled at runtime. Same third-source trap as item 8 below.
+
 8. ~~**Build-menu preview offset.**~~ **SOLVED — §71**, and it was a size, not an offset.
    The portrait is left-flush with its ring and 51 px short on the right because it is
    drawn at the stock 280x280 into the regenerated 323x242 hole. Cause: the portraits are

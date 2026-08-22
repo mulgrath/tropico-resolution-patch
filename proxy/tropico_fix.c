@@ -91,6 +91,8 @@ static int patch_chrome_scale(DWORD table_va);
 static int patch_vtext(int dy, int dx, int cliph, int have_dy, int have_dx, int have_cliph);
 static int patch_vtext_probe(void);
 static int patch_vtext_entry(void);
+static int patch_text_probe(void);
+static int patch_readout_colour(int want);
 static int patch_intro(void);
 static int patch_menu(int w, int h);
 static int patch_movie_probe(void);
@@ -131,6 +133,7 @@ static DWORD g_vte_entry_va;
  * ini long before the hook that reads it is defined. */
 static int g_vt_fix, g_vt_fw, g_vt_fh, g_vt_boxh, g_vt_boxdy;
 static DWORD g_hud_mw, g_hud_mh;
+static int g_txt_log;          /* s87 text probe: declared here, used by apply_patches */
 static int g_chr_enable;
 static DWORD g_chr_trim = 8;
 static DWORD g_hud_ph_style[8], g_hud_ph_size[8];
@@ -1061,6 +1064,32 @@ static void apply_patches(void)
                 if (patch_vtext_probe()) ok++; else fail++;
                 if (g_vt_entry) { if (patch_vtext_entry()) ok++; else fail++; }
             }
+        }
+    }
+
+    /* s87.2: repaint the bottom-bar readouts. ON by default, like every other fix
+     * here; [Text] Enable=0 leaves them PopTop's grey. Colour is a raw RGB555 word
+     * in DECIMAL, because GetPrivateProfileIntA does not parse hex: 32767 = 0x7fff
+     * = white, 30653 = 0x77bd = the near-white the engine uses at entry 23. */
+    {
+        char ip[MAX_PATH];
+        snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+        if (GetPrivateProfileIntA("Text", "Enable", 1, ip)) {
+            int want = GetPrivateProfileIntA("Text", "ReadoutColour", 0x7fff, ip);
+            if (want < 0 || want > 0xffff)
+                logf_("[x] [text] ReadoutColour=%d is not a 16-bit value -- ignored", want);
+            else if (patch_readout_colour(want)) ok++; else fail++;
+        }
+    }
+
+    /* s87: horizontal-text probe. Off unless the ini asks -- it is a per-frame path
+     * and exists to answer "which argument carries the colour", not to ship. */
+    {
+        char ip[MAX_PATH];
+        snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+        if (GetPrivateProfileIntA("TextProbe", "Enable", 0, ip)) {
+            g_txt_log = 1;
+            if (patch_text_probe()) ok++; else fail++;
         }
     }
 
@@ -2872,6 +2901,188 @@ static int patch_vtext_entry(void)
     if (!poke(entry, det, 5)) { logf_("[x] [vtentry] VirtualProtect failed"); return 0; }
     logf_("[+] [vtentry] wrapper %08x detoured -> %p (logs EVERY rotated draw and its caller)",
           g_vte_entry_va, (void *)tr);
+    return 1;
+}
+
+/* ------------------------------------------------- s87.2 the readout colour
+ *
+ * The four bottom-bar readouts are grey and hard to read. They are NOT four
+ * problems: the probe above caught all four coming from ONE call site as a 2x2
+ * grid, and three of them carry an inline colour tag in the string itself --
+ *
+ *     x=2571 y=2091  "[C2]$10,000"      x=2863 y=2091  "Jan 1950"
+ *     x=2571 y=2171  "[C2]$0"           x=2863 y=2171  "[C2]30"
+ *
+ * The engine's text has a markup language. FUN_00452330 switches on `letter-0x43`
+ * through a jump table, so `[Cn]` parses n as one or two decimal digits and looks
+ * the colour up in a table of 16-bit words, then stores it into the current style
+ * record. Entry 0 is 0x7fff = white, entry 2 is 0x6318 = RGB555 (197,197,197) --
+ * the grey. So the fix is ONE WORD, not a rewrite of anything.
+ *
+ * THE DATE IS UNTAGGED AND STILL GOES WHITE. It is drawn third, after two [C2]
+ * draws, and the style persists in the record, so it inherits whatever entry 2
+ * holds. That is why repainting the palette entry fixes all four while retagging
+ * the three strings would only reliably fix three.
+ *
+ * BLAST RADIUS, CHECKED RATHER THAN ASSUMED: exactly five `[C2]` format strings
+ * exist in the image. Three are these readouts; the other two sit in a
+ * `[hjr]/[hjl]` markup string and next to `GAME%02d.MP3`, neither of which is
+ * bottom-bar UI. Every other tagged string uses [C0]/[C1]/[C5]/[C6].
+ *
+ * The table is NOT hardcoded. Its address is read out of the operand of the
+ * `mov cx,[table+eax*2]` that performs the lookup, so a build whose data moved
+ * still patches -- the same rule every other signature here follows. */
+static int patch_readout_colour(int want)
+{
+    static const BYTE SIG[] = { 0x8d,0x04,0x80, 0x8d,0x04,0x42, 0x83,0xc1,0x05,
+                                0xeb,0x03, 0x83,0xc1,0x04, 0x89,0x0f,
+                                0x39,0x74,0x24,0x34, 0x75,0x21, 0x66,0x8b,0x0c,0x45 };
+    BYTE *at = find_unique(SIG, sizeof SIG, g_text, g_textlen, "[C] colour lookup");
+    if (!at) { logf_("[x] [text] colour-lookup signature not found"); return 0; }
+
+    DWORD tbl = rd32(at + sizeof SIG);
+    /* Sanity-check the operand before writing through it: a wrong table address is
+     * a silent memory corruption, not a visible failure. Entry 0 is the engine's
+     * white and is the cheapest thing to verify. */
+    if (tbl < 0x400000 || tbl > 0x700000) {
+        logf_("[x] [text] colour table operand %08x is not a plausible address", tbl);
+        return 0;
+    }
+    WORD *pal = (WORD *)(SIZE_T)tbl;
+    if (IsBadReadPtr(pal, 8) || pal[0] != 0x7fff) {
+        logf_("[x] [text] colour table at %08x does not open with white (%04x) -- refusing",
+              tbl, IsBadReadPtr(pal, 8) ? 0 : pal[0]);
+        return 0;
+    }
+    WORD old = pal[2];
+    WORD nw  = (WORD)want;
+    if (old == nw) {
+        logf_("[*] [text] readout colour already %04x -- nothing to do", nw);
+        return 1;
+    }
+    if (!poke((BYTE *)&pal[2], (BYTE *)&nw, 2)) {
+        logf_("[x] [text] VirtualProtect failed on the colour table"); return 0;
+    }
+    logf_("[+] [text] readout colour [C2] %04x -> %04x  (RGB555 %d,%d,%d -> %d,%d,%d)"
+          " -- treasury, swiss bank, population, and the date by inheritance",
+          old, nw,
+          (old >> 10) & 31, (old >> 5) & 31, old & 31,
+          (nw  >> 10) & 31, (nw  >> 5) & 31, nw  & 31);
+    return 1;
+}
+
+/* ------------------------------------------------ s87 horizontal-text probe
+ *
+ * WHICH ARGUMENT CARRIES THE COLOUR OF THE BOTTOM-BAR READOUTS.
+ *
+ * The owner reports Treasury / Date / Swiss Bank / Population as grey and hard to read.
+ * The colour CANNOT be in the art: every pixel of all 17 font assets is alpha-run class
+ * (922150 of 922150, section 63.4), so a glyph is a pure opacity mask and whatever tints
+ * it does so at draw time.
+ *
+ * FUN_00453ef0 is the horizontal string renderer (section 65.1), `thiscall` with SIXTEEN
+ * stack arguments (`ret 0x40`), reached through the thunk at 0x4020db from exactly nine
+ * call sites -- so ONE entry hook sees every horizontal draw and the return address names
+ * the site. Same instrument that settled section 66.
+ *
+ * ROUND 1 GOT TWO THINGS WRONG, both recorded because they are the reusable part:
+ *   - it assumed a1 was the string, since every site pushes the same 0x60c188. But the
+ *     renderer reads 0x60c18c/0x60c18e as signed WORDs, so 0x60c188 is a small struct and
+ *     every string logged empty.
+ *   - it then deduped on that string's first byte, which was therefore CONSTANT, so
+ *     distinct draws collapsed into each other: ten records for an entire map.
+ * Round 1 did settle one thing: args 11..14 are a CLIP RECT (-1,-1,-1,-1 for none, or
+ * 0,0,0xa00,0x5a0 = the full 2560x1440 screen), not a colour, and a16 varies 0xff/0xc4
+ * which reads as alpha rather than colour.
+ *
+ * So round 2 stops guessing. Dedupe on (site, x, y) -- widgets differ by POSITION, which
+ * is knowable without understanding the arguments -- and print a hex+ASCII window at every
+ * argument that looks like a readable pointer, letting the text name itself. */
+
+/* (g_txt_log is declared with the shared patch state above) */
+static int   g_txt_logged;
+
+static void __cdecl text_hook(DWORD this_, DWORD *a)
+{
+    if (!g_txt_log) return;
+
+    static DWORD seen[64][3];
+    DWORD k0 = a[0], k1 = a[3], k2 = a[4];
+    for (int i = 0; i < g_txt_logged; i++)
+        if (seen[i][0] == k0 && seen[i][1] == k1 && seen[i][2] == k2) return;
+    if (g_txt_logged >= 64) return;
+    seen[g_txt_logged][0] = k0; seen[g_txt_logged][1] = k1; seen[g_txt_logged][2] = k2;
+    g_txt_logged++;
+
+    logf_("  [txt] ret=%08x this=%08x  x=%d y=%d w=%d h=%d",
+          a[0], this_, (int)a[3], (int)a[4], (int)a[5], (int)a[6]);
+    logf_("        a1=%08x a2=%08x a7=%08x a8=%08x a9=%08x a10=%08x a15=%08x a16=%08x",
+          a[1], a[2], a[7], a[8], a[9], a[10], a[15], a[16]);
+
+    /* Any argument (and `this`) that points at readable memory gets a 24-byte window.
+     * Read defensively: these are only ASSUMED to be pointers, and a probe that faults
+     * is worse than one that prints nothing. */
+    for (int k = 0; k <= 16; k++) {
+        DWORD v = (k == 0) ? this_ : a[k];
+        if (v < 0x10000) continue;
+        const BYTE *q = (const BYTE *)(SIZE_T)v;
+        if (IsBadReadPtr((void *)q, 24)) continue;
+        char hex[96], asc[32];
+        int hp = 0;
+        for (int j = 0; j < 24; j++) {
+            hp += snprintf(hex + hp, (size_t)(sizeof hex - hp), "%02x", q[j]);
+            if ((j & 3) == 3 && j != 23) hp += snprintf(hex + hp, (size_t)(sizeof hex - hp), " ");
+            asc[j] = (q[j] >= 32 && q[j] < 127) ? (char)q[j] : '.';
+        }
+        asc[24] = 0;
+        if (k == 0) logf_("        this-> %s  |%s|", hex, asc);
+        else        logf_("        a%-2d -> %s  |%s|", k, hex, asc);
+    }
+
+    logf_("        globals: 612fb8=%08x 612fc4=%08x 613868=%08x 61308c=%08x",
+          *(DWORD *)(SIZE_T)0x612fb8, *(DWORD *)(SIZE_T)0x612fc4,
+          *(DWORD *)(SIZE_T)0x613868, *(DWORD *)(SIZE_T)0x61308c);
+}
+
+static int patch_text_probe(void)
+{
+    /* The prologue is unique on eight bytes; sixteen are taken for margin. It is
+     * `sub esp,0x3c` + `mov eax,[esp+0x54]` = 3 + 4, so SEVEN bytes relocate -- taking
+     * the five a detour needs would split the mov and corrupt the function. Both are
+     * position-independent: the relocated `sub` runs before the relocated esp-relative
+     * `mov`, exactly as originally, because popad restores esp to its entry value. */
+    static const BYTE pat[] = { 0x83,0xec,0x3c, 0x8b,0x44,0x24,0x54, 0x85,0xc0,
+                                0x53, 0x55, 0x56, 0x8b,0xd9, 0x57, 0x89 };
+    BYTE *entry = NULL;
+    int n = 0;
+    for (SIZE_T i = 0; i + sizeof pat <= g_textlen; i++)
+        if (!memcmp(g_text + i, pat, sizeof pat)) { entry = g_text + i; if (++n > 1) break; }
+    if (!entry) { logf_("[x] [txtprobe] string-renderer signature not found"); return 0; }
+    if (n > 1)  { logf_("[x] [txtprobe] signature matched %d times -- refusing", n); return 0; }
+
+    BYTE *tr = (BYTE *)VirtualAlloc(NULL, 96, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tr) { logf_("[x] [txtprobe] VirtualAlloc failed"); return 0; }
+    int o = 0;
+    tr[o++] = 0x60;                                                 /* pushad             */
+    tr[o++] = 0x9C;                                                 /* pushfd             */
+    tr[o++] = 0x8D; tr[o++] = 0x44; tr[o++] = 0x24; tr[o++] = 0x24; /* lea eax,[esp+0x24] */
+    tr[o++] = 0x50;                                                 /* push eax  (frame)  */
+    tr[o++] = 0x51;                                                 /* push ecx  (this)   */
+    tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&text_hook; memcpy(tr + o, &f, 4); o += 4; }
+    tr[o++] = 0xFF; tr[o++] = 0xD0;                                 /* call eax           */
+    tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x08;                 /* add esp,8 (cdecl)  */
+    tr[o++] = 0x9D;                                                 /* popfd              */
+    tr[o++] = 0x61;                                                 /* popad              */
+    memcpy(tr + o, entry, 7); o += 7;                               /* relocated sub+mov  */
+    tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((entry + 7) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
+
+    BYTE det[7];
+    det[0] = 0xE9;
+    { DWORD r = (DWORD)(SIZE_T)(tr - (entry + 5)); memcpy(det + 1, &r, 4); }
+    det[5] = 0x90; det[6] = 0x90;      /* pad the tail of the split instruction */
+    if (!poke(entry, det, 7)) { logf_("[x] [txtprobe] VirtualProtect failed"); return 0; }
+    logf_("[+] [txtprobe] string renderer %p detoured -> %p (logs every horizontal draw)",
+          (void *)entry, (void *)tr);
     return 1;
 }
 

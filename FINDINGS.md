@@ -6353,3 +6353,100 @@ Trap 7: testing a mode on a SECONDARY monitor needs `TROPICO_DISPLAY=<output>`. 
 `tropico-gog.sh` retargets the whole run to the primary -- ini rewritten, art swapped --
 and the mode-gated dials never arm. That is §74/§77 behaving correctly, and it looks
 exactly like a broken fix.
+
+## 87. The bottom-bar readouts are grey because the STRING says so — text has markup
+
+The four bottom-right readouts — Treasury, Swiss Bank Account, Date, Population — read
+grey and hard against the bar. They are now white, and the fix is a single 16-bit word.
+Confirmed in game at 2560x1440 on 2026-08-22.
+
+### 87.1 The colour cannot be in the art, which is what made this tractable
+
+Every pixel of all 17 font assets is alpha-run class — 922150 of 922150, measured back in
+§63.4. A glyph is a pure opacity mask, so whatever tints it does so at draw time. That
+single inherited fact ruled out the entire "edit the art" branch before any probe ran.
+
+### 87.2 The probe, and the two mistakes worth keeping
+
+`FUN_00453ef0` is the horizontal string renderer (§65.1): `thiscall`, SIXTEEN stack
+arguments (`ret 0x40`), reached through the thunk at `0x4020db` from exactly nine call
+sites. One entry hook therefore sees every horizontal draw in the game and the return
+address names the site — the §66 instrument again.
+
+**Round 1 failed, in two ways that are the reusable part:**
+
+* It assumed `a1` was the string, because every one of the nine sites pushes the same
+  `0x60c188`. But the renderer reads `0x60c18c`/`0x60c18e` as signed WORDs, so `0x60c188`
+  is a small struct and not text. Every string logged empty.
+* It then **deduped on that string's first byte**, which was consequently constant, so
+  distinct draws collapsed into one another: ten records for an entire map.
+
+The dedupe trap is now three-for-three in this project (§65, §66, here). The fix each time
+is the same: key on something knowable WITHOUT the understanding you are trying to acquire.
+Round 2 keyed on `(call site, x, y)` — widgets differ by position — and printed a hex+ASCII
+window at every argument that pointed at readable memory, letting the text name itself.
+
+Round 1 was not wasted: it established that args 11..14 are a CLIP RECT (`-1,-1,-1,-1` for
+none, or `0,0,0xa00,0x5a0` = the full 2560x1440 screen) and that `a16` varies `0xff`/`0xc4`,
+which reads as alpha rather than colour.
+
+### 87.3 What the strings actually say
+
+All four come from ONE call site as a 2x2 grid, in virtual 3200x2400 coordinates:
+
+```
+x=2571 y=2091  "[C2]$10,000"        x=2863 y=2091  "Jan 1950"     <- untagged
+x=2571 y=2171  "[C2]$0"             x=2863 y=2171  "[C2]30"
+```
+
+**The engine's text has an inline markup language.** `FUN_00452330` switches on
+`letter - 0x43` through a jump table at `0x452594`, so `C` is index 0; the live tags are
+`C H M N U`, and `D E F G I J K L O P Q R S T` all fall through to the default. `[Cn]`
+parses `n` as one or two decimal digits and looks it up in a table of 16-bit RGB555 words,
+then stores the result into the current style record (32 bytes per style, base `0x5d5b28`,
+current index at `0x5d6684`).
+
+```
+[C0]  0x7fff  255,255,255   white
+[C2]  0x6318  197,197,197   the grey
+[C5]  0x6000  197,0,0       [C9] 0x03e0 0,255,0     [C21] 0x0000 black
+[C23] 0x77bd  239,239,239   near-white
+```
+
+So the fix is `palette[2] = 0x7fff`. The table address is read out of the operand of the
+`mov cx,[table+eax*2]` that performs the lookup, never hardcoded, and the patch refuses to
+write unless entry 0 is still the engine's white — a wrong table address is silent memory
+corruption, not a visible failure.
+
+**The untagged date goes white too**, because it is drawn third, after two `[C2]` draws,
+and the style persists in the record. That is why repainting the palette entry fixes all
+four, while retagging the three strings to `[C0]` would have reliably fixed only three.
+
+### 87.4 The blast-radius check was incomplete, and the reason is a known trap
+
+Before shipping, a static scan counted the `[C2]` tags in the image: five, of which three
+were these readouts and two were a `[hjr]/[hjl]` markup string and one beside
+`GAME%02d.MP3`. On that basis the change was called low-risk.
+
+**In game, one more thing changed: the building panel's "Owners" / "Wages" / "Rent".**
+Those labels are `[C2]` too, and the static scan never saw them — they are assembled at
+RUNTIME, so the tag does not exist as a literal anywhere in the file.
+
+This is the same trap as the 182 missing `brNN` portraits (§69.6): **a scan of static
+strings undercounts, because a third source exists — names and text the game builds while
+running, present in neither the exe's literals nor the `.WIN` files.** Counting literals
+gives a LOWER BOUND on blast radius and must be reported as one.
+
+The owner's verdict on the extra three: "I'm fine with those being white also." So the
+outcome is good and the method still needed correcting.
+
+### 87.5 What shipped
+
+`[Text] Enable=1` (default) repaints `[C2]`; `Enable=0` restores PopTop's grey.
+`[Text] ReadoutColour` is a raw RGB555 word in DECIMAL, because `GetPrivateProfileIntA`
+does not parse hex — 32767 = `0x7fff` = white (the default), 30653 = `0x77bd` = the
+engine's own near-white if pure white reads too stark.
+
+`[TextProbe] Enable=1` keeps the round-2 probe, off by default. It is the instrument for
+any future "why is this text like that" question, and it now prints the markup tags
+verbatim, which is how the whole markup language surfaced in the first place.
