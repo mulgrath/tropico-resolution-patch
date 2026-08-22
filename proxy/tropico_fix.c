@@ -107,10 +107,12 @@ static DWORD g_slot_out;
 static int patch_menu_slot(void);
 static int patch_slot_probe(void);
 static void find_applyvideo(void);
+static DWORD WINAPI pin_thread(LPVOID);
 static DWORD g_preset_ret;   /* return address of the preset-apply call site */
 static int g_slot_log;
 static int g_pin_primary = 1;
 static int g_pin_done;
+static int g_pin_seen_ok;
 static DWORD g_applyvideo_va;
 static DWORD g_vt_ys_va, g_vt_xs_va;
 /* The mode slot 4 was actually set to. Written once, where slot 4 is patched;
@@ -709,6 +711,11 @@ static void apply_patches(void)
         /* s74: keep the window on the monitor Wine measures. On by default --
          * the failure it prevents is DDERR_INVALIDRECT, which is unreadable. */
         g_pin_primary = GetPrivateProfileIntA("Display", "PinToPrimary", 1, ip);
+        if (g_pin_primary) {
+            logf_("[+] [display] watching for the game window, to keep it on the monitor"
+                  " Wine measures (FINDINGS 74)");
+            CloseHandle(CreateThread(NULL, 0, pin_thread, NULL, 0, NULL));
+        }
         if (g_menu_slot >= 0 || g_slot_log) {
             if (!g_vt_xs_va || !g_vt_ys_va) {
                 static const BYTE CS[]  = {0x66,0x3d,0x80,0x02, 0x7e,0x0a,
@@ -2660,11 +2667,54 @@ static int patch_vtext_entry(void)
  *
  * Runs on the apply-video path, which is every mode change, and is a no-op on a
  * single-monitor machine and whenever the window is already right. */
+/* GetActiveWindow was WRONG here and it failed silently. It returns a window only
+ * when the CALLING THREAD's window holds activation -- precisely what you do not
+ * have when the window opened on the monitor you are not looking at. Enumerate
+ * this process's own top-level windows instead: that does not depend on focus. */
+/* Match the game's own window CLASS, not its size. The first version filtered on
+ * "at least 320x200" and that rejected the only window that mattered: measured,
+ * the window sits at -32000,-32000 sized 160x31 for the first seconds of startup,
+ * which is Windows' canonical position for an ICONIC window. A size heuristic
+ * cannot tell that apart from a tooltip; the class name can. */
+static BOOL CALLBACK pick_window(HWND w, LPARAM lp)
+{
+    DWORD pid = 0;
+    char cls[32] = {0};
+    HWND *out = (HWND *)lp;
+    GetWindowThreadProcessId(w, &pid);
+    if (pid != GetCurrentProcessId()) return TRUE;
+    if (GetWindow(w, GW_OWNER)) return TRUE;
+    GetClassNameA(w, cls, sizeof cls - 1);
+    if (strcmp(cls, "Tropico") != 0) return TRUE;
+    *out = w;
+    return FALSE;
+}
+
 static HWND find_game_window(void)
 {
-    HWND w = GetActiveWindow();
-    if (w && GetWindow(w, GW_OWNER) == NULL && IsWindowVisible(w)) return w;
-    return NULL;
+    HWND w = NULL;
+    EnumWindows(pick_window, (LPARAM)&w);
+    return w;
+}
+
+/* One-shot dump of every top-level window, with the reason each was rejected.
+ * "Found nothing" is not a diagnosis -- this says WHY nothing was found. */
+static BOOL CALLBACK dump_window(HWND w, LPARAM lp)
+{
+    DWORD pid = 0;
+    RECT r = {0,0,0,0};
+    char cls[64] = {0}, txt[64] = {0};
+    (void)lp;
+    GetWindowThreadProcessId(w, &pid);
+    GetClassNameA(w, cls, sizeof cls - 1);
+    GetWindowTextA(w, txt, sizeof txt - 1);
+    GetWindowRect(w, &r);
+    logf_("      hwnd %p pid %lu%s class '%s' text '%s' %ld,%ld %ldx%ld vis=%d owner=%p",
+          (void *)w, (unsigned long)pid,
+          pid == GetCurrentProcessId() ? " (OURS)" : "",
+          cls, txt, r.left, r.top, r.right - r.left, r.bottom - r.top,
+          IsWindowVisible(w) ? 1 : 0, (void *)GetWindow(w, GW_OWNER));
+    return TRUE;
 }
 
 static void pin_window_to_primary(void)
@@ -2675,19 +2725,51 @@ static void pin_window_to_primary(void)
     if (!g_pin_primary) return;
     w = find_game_window();
     if (!w) return;                       /* too early -- no window yet */
+    /* Do not move a minimised window. It is parked at -32000,-32000 by the window
+     * manager, its monitor is meaningless there, and the placement that matters has
+     * not happened yet. Wait for it to be restored and sized. */
+    if (IsIconic(w)) return;
+    {
+        RECT wr;
+        if (!GetWindowRect(w, &wr)) return;
+        if (wr.right - wr.left < 320 || wr.bottom - wr.top < 200) return;
+    }
     m    = MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST);
     prim = MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY);
-    if (!m || !prim || m == prim) return; /* already right, or single monitor */
+    if (!m || !prim) return;
+    if (m == prim) {
+        /* Report the no-op ONCE. The first version returned silently here, so a
+         * window that was never found and a window that was already right produced
+         * identical logs -- and that ambiguity cost a whole test run. */
+        if (!g_pin_seen_ok) {
+            RECT wr; GetWindowRect(w, &wr);
+            logf_("  [display] game window %p at %ld,%ld %ldx%ld is on the primary monitor"
+                  " -- nothing to do", (void *)w, wr.left, wr.top,
+                  wr.right - wr.left, wr.bottom - wr.top);
+            g_pin_seen_ok = 1;
+        }
+        return;
+    }
 
     mi.cbSize = sizeof mi; pi.cbSize = sizeof pi;
     if (!GetMonitorInfoA(m, &mi) || !GetMonitorInfoA(prim, &pi)) return;
-    logf_("[!] [display] the game window is on the monitor at %ld,%ld %ldx%ld, but Wine"
-          " measures the PRIMARY at %ld,%ld %ldx%ld -- moving it, or DirectDraw would"
-          " reject the rect (#150)",
-          mi.rcMonitor.left, mi.rcMonitor.top,
-          mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
-          pi.rcMonitor.left, pi.rcMonitor.top,
-          pi.rcMonitor.right - pi.rcMonitor.left, pi.rcMonitor.bottom - pi.rcMonitor.top);
+    {
+        /* Rate-limited, and it reports the WINDOW RECT. Without the rect this cannot
+         * distinguish "the window sits on the other monitor" from "the window is
+         * larger than the primary and MonitorFromWindow picked by overlap area",
+         * and those need completely different fixes. */
+        static int nlog;
+        RECT wr; GetWindowRect(w, &wr);
+        if (nlog < 4 || (nlog % 50) == 0)
+            logf_("[!] [display] window %ld,%ld %ldx%ld resolves to the monitor at"
+                  " %ld,%ld %ldx%ld, but Wine measures the PRIMARY at %ld,%ld %ldx%ld",
+                  wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
+                  mi.rcMonitor.left, mi.rcMonitor.top,
+                  mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                  pi.rcMonitor.left, pi.rcMonitor.top,
+                  pi.rcMonitor.right - pi.rcMonitor.left, pi.rcMonitor.bottom - pi.rcMonitor.top);
+        nlog++;
+    }
 
     SetWindowPos(w, NULL, pi.rcMonitor.left, pi.rcMonitor.top, 0, 0,
                  SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -2701,6 +2783,31 @@ static void pin_window_to_primary(void)
               " The game will fail with DirectDraw error #150. Launch it from your"
               " primary monitor, or make this monitor primary in your desktop settings.");
     }
+}
+
+static DWORD WINAPI pin_thread(LPVOID p)
+{
+    /* Placement is not an event we can hook -- the window can be mapped, and moved,
+     * at any point during startup. So watch for a while instead of guessing one
+     * moment. Cheap: a handful of GetWindowRect calls a second, for 20 seconds,
+     * and it stops as soon as it has corrected a window that stays corrected. */
+    int i, logged_none = 0;
+    (void)p;
+    for (i = 0; i < 200; i++) {
+        HWND w = find_game_window();
+        if (w) {
+            pin_window_to_primary();
+        } else if (!logged_none && i > 20) {
+            logf_("  [display] no window of class 'Tropico' after 2 s. Every top-level"
+                  " window visible to this process:");
+            EnumWindows(dump_window, 0);
+            logged_none = 1;
+        }
+        Sleep(100);
+    }
+    if (!g_pin_done && !g_pin_seen_ok)
+        logf_("  [display] watcher finished without ever seeing a sized game window");
+    return 0;
 }
 
 static void __cdecl slotprobe_hook(DWORD *a)

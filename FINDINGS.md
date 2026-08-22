@@ -5425,9 +5425,46 @@ If the move does not take, the log says so **in words** naming both monitors and
 human remedy, instead of leaving a bare #150 to be decoded. `[Display] PinToPrimary=0`
 disables it.
 
-**The rule this settles, and it is now one sentence:** *Tropico runs on your primary
-monitor.* Not "whichever screen you launched from", not "the biggest one" — the primary,
-because that is the only monitor Wine will size the game for.
+**SUPERSEDED — see 74.5.** Pinning helps and is kept, but it does not *guarantee*
+placement, so it is not the rule.
+
+### 74.5 What actually settled it: document the rule instead of winning the fight
+
+Pinning was measured over several runs and **placement turned out to be
+nondeterministic** — the same configuration put the window on the second monitor in one
+run and left it on the primary in the next, and when it was moved it sometimes bounced
+straight back. The compositor keeps the last word.
+
+Owner's call, and the right one: stop trying to out-guess it. *Launch the game from the
+monitor you want to play on.* The launcher then reads which output the pointer is on,
+makes that monitor primary for the run, matches the resolution and art set to it, and
+restores the primary afterwards. One documented sentence beats an unwinnable fight, and
+it removes the failure entirely rather than detecting it.
+
+The pointer's output is read from the X server directly through `libX11`/ctypes
+(`tropico_pointer_output`), not `xdotool` — which is not installed here and is refused by
+many Wayland compositors. `XQueryPointer` returns root coordinates in the same space
+xrandr reports geometry in, so no conversion is needed.
+
+The pin watcher stays, demoted to a safety net: when it can correct a stray window it
+does, and when it cannot it writes a line naming both monitors instead of leaving a bare
+#150 to be decoded.
+
+### 74.6 Two portability holes the "other setups" question exposed
+
+Nothing is hardcoded — outputs and modes come from xrandr, and the proxy's own picker is
+fully constrained. But the installer had two assumptions that only held on this desk:
+
+* **A panel whose width is not a multiple of 4.** `1366x768` is one of the commonest
+  laptop resolutions in the world and it shears (§10). The installer fell back to a fixed
+  `1920x1080` — *a mode that panel cannot display*. Now each output negotiates
+  separately: if its current mode is unusable, `tropico_best_mode` picks the largest mode
+  that output actually offers and the patch can actually use.
+* **No X at all.** The same fixed fallback applied. Now it says so and tells the user to
+  pass a resolution explicitly, rather than installing something unusable.
+
+Both refuse loudly and change nothing, which is the correct behaviour for an installer
+that cannot see the hardware it is configuring.
 
 ### 74.4 The launcher is not the test harness
 

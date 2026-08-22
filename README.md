@@ -1,78 +1,89 @@
 # Tropico resolution patch
 
-Making Tropico (PopTop, 2001) run and look good on Linux and modern displays.
+Makes Tropico (PopTop, 2001) run at your monitor's real resolution on Linux — world,
+HUD, menus, intro movie and all — under plain Wine, with one command to install and one
+to play.
 
-**Only original code lives here. Game binaries are never committed** — see `.gitignore`.
-You supply your own install; the tools operate on it in place.
+**Only original code lives here. Game binaries and game art are never committed** — see
+`.gitignore`. You supply your own install; everything derived from the game is generated
+on your machine from your own files.
 
-## Status
-
-| tier | goal | state |
-|------|------|-------|
-| 1 | Reliable launch, no manual prefix surgery | **largely solved** — runs with no virtual desktop; centring/upscaling outstanding |
-| 2 | **1600x1200** — sharp, correct, 4:3 | **DONE, reproduced** |
-| 3 | True widescreen with a sane HUD | **capped at 1600 wide** — 1600x900 is the candidate; 1920 is not reachable |
-| 4 | Upscaling / HUD re-anchoring | not started — gamescope is the likely vehicle |
-
-### Tier 2 — done
-
-Six bytes. At VA `0x514d9f` (file `0x114d9f`) replace `0f 8d 9d 00 00 00`
-(`jge 0x514e42`) with six `0x90` NOPs. That removes the desktop-width gate so every
-table entry always gets a descriptor.
-
-Runtime scan anchor for the DRM-wrapped Steam build:
-`3d a0 0f 5a 00 74 08 39 18 0f 8d 9d 00 00 00` — NOP the trailing 6 bytes.
-
-Confirmed working twice, including a clean from-scratch reproduction after a regression
-scare. Known cosmetic issue: the Wine virtual-desktop title bar (39px top, 13px sides)
-clips the bottom of the UI when the desktop equals the game resolution.
-
-### Tier 3 — widescreen works, but width is capped at 1600
-
-The engine renders 16:9 correctly. Three separate bugs had to be fixed to get there
-(FINDINGS §8, §9, §10), and a fourth is an asset limit that cannot be patched (§11):
-the HUD/background art is drawn at the *stock* width of whichever slot is used, so a
-target wider than its slot's stock width leaves an unpainted strip.
-
-Practical rule: put the widescreen mode in **slot 4** (stock width 1600) and keep the
-target width at or below 1600. **1600x900 is the candidate configuration.** 1920x1080
-cannot be made clean — no art set is 1920 wide.
-
-### Hardware 3D — restored
-
-Refused because Wine reports ~4GB VRAM, which overflows the game's signed `>= 16MB` check to
-a negative number (FINDINGS §14). Set `HKCU\Software\Wine\Direct3D\VideoMemorySize` to
-`256` and it works. Confirmed. A permanent signed->unsigned patch is still to do.
-
-## Quick start
+## Install
 
 ```bash
-# inspect the table in your own exe
-tools/tropico-patch.py /path/to/Tropico.EXE --show
-
-# tier 2: unlock the gate, nothing else
-tools/tropico-patch.py Tropico.EXE.orig -o Tropico_nogate.EXE
-
-# replace slots (slot 0 is the menu resolution - leave it alone)
-tools/tropico-patch.py Tropico.EXE.orig --set 1=1600x900 -o Tropico_wide.EXE
-
-# run it
-TROPICO_EXE=Tropico_nogate.EXE tools/tropico-gog.sh 1600x1200
+tools/tropico-install.sh
 ```
 
-`tropico-patch.py` never edits in place and refuses to run if the gate bytes don't match
-the expected build.
+That finds your GOG or Steam install, backs up the real `binkw32.dll`, writes the patch
+and its config, and generates a UI art set for **each monitor you have connected** (about
+30 s each, from your own archives). Then:
+
+```bash
+tools/tropico            # play
+```
+
+or use the **Tropico** entry the installer adds to your applications menu.
+
+### Launch it from the monitor you want to play on
+
+The launcher makes that monitor primary for the run, matches the game's resolution and
+artwork to it, and puts your primary back afterwards. Wine measures only the primary
+monitor, so aligning the two is what keeps the game on the screen you are looking at.
+Launching from one monitor while another is primary is the DirectDraw **#150** error
+(`FINDINGS.md` §18, §74).
+
+### Other commands
+
+```bash
+tools/tropico --list              # monitors, modes, and which art sets are staged
+tools/tropico --monitor DP-3      # override the monitor for one launch
+tools/tropico --log               # capture a trace for a bug report
+tools/tropico-setmode.sh 2560 1440  # change resolution (0.7 s if already staged)
+tools/tropico-install.sh --uninstall
+```
+
+`--uninstall` restores the original `binkw32.dll`, deletes every generated file by name,
+and removes the desktop entry. `TROPICO.CFG` and the `px*.PK2` archives are never
+written at any point.
+
+## What it fixes
+
+| | |
+|---|---|
+| Resolution | any mode your monitor reports, not the five PopTop shipped |
+| World render | full-width terrain at any resolution, no smear, no void |
+| HUD and UI | a real art set generated at your resolution — the engine cannot scale art, so it is derived from your own files |
+| Main menu and intro | full resolution instead of a 640x480 box in the corner, including when you return to the menu from a map |
+| Scenario map previews | correct magnification instead of tiling and colour noise |
+| Hardware 3D | restored — the VRAM check rejected modern cards by reading a signed compare |
+| Startup movie | optional every-launch playback (stock plays it once, ever) |
+
+## Known limits
+
+- **Rotated tab labels overhang by ~11% at any resolution other than 1920x1080.** Those
+  five placement values are measurements taken in game, not a formula — the defect scales
+  with each label's own pixel length, which the fix cannot see (`FINDINGS.md` §72.4).
+  Dialling a new mode is a documented 3–4 run procedure.
+- **Steam: the world painter is not correct yet.** The patch applies cleanly on that build
+  and one art set serves both editions byte-identically, but the terrain smears
+  (`ROADMAP.md` §11). GOG is the supported path today.
+- Fonts are left exactly as PopTop shipped them, deliberately (`FINDINGS.md` §63.5).
 
 ## Layout
 
+- `tools/tropico` — **the launcher.** What players run
+- `tools/tropico-install.sh`, `tools/tropico-setmode.sh` — install, and switch resolution
+- `tools/tropico-gog.sh` — **the test harness, not the launcher.** It defaults to a Wine
+  virtual desktop and exposes a dozen research knobs; `TESTING.md` depends on all of it
+- `proxy/` — the `binkw32.dll` proxy: every runtime patch lives here
 - `FINDINGS.md` — verified reverse-engineering results, with addresses and the evidence
+- `ROADMAP.md` — what is done, what is not, and what was deliberately declined
 - `TESTING.md` — methodology, and the traps that invalidated earlier experiments
-- `tools/` — the patcher and the launcher
 - `probes/` — small Win32 programs used to measure Wine/DirectDraw behaviour directly
-- `logs/` — captured `+ddraw` traces (gzipped)
 
-## Environment
+## Requirements
 
-Pop!_OS 24.04, X11/XWayland. System `wine 9.0` with 32-bit support is sufficient for the
-GOG build — no Steam or Proton needed. Build probes with
+Linux with plain `wine` (9.0 is enough) including 32-bit support, `python3`, and
+`xrandr`. No Steam, no Proton, no gamescope. Developed on Pop!_OS 24.04 under
+XWayland. Building the proxy needs `mingw-w64` (`proxy/build.sh`); building probes:
 `i686-w64-mingw32-gcc -o x.exe x.c -lddraw -ldxguid -luser32`.

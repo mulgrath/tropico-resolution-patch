@@ -90,20 +90,47 @@ if [ $# -ge 2 ]; then
   MODES="${1}x${2}"
   ACTIVE="$MODES"
 else
-  for m in $(tropico_connected_modes || true); do
-    w="${m%x*}"; h="${m#*x}"
-    if tropico_validate_mode "$w" "$h" 2>/dev/null; then
-      MODES="$MODES $m"
-    else
-      echo "   skipping $m: $(tropico_validate_mode "$w" "$h" 2>&1 >/dev/null || true)"
-    fi
-  done
-  ACTIVE="$(tropico_primary_mode || true)"
-  if [ -n "$ACTIVE" ] && ! tropico_validate_mode "${ACTIVE%x*}" "${ACTIVE#*x}" 2>/dev/null; then
-    echo "   the primary monitor's mode $ACTIVE cannot be used; falling back to 1920x1080"
-    ACTIVE=""
+  OUTS="$(tropico_outputs || true)"
+  if [ -z "$OUTS" ]; then
+    echo "!! Could not read your monitors (is xrandr installed, and DISPLAY set?)." >&2
+    echo "   Pass the resolution explicitly, e.g.:  $(basename "$0") 1920 1080" >&2
+    exit 1
   fi
-  [ -n "$ACTIVE" ] || { ACTIVE="1920x1080"; MODES="$MODES 1920x1080"; }
+  ACTIVE=""
+  # Negotiate PER OUTPUT. A panel's current mode is not always usable -- 1366x768 is
+  # one of the commonest laptop resolutions and its width is not a multiple of 4, so
+  # it shears (FINDINGS 10). Fall back to the largest mode that panel actually
+  # offers and we can actually use, never to a fixed resolution it may not have.
+  OLDIFS="$IFS"; IFS='
+'
+  for row in $OUTS; do
+    IFS="$OLDIFS"
+    set -- $row
+    name="$1"; mode="$2"; prim="$3"
+    w="${mode%x*}"; h="${mode#*x}"
+    use=""
+    if [ "$mode" != "-" ] && tropico_validate_mode "$w" "$h" 2>/dev/null; then
+      use="$mode"
+    else
+      alt="$(tropico_best_mode "$name" "${w:-99999}" "${h:-99999}" || true)"
+      if [ -n "$alt" ]; then
+        echo "   $name: $mode is not usable ($(tropico_validate_mode "$w" "$h" 2>&1 >/dev/null || true)); using $alt instead"
+        use="$alt"
+      else
+        echo "   $name: no usable mode found; this monitor will use the game's stock resolutions"
+      fi
+    fi
+    [ -n "$use" ] && MODES="$MODES $use"
+    [ "$prim" = "primary" ] && [ -n "$use" ] && ACTIVE="$use"
+    IFS='
+'
+  done
+  IFS="$OLDIFS"
+  if [ -z "$ACTIVE" ]; then
+    echo "!! Your primary monitor has no mode this patch can use." >&2
+    echo "   The game will still run at its own stock resolutions; nothing was changed." >&2
+    exit 1
+  fi
 fi
 MODES="$(echo $MODES | tr ' ' '\n' | sort -u | tr '\n' ' ')"
 [ -n "$(echo $MODES)" ] || { echo "!! no usable mode found" >&2; exit 1; }
