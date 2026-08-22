@@ -254,6 +254,9 @@ mkdir -p "$APPS"
   echo "Exec=$SELF/tropico"
   [ -n "$ICON" ] && echo "Icon=$ICON"
   echo "Terminal=false"
+  # Ties the running window to this entry, so the taskbar shows the icon and not a
+  # generic Wine placeholder.
+  echo "StartupWMClass=Tropico"
   echo "Categories=Game;StrategyGame;"
 } > "$APPS/tropico-patch.desktop"
 if command -v desktop-file-validate >/dev/null 2>&1; then

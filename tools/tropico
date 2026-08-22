@@ -2,138 +2,118 @@
 # Tropico -- launcher.
 #
 #   tropico                  play
-#   tropico --monitor NAME   run on a specific monitor, just for this launch
+#   tropico --monitor NAME   run on another monitor for one launch
 #   tropico --list           show monitors, modes and installed art sets
-#   tropico --exclusive      turn the other monitors off for the run (see below)
 #   tropico --log            capture a trace next to the game, for bug reports
 #
-# THE RULE: LAUNCH IT FROM THE MONITOR YOU WANT TO PLAY ON.
+# THE RULE: TROPICO RUNS ON YOUR PRIMARY MONITOR.
 #
-# The launcher makes that monitor primary for the run and matches the game's
-# resolution and artwork to it, then puts your primary back afterwards. Wine
-# measures only the primary monitor (FINDINGS 18), so aligning the two is what
-# keeps the game on the screen you are looking at -- and mismatching them is the
-# DirectDraw #150 error (FINDINGS 74).
+# Measured, not assumed (FINDINGS 76): the window follows the PRIMARY monitor, not
+# the mouse and not the terminal it was started from. So the primary is what the
+# game is sized for. --monitor makes another monitor primary for one run and puts
+# it back afterwards.
+#
+# The game runs inside a BORDERLESS Wine virtual desktop sized to that monitor,
+# with the artwork generated for the same size.
+#
+# The virtual desktop is what makes this reliable rather than hopeful. Inside it
+# the game sees ONE screen whose origin is (0,0), so the multi-monitor geometry
+# that produces DirectDraw #150 -- a window on a monitor Wine did not measure,
+# sitting at negative coordinates -- cannot arise at all (FINDINGS 76). Placement
+# stops being a correctness problem and becomes at worst a cosmetic one, and
+# nothing has to touch your display layout to achieve it.
 #
 # This is the SHIPPING launcher. tools/tropico-gog.sh is the test harness and is
-# NOT interchangeable: it defaults to a Wine virtual desktop and exposes a dozen
-# research knobs.
+# NOT interchangeable: it exposes a dozen research knobs TESTING.md depends on.
 set -eu
 
 SELF="$(cd "$(dirname "$0")" && pwd)"
 . "$SELF/tropico-common.sh"
 
-MONITOR=""; LOG=0; EXCLUSIVE=0
+# Launched from the applications menu there is no terminal, so anything printed is
+# simply lost -- including the reason the game did not start. Mirror everything to a
+# log beside the game, and put real problems in front of the user with zenity when
+# there is no tty to read.
+GUI=0; [ -t 1 ] || GUI=1
+LOGF=""
+say()  { echo "$*"; [ -n "$LOGF" ] && printf '%s\n' "$*" >> "$LOGF" || true; }
+warn() { say "!! $*"
+         [ "$GUI" = 1 ] && command -v zenity >/dev/null 2>&1 &&
+           zenity --warning --title=Tropico --width=420 --text="$*" >/dev/null 2>&1 || true; }
+fail() { say "!! $*"
+         [ "$GUI" = 1 ] && command -v zenity >/dev/null 2>&1 &&
+           zenity --error --title=Tropico --width=420 --text="$*" >/dev/null 2>&1 || true
+         exit 1; }
+
+MONITOR=""; LOG=0; LIST=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --monitor|-m) MONITOR="${2:-}"; shift 2 ;;
-    --exclusive|-x) EXCLUSIVE=1; shift ;;
     --log)        LOG=1; shift ;;
     --list|-l)    LIST=1; shift ;;
-    --help|-h)
-      sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
-      exit 0 ;;
+    --help|-h)    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "!! unknown option '$1' (try --help)" >&2; exit 1 ;;
   esac
 done
 
 GAMEDIR="$(tropico_find_dir)"
 if [ -z "$GAMEDIR" ]; then
-  echo "!! Could not find Tropico. Set TROPICO_DIR to the folder holding Tropico.EXE." >&2
-  exit 1
+  fail "Could not find Tropico. Set TROPICO_DIR to the folder holding Tropico.EXE."
 fi
+LOGF="$GAMEDIR/tropico-launcher.log"
+: > "$LOGF" 2>/dev/null || LOGF=""
 
-if [ "${LIST:-0}" = 1 ]; then
+if [ "$LIST" = 1 ]; then
   echo "Monitors:"
-  xrandr --query 2>/dev/null | awk '/ connected/{
-      mode="?"; for(i=3;i<=NF;i++) if($i ~ /^[0-9]+x[0-9]+\+/){ split($i,a,"+"); mode=a[1]; break }
-      printf "   %-12s %-10s%s\n", $1, mode, (/ primary /?"  (primary)":"") }'
+  tropico_outputs | while read -r n m p; do
+    printf "   %-12s %-10s%s\n" "$n" "$m" "$([ "$p" = primary ] && echo '  (primary)')"
+  done
   echo
   "$SELF/tropico-setmode.sh" --list
   exit 0
 fi
 
-# Pick the monitor: the one named with --monitor, else the one the pointer is on,
-# i.e. the screen the game is being launched from. Whichever it is, it is made
-# primary for this run only and restored on ANY exit, including Ctrl-C -- leaving
-# someone's primary monitor moved because a game crashed is not acceptable.
+# Which monitor, and therefore which size. The window follows the PRIMARY, so
+# --monitor has to actually MOVE the primary -- reading the other monitor's mode
+# without moving it is what produced a 2560x1440 game inside a clamped 1920x1080
+# desktop: sound, and a black screen (FINDINGS 76).
 RESTORE_PRIMARY=""
-RESTORE_LAYOUT=""
 restore_primary() {
-  # Outputs first, then primary: turning a monitor back on can reset which output
-  # is primary, so restoring primary before the layout would be undone.
-  if [ -n "$RESTORE_LAYOUT" ]; then
-    OLD="$IFS"; IFS='
-'
-    for _r in $RESTORE_LAYOUT; do
-      IFS="$OLD"; set -- $_r
-      xrandr --output "$1" --mode "$2" --pos "$3" 2>/dev/null || true
-      IFS='
-'
-    done
-    IFS="$OLD"
-    RESTORE_LAYOUT=""
-  fi
-  if [ -n "$RESTORE_PRIMARY" ]; then
-    xrandr --output "$RESTORE_PRIMARY" --primary 2>/dev/null || true
-    RESTORE_PRIMARY=""
-  fi
+  [ -n "$RESTORE_PRIMARY" ] || return 0
+  _p="$RESTORE_PRIMARY"; RESTORE_PRIMARY=""
+  xrandr --output "$_p" --primary 2>/dev/null || true
 }
-if [ -z "$MONITOR" ]; then
-  # Not an error if this fails -- on a single-monitor machine, or anywhere the X
-  # pointer cannot be read, the current primary is already the right answer.
-  MONITOR="$(tropico_pointer_output || true)"
-fi
-if [ -n "$MONITOR" ] && command -v xrandr >/dev/null 2>&1; then
-  if ! xrandr --query | grep -q "^${MONITOR} connected"; then
-    echo "!! '$MONITOR' is not a connected monitor. Try --list." >&2
-    exit 1
-  fi
-  CUR="$(xrandr | awk '/ primary /{print $1; exit}')"
+if [ -n "$MONITOR" ]; then
+  tropico_outputs | awk -v o="$MONITOR" '$1==o{f=1} END{exit !f}' \
+    || fail "'$MONITOR' is not a connected monitor. Run 'tropico --list' to see them."
+  CUR="$(tropico_outputs | awk '$3=="primary"{print $1; exit}')"
   if [ "$CUR" != "$MONITOR" ]; then
-    trap restore_primary EXIT INT TERM
-    RESTORE_PRIMARY="$CUR"
-    xrandr --output "$MONITOR" --primary
-    echo "== $MONITOR is now primary for this run (was $CUR; it will be put back)"
-  fi
-fi
-
-# --exclusive: turn every OTHER monitor off for the run.
-#
-# This exists because placement cannot be won from inside. Measured (FINDINGS 75):
-# the game's fullscreen window is positioned from the surface's PHYSICAL output,
-# which the compositor owns -- at mode-set time the window is on the right monitor,
-# and it is moved to the other one afterwards, undoing any SetWindowPos within
-# 100 ms. With one output enabled there is nowhere else for it to go.
-#
-# The layout is restored on ANY exit including Ctrl-C. It is still a blunt
-# instrument: windows on the disabled monitor reflow and are not put back.
-if [ "$EXCLUSIVE" = 1 ] && [ -n "$MONITOR" ]; then
-  SAVE=""; OTHERS=""
-  while read -r name mode prim; do
-    [ "$mode" = "-" ] && continue
-    SAVE="$SAVE$name $mode $(xrandr --query | awk -v o="$name" '$1==o{for(i=3;i<=NF;i++) if($i ~ /^[0-9]+x[0-9]+\+/){sub(/^[0-9]+x[0-9]+/,"",$i); sub(/^\+/,"",$i); gsub(/\+/,"x",$i); print $i; exit}}')
-"
-    [ "$name" != "$MONITOR" ] && OTHERS="$OTHERS $name"
-  done <<SAVEEOF
-$(tropico_outputs)
-SAVEEOF
-  if [ -n "$OTHERS" ]; then
     trap restore_primary EXIT INT TERM HUP
-    RESTORE_LAYOUT="$SAVE"
-    for o in $OTHERS; do
-      echo "== turning $o off for this run"
-      xrandr --output "$o" --off 2>/dev/null || true
-    done
+    RESTORE_PRIMARY="$CUR"
+    xrandr --output "$MONITOR" --primary || fail "Could not make $MONITOR the primary monitor."
+    say "== $MONITOR is primary for this run (was $CUR; it will be put back)"
   fi
 fi
-
-# Match the art set to the monitor the game is about to measure. Staged sets make
-# this a fraction of a second; an unstaged one is generated once and then staged.
 WANT="$(tropico_primary_mode || true)"
+MONITOR="$(tropico_outputs | awk '$3=="primary"{print $1; exit}')"
+if [ -z "$WANT" ]; then
+  fail "Could not read any monitor's resolution. Is xrandr installed, and is DISPLAY set?"
+fi
+# A monitor whose own mode the patch cannot use (a width that is not a multiple of
+# 4 shears -- 1366x768 is the common case) falls back to the best mode that monitor
+# actually offers, never to a fixed guess.
+if ! tropico_validate_mode "${WANT%x*}" "${WANT#*x}" 2>/dev/null; then
+  ALT="$(tropico_best_mode "${MONITOR:-}" "${WANT%x*}" "${WANT#*x}" 2>/dev/null || true)"
+  [ -n "$ALT" ] || fail "$WANT cannot be used by this patch, and this monitor offers no alternative mode."
+  say "== $WANT is not usable; running at $ALT instead"
+  WANT="$ALT"
+fi
+
+# Match the art set to the size the game is about to run at. Staged sets make this
+# a fraction of a second; an unstaged one is generated once and then staged.
 HAVE="$(cat "$GAMEDIR/data/ARTSET-MODE.txt" 2>/dev/null || true)"
-if [ -n "$WANT" ] && [ -n "$HAVE" ] && [ "$WANT" != "$HAVE" ]; then
-  echo "== switching to $WANT"
+if [ -n "$HAVE" ] && [ "$WANT" != "$HAVE" ]; then
+  say "== switching artwork to $WANT"
   "$SELF/tropico-setmode.sh" "${WANT%x*}" "${WANT#*x}" >/dev/null
 fi
 
@@ -148,25 +128,39 @@ export DISPLAY="${DISPLAY:-:1}"
 if [ "$LOG" = 1 ]; then
   export WINEDEBUG="+ddraw"
   TRACE="$GAMEDIR/tropico-trace.log"
-  echo "== tracing to $TRACE"
+  say "== tracing to $TRACE"
 else
   export WINEDEBUG="${WINEDEBUG:--all}"
   TRACE=""
 fi
 
-# No Wine virtual desktop: the game talks to the real display. This is the tier-1
-# configuration (FINDINGS 13) and it is why the game can reach a real mode at all.
-# The `wine reg` call itself starts wineserver, so the kill afterwards is required
-# or the next launch silently joins a stale desktop.
+# Borderless: strip Wine's window decorations, or the virtual desktop arrives with
+# a title bar wrapped around the game. Prefix-wide, and harmless -- this prefix
+# runs one game.
+wine reg add 'HKCU\Software\Wine\X11 Driver' /v Decorated /t REG_SZ /d N /f >/dev/null 2>&1 || true
+# The desktop SIZE goes on the command line, never through the registry. The
+# registry route has a trap that cost this project two invalid test runs: `wine reg`
+# itself starts a wineserver, which creates the desktop from the value as it was
+# BEFORE the write, so the next launch silently uses the previous size.
 wine reg delete 'HKCU\Software\Wine\Explorer' /v Desktop /f >/dev/null 2>&1 || true
 wineserver -k 2>/dev/null || true
 wineserver -w 2>/dev/null || true
 
-echo "== Tropico  ${WANT:-?}"
+say "== Tropico  $WANT"
 cd "$GAMEDIR"
+# ABSOLUTE WINDOWS PATH, not a relative one. `wine explorer` given a relative path
+# silently starts nothing: no window, no error, no log. Measured, and it looks
+# exactly like a game that crashed instantly.
+EXE="$(winepath -w ./Tropico.EXE 2>/dev/null || true)"
+[ -n "$EXE" ] || fail "Could not resolve Tropico.EXE to a Windows path (is the wineprefix healthy?)"
+# Ask the WM to fullscreen the virtual desktop once it appears. Borderless alone is
+# not fullscreen: without this the window is placed like any other, so it can sit
+# offset with panels over it. Backgrounded and best-effort -- it must never be able
+# to stop the game launching.
+python3 "$SELF/tropico-fullscreen.py" Tropico 30 >/dev/null 2>&1 &
 if [ -n "$TRACE" ]; then
-  wine Tropico.EXE >"$TRACE" 2>&1 || true
+  wine explorer "/desktop=Tropico,$WANT" "$EXE" >"$TRACE" 2>&1 || true
 else
-  wine Tropico.EXE >/dev/null 2>&1 || true
+  wine explorer "/desktop=Tropico,$WANT" "$EXE" >/dev/null 2>&1 || true
 fi
 wineserver -w 2>/dev/null || true

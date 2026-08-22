@@ -32,21 +32,22 @@ monitor, so aligning the two is what keeps the game on the screen you are lookin
 Launching from one monitor while another is primary is the DirectDraw **#150** error
 (`FINDINGS.md` §18, §74).
 
-### If you switch monitors between sessions
+### Which monitor it runs on
 
-Launching on a monitor the game did *not* last run on can fail with DirectDraw
-**#150**, and succeed if you launch again on the same monitor. The cause is not the
-patch: the game's fullscreen window is positioned from the surface's *physical* output,
-which the compositor owns, so it can be placed on the previous monitor no matter what
-the patch asks for (`FINDINGS.md` §75). When that happens:
+**Tropico runs on your primary monitor.** That is measured, not a preference: the window
+follows the primary, not the mouse and not the terminal you started it from
+(`FINDINGS.md` §76). The game runs inside a borderless, fullscreen Wine virtual desktop
+sized to that monitor, which is also why the DirectDraw **#150** error cannot occur — the
+game sees a single screen with origin (0,0).
+
+To play on a different monitor for one launch:
 
 ```bash
-tools/tropico --exclusive --monitor DP-3
+tools/tropico --monitor DP-3      # makes it primary for the run, then puts it back
 ```
 
-`--exclusive` turns the other monitors off for that run, so the window has nowhere else
-to go, and restores your layout afterwards — including on Ctrl-C. It is a blunt
-instrument: windows on the disabled monitor reflow and are not put back.
+To change it permanently, set the primary monitor in your desktop settings. The
+applications-menu entry always uses whatever is primary at the time.
 
 ### Other commands
 

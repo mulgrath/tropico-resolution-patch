@@ -5545,3 +5545,76 @@ error number to be decoded.
 > owned by a layer below you, detect and adapt — do not overwrite and hope. §30 and §47
 > were the same lesson about coordinate spaces; this is the same lesson about window
 > placement.
+
+## 76. The launcher, settled: a borderless virtual desktop on the primary monitor
+
+§74 and §75 chased window placement from inside the process and lost. This section
+records what replaced it, and the two measurements that decided it.
+
+### 76.1 Placement follows the PRIMARY, not the mouse and not the terminal
+
+The §74.5 design read the pointer's output and sized the game for that monitor. Measured,
+it is the wrong signal:
+
+```
+pointer on DP-3, launcher asked for 2560x1440
+  [*] desktop as Wine sees it: 1920x1080     <- it opened on HDMI, the PRIMARY, anyway
+```
+
+and with the primary actually moved:
+
+```
+DP-3 made primary
+  [*] desktop as Wine sees it: 2560x1440     <- agrees, every time
+```
+
+So the rule is **Tropico runs on your primary monitor**, and `--monitor` has to *move* the
+primary rather than merely read another monitor's size. Reading without moving is what
+produced a 2560x1440 game inside a clamped 1920x1080 desktop: intro audio over a black
+screen. Pointer detection was deleted rather than kept as a fallback — a signal that is
+right only when it agrees with the primary is not a fallback, it is a coin toss.
+
+### 76.2 The virtual desktop removes the failure mode instead of fighting it
+
+The game runs inside `wine explorer /desktop=Tropico,WxH`. Inside it there is exactly one
+screen with origin (0,0), so the geometry behind #150 — a window on a monitor Wine did not
+measure, at negative coordinates — **cannot arise**. Nothing has to touch the display
+layout: no monitors are disabled, no outputs repositioned, and the §75 `--exclusive` hack
+was deleted.
+
+Three things were needed to make it presentable, and each is a separate mechanism:
+
+| need | mechanism |
+|---|---|
+| no title bar | `HKCU\Software\Wine\X11 Driver` `Decorated=N` |
+| actually fullscreen | EWMH `_NET_WM_STATE_FULLSCREEN` sent to the desktop window (`tools/tropico-fullscreen.py`, libX11 via ctypes — no wmctrl or xdotool on this box) |
+| the game filling it | the ini mode and the desktop size must be equal |
+
+Borderless is not fullscreen: without the EWMH message the window is placed like any
+other, offset and under panels.
+
+**`wine explorer` needs an ABSOLUTE WINDOWS PATH.** Given a relative one it starts nothing
+at all — no window, no error, no log — which looks exactly like a game that crashed on
+launch. `winepath -w` first.
+
+### 76.3 A mode that does not fit is now refused, loudly
+
+The proxy logs what Wine believes the screen is, unconditionally, and compares it with
+`[Resolution]`. If the configured mode is larger, it says so in words and stands down so
+the constrained picker chooses something that fits:
+
+```
+[x] CONFIGURED MODE DOES NOT FIT. tropico-fix.ini asks for 2560x1440 but the screen
+    this is running on is 1920x1080. The game would render nothing at all -- you would
+    hear the intro over a black screen.
+```
+
+That symptom — audio with no picture — is otherwise indistinguishable from a crash, and
+it was reached twice during this work before the check existed.
+
+### 76.4 GUI launches could not report anything
+
+The desktop entry sets `Terminal=false`, so everything the launcher printed went nowhere,
+including the reason the game did not start. It now mirrors output to
+`tropico-launcher.log` beside the game and raises real problems through `zenity` when
+there is no tty. A launcher that fails silently is worse than one that fails.

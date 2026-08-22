@@ -110,6 +110,7 @@ static void find_applyvideo(void);
 static DWORD WINAPI pin_thread(LPVOID);
 static DWORD g_preset_ret;   /* return address of the preset-apply call site */
 static int g_slot_log;
+static int g_ini_mode_unusable;
 static int g_pin_primary = 1;
 static int g_pin_done;
 static int g_pin_seen_ok;
@@ -368,6 +369,7 @@ static int ini_override(mode_t *m)
     UINT w = GetPrivateProfileIntA("Resolution", "Width",  0, path);
     UINT h = GetPrivateProfileIntA("Resolution", "Height", 0, path);
     if (!w || !h) return 0;
+    if (g_ini_mode_unusable) return 0;   /* does not fit this screen -- see above */
     if (w % 4) { logf_("  ini: width %u is not a multiple of 4 -- ignoring (would shear)", w); return 0; }
     if (collides_with_stock(w)) { logf_("  ini: width %u collides with a stock slot -- ignoring (would be unreachable)", w); return 0; }
     if (w > ART_WIDTH_CAP)
@@ -448,6 +450,30 @@ static void apply_patches(void)
      * (FINDINGS 75). One line here turns that into an obvious diagnosis. */
     logf_("[*] desktop as Wine sees it: %dx%d", GetSystemMetrics(SM_CXSCREEN),
           GetSystemMetrics(SM_CYSCREEN));
+    {
+        /* THE MODE MUST FIT THE SCREEN IT WILL RUN ON. When it does not, the game
+         * asks for a mode larger than its desktop and renders NOTHING -- the intro
+         * audio plays over a blank screen, which looks like a crash and is not one.
+         * Measured: a virtual desktop requested at 2560x1440 lands on a 1920x1080
+         * monitor, Wine clamps it, and the ini still says 2560x1440.
+         *
+         * Refuse quietly rather than fail loudly and invisibly: say what happened,
+         * in words, and let the mode picker choose something that fits instead. */
+        char ip2[MAX_PATH];
+        int iw, ih, dw = GetSystemMetrics(SM_CXSCREEN), dh = GetSystemMetrics(SM_CYSCREEN);
+        snprintf(ip2, sizeof ip2, "%s\\tropico-fix.ini", g_dir);
+        iw = GetPrivateProfileIntA("Resolution", "Width",  0, ip2);
+        ih = GetPrivateProfileIntA("Resolution", "Height", 0, ip2);
+        if (iw && ih && dw && dh && (iw > dw || ih > dh)) {
+            logf_("[x] CONFIGURED MODE DOES NOT FIT. tropico-fix.ini asks for %dx%d but the"
+                  " screen this is running on is %dx%d. The game would render nothing at"
+                  " all -- you would hear the intro over a black screen.", iw, ih, dw, dh);
+            logf_("    Cause: the game was started for one monitor and opened on another."
+                  " Launch it from the monitor you want to play on.");
+            logf_("    Ignoring the configured mode and picking one that fits.");
+            g_ini_mode_unusable = 1;
+        }
+    }
     logf_("[*] resolution table at 0x%08lx  (GOG build has 0x005a0fa0; a different value here"
           " just means a different build, which is fine)", table_va);
     memcpy(GATE_SIG + 1, &table_va, 4);
