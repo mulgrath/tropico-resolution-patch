@@ -5670,3 +5670,62 @@ Two things had to be got right:
 predict or override where the desktop would put the window. This one asks the desktop
 what it is already looking at, and then aligns the *one* thing we do control — which
 monitor is primary, and therefore what Wine measures — with that answer.
+
+## 78. What the rest of the Linux world does about this — and why we were going in circles
+
+Three sections (§74, §75, §76/§77) each concluded something different about which monitor a
+game opens on, because each generalised from one observation. Research settles it, and the
+headline is that **this is not a Tropico problem and it has no clean solution anywhere.**
+
+### 78.1 The state of the art
+
+* **There is no API for choosing an output.** The standard advice across the Linux gaming
+  world for "my game opens on the wrong monitor" is: mark that monitor **primary**, and
+  **launch from it**. That is the fix, not a workaround for one broken game.
+* **gamescope cannot do it either.** Valve's own nested compositor — the tool that exists
+  precisely to give a game its own resolution — has "select monitor for gamescope to
+  appear on" as an **open, unimplemented issue**. If the reference implementation has not
+  solved it, a shell script was never going to.
+* **Wine's native Wayland driver is not a route yet.** It exists in 9.0 but is
+  experimental, and display-mode-change emulation was still in development *after* 9.0
+  shipped — useless for a DirectDraw game whose whole behaviour is mode switching.
+* **gamescope is not packaged for Pop!_OS 24.04** (`apt-cache policy gamescope` → no
+  candidate), which independently confirms the ROADMAP's note.
+
+Sources: linuxmint/wayland#63; ValveSoftware/gamescope#645; Phoronix, "Wine Wayland Driver
+Prepares Display Mode Change Emulation"; maketecheasier, "How to Run Full-screen Games In
+Linux With Dual Monitors".
+
+### 78.2 So the two mechanisms are real, and the fix is to automate the standard advice
+
+| | decided by | measured |
+|---|---|---|
+| which monitor the window opens on | the launch context — on COSMIC, the monitor under the **pointer** | hovering a second monitor *without clicking* still opens the game there, focus left behind |
+| how large the game can be | the **primary**, because Wine measures only that (§18) | making a monitor primary is the only thing that changes what the game may ask for |
+
+`tools/tropico` reads the monitor under the pointer and **makes it primary for the run**,
+restoring the previous primary on exit. That is the standard advice, performed for the
+user instead of documented at them.
+
+Verified on the case that kept failing — pointer on the 1440p panel, primary on the 1080p:
+
+```
+== DP-3 is primary for this run (was HDMI-A-5; it will be put back)
+== switching artwork to 2560x1440
+[*] desktop as Wine sees it: 2560x1440
+[+] slot 4 -> 2560x1440
+```
+
+### 78.3 The methodological failure worth keeping
+
+`_NET_ACTIVE_WINDOW` was adopted in §77 on the *reasoning* that a desktop places new
+windows on the focused output. It sounds right, it is how several compositors behave, and
+on this one it is false — so the change made the reported bug worse. Two sections earlier,
+§76.1 reached the opposite wrong answer from headless runs that had no launch context at
+all.
+
+> Both mistakes have the same shape: **a plausible mechanism was adopted without a test
+> that could distinguish it from its alternative.** Pointer-vs-focus is one experiment —
+> hover without clicking, launch, see where it lands — and it was available the whole
+> time. When two mechanisms predict the same thing in the common case, the only useful
+> experiment is the one where they disagree.

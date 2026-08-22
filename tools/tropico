@@ -81,21 +81,27 @@ if [ "$LIST" = 1 ]; then
   exit 0
 fi
 
-# Which monitor, and therefore which size. The window follows the PRIMARY, so
-# --monitor has to actually MOVE the primary -- reading the other monitor's mode
-# without moving it is what produced a 2560x1440 game inside a clamped 1920x1080
-# desktop: sound, and a black screen (FINDINGS 76).
+# Two mechanisms, and the whole job is making them agree (FINDINGS 78):
+#
+#   PLACEMENT  the desktop opens the window on the monitor you are launching from
+#              -- measured on COSMIC as the one under the POINTER
+#   SIZE       Wine measures only the PRIMARY, so that is the largest the game can be
+#
+# This is not a Tropico problem and there is no API for it: the standard advice
+# across the Linux gaming world is "make that monitor primary and launch from it",
+# and gamescope -- Valve's own tool for this -- still has selecting its output as an
+# open, unimplemented request. So the launcher automates exactly that advice: read
+# which monitor you are launching from, and MAKE IT PRIMARY for the run.
 RESTORE_PRIMARY=""
 restore_primary() {
   [ -n "$RESTORE_PRIMARY" ] || return 0
   _p="$RESTORE_PRIMARY"; RESTORE_PRIMARY=""
   xrandr --output "$_p" --primary 2>/dev/null || true
 }
-# Default to the monitor this is being LAUNCHED FROM -- the active window's screen,
-# which is what the desktop keys on when it decides where to open the game. The
-# pointer alone is not good enough: move the mouse to another monitor without
-# clicking anything and it holds no focus, so the mouse says one screen and the
-# desktop uses another (FINDINGS 77).
+# Where is this being launched from? The POINTER, measured: hovering a second
+# monitor without clicking anything -- so focus stays behind on the first -- still
+# opens the game under the mouse. An earlier version asked _NET_ACTIVE_WINDOW on the
+# theory that placement follows focus; it does not, and that made this case worse.
 if [ -z "$MONITOR" ]; then
   MONITOR="$(tropico_launch_output || true)"
 fi

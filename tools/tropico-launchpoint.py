@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Print "X Y" for the screen point the game is being launched from.
 
-WHY NOT THE POINTER. The desktop places a new window on the FOCUSED output, and
-the mouse can sit on a monitor that has no focus -- move the cursor to a second
-screen without clicking anything and the pointer says one monitor while the
-desktop will use another. That mismatch is invisible until the game opens on the
-wrong screen at the wrong size (FINDINGS 77).
+THE POINTER WINS, and that is measured, not assumed (FINDINGS 78). This helper
+first asked _NET_ACTIVE_WINDOW, on the reasoning that a desktop places a new window
+on the FOCUSED output. On this compositor it does not: hovering a second monitor
+without clicking anything -- focus left behind on the first -- still opens the game
+under the mouse. Sizing it for the focused monitor then produced the exact bug the
+change was meant to fix.
 
-So ask for the active window first (_NET_ACTIVE_WINDOW, the same thing the desktop
-itself keys on) and fall back to the pointer only when there is no active window.
-ctypes/libX11: no wmctrl or xdotool needed.
+So: pointer first. The active window is kept only as a fallback for the case where
+the pointer cannot be read at all.
 """
 import ctypes, ctypes.util, sys
 
@@ -73,14 +73,7 @@ def centre_of(w):
         return None
     return ax.value + ww.value // 2, ay.value + hh.value // 2
 
-w = active_window()
-if w:
-    c = centre_of(w)
-    if c:
-        print("%d %d" % c)
-        sys.exit(0)
-
-# Fallback: the pointer. Better than nothing, and correct whenever the two agree.
+# The pointer: where the window will actually open.
 a = ctypes.c_ulong(); b = ctypes.c_ulong()
 rx = ctypes.c_int(); ry = ctypes.c_int(); wx = ctypes.c_int(); wy = ctypes.c_int()
 m = ctypes.c_uint()
@@ -89,4 +82,12 @@ if x.XQueryPointer(ctypes.c_void_p(d), ctypes.c_ulong(root), ctypes.byref(a), ct
                    ctypes.byref(m)):
     print("%d %d" % (rx.value, ry.value))
     sys.exit(0)
+
+# Only if the pointer is unreadable: the focused window's screen.
+w = active_window()
+if w:
+    c = centre_of(w)
+    if c:
+        print("%d %d" % c)
+        sys.exit(0)
 sys.exit(1)
