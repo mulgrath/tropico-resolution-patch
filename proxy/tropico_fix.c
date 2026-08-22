@@ -114,6 +114,7 @@ static int patch_force_fullscreen(void);
 static int g_force_fs = 1;   /* s79: never let the engine enter windowed mode */
 static int g_fs_clamped;     /* how many times the clamp has fired */
 static int g_ini_mode_unusable;
+static int g_staged_fallback = 1;  /* s85: [Display] StagedFallback */
 static int g_pin_primary = 1;
 static int g_pin_done;
 static int g_pin_seen_ok;
@@ -304,9 +305,91 @@ static int collides_with_stock(DWORD w)
     return w == 640 || w == 800 || w == 1024 || w == 1280;
 }
 
-static int pick_mode(mode_t *out)
+/* ------------------------------------------------- staged art sets (s85)
+ * The installer stages one art set per connected monitor into <gamedir>\artsets\<WxH>\,
+ * and tropico-setmode.sh copies one of them into data\ to make it ACTIVE. Only the
+ * active one is on disk where the game looks.
+ *
+ * That is fine on the normal path, where the launcher sets the ini and the art to the
+ * same mode. It is exactly wrong on the FALLBACK path: the mode in the ini did not fit
+ * the screen Wine measured, so the mode we pick instead is guaranteed not to match the
+ * art the launcher staged -- and no choice of mode can fix that, because the art is
+ * already on disk.
+ *
+ * Unless we switch it too. Measured: every staged set has an IDENTICAL filename list
+ * (267 files, same names in all of 1920x1080 / 2560x1440 / 3840x2160), so activating a
+ * set is a plain overwrite-copy. No manifest-driven deletion, no stale files, and no
+ * window in which data\ holds a mixture of two sets. */
+static int staged_dir(char *out, size_t n, DWORD w, DWORD h)
 {
-    log_environment();
+    return snprintf(out, n, "%s\\artsets\\%lux%lu", g_dir, w, h) > 0;
+}
+
+static int mode_is_staged(DWORD w, DWORD h)
+{
+    char path[MAX_PATH];
+    DWORD a;
+    if (!staged_dir(path, sizeof path, w, h)) return 0;
+    a = GetFileAttributesA(path);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* Copy a staged set over data\. Returns the number of files copied, 0 on failure.
+ * Deliberately does NOT delete anything first: identical filename lists mean every
+ * file is overwritten in place, and a delete-then-copy would open a window where a
+ * crash leaves data\ empty. */
+static int activate_artset(DWORD w, DWORD h)
+{
+    char src[MAX_PATH], pat[MAX_PATH], from[MAX_PATH], to[MAX_PATH], marker[MAX_PATH];
+    WIN32_FIND_DATAA fd;
+    HANDLE hf;
+    int n = 0, failed = 0;
+
+    if (!staged_dir(src, sizeof src, w, h)) return 0;
+    snprintf(pat, sizeof pat, "%s\\*", src);
+    hf = FindFirstFileA(pat, &fd);
+    if (hf == INVALID_HANDLE_VALUE) {
+        logf_("[x] [artset] no staged set at %s", src);
+        return 0;
+    }
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        snprintf(from, sizeof from, "%s\\%s", src, fd.cFileName);
+        snprintf(to,   sizeof to,   "%s\\data\\%s", g_dir, fd.cFileName);
+        if (CopyFileA(from, to, FALSE)) n++;
+        else if (++failed <= 3)
+            logf_("[x] [artset] could not copy %s (error %lu)", fd.cFileName, GetLastError());
+    } while (FindNextFileA(hf, &fd));
+    FindClose(hf);
+
+    if (failed) {
+        /* A partial copy is worse than none: data\ now holds two sets mixed. Say so
+         * loudly rather than let it look like a mysterious HUD bug. */
+        logf_("[x] [artset] %d of %d file(s) FAILED to copy -- data\\ may now hold a"
+              " mixture of two art sets. Run tools/tropico-setmode.sh to repair it.",
+              failed, n + failed);
+        return 0;
+    }
+    /* Keep the marker honest: tropico-setmode.sh --list and the launcher both read it,
+     * and a stale marker would make the next launch think no switch is needed. */
+    snprintf(marker, sizeof marker, "%s\\data\\ARTSET-MODE.txt", g_dir);
+    {
+        HANDLE h2 = CreateFileA(marker, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                                FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h2 != INVALID_HANDLE_VALUE) {
+            char line[64];
+            DWORD wr = 0;
+            int len = snprintf(line, sizeof line, "%lux%lu\n", w, h);
+            WriteFile(h2, line, (DWORD)len, &wr, NULL);
+            CloseHandle(h2);
+        }
+    }
+    return n;
+}
+
+static int pick_mode_pass(mode_t *out, int staged_only)
+{
+    if (!staged_only) log_environment();
     DEVMODEA dm; memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
 
     /* Desktop aspect: what the panel actually is, so we can prefer a mode that
@@ -335,8 +418,18 @@ static int pick_mode(mode_t *out)
         DWORD w = dm.dmPelsWidth, h = dm.dmPelsHeight;
         if (!w || !h) continue;
         if (w % 4) continue;                       /* s10: pitch shear         */
-        if (w > ART_WIDTH_CAP) continue;           /* s11: art width ceiling   */
-        if (h > 1200) continue;                    /* stock slot-4 art height  */
+        /* s85: two passes. The stock-art caps below are a ROUGH PROXY for "does art
+         * exist at this size" -- they were written before art was generated per mode,
+         * and they now reject 2560x1440 outright (h > 1200) even when its art set is
+         * staged and ready. A staged set answers that question exactly, so when one
+         * exists the caps are not consulted; when none does, they are, and the old
+         * behaviour is preserved verbatim for an install with no artsets\ at all. */
+        if (staged_only) {
+            if (!mode_is_staged(w, h)) continue;
+        } else {
+            if (w > ART_WIDTH_CAP) continue;       /* s11: art width ceiling   */
+            if (h > 1200) continue;                /* stock slot-4 art height  */
+        }
         if (w > deskw || h > deskh) continue;      /* must fit the desktop     */
         /* Slot 4 is the LARGEST slot. If we cannot beat slot 3's stock 1280, we have
          * nothing to offer and should leave slot 4 alone rather than shrink it. */
@@ -357,14 +450,27 @@ static int pick_mode(mode_t *out)
         if (win) { best.w = w; best.h = h; best_err = err; }
     }
 
-    logf_("  %d candidate modes passed the constraints (fit within %lux%lu, wider than 1280)",
-          considered, deskw, deskh);
+    logf_("  %d candidate mode(s) passed the constraints (fit within %lux%lu, wider than"
+          " 1280, %s)", considered, deskw, deskh,
+          staged_only ? "art set staged" : "within the stock art caps");
     if (!best.w) {
-        logf_("  -> nothing beats slot 3's stock 1280; leaving slot 4 at its stock 1600x1200");
+        if (!staged_only)
+            logf_("  -> nothing beats slot 3's stock 1280; leaving slot 4 at its stock 1600x1200");
         return 0;
     }
     *out = best;
     return 1;
+}
+
+/* Prefer a mode whose art is staged; fall back to the stock-art caps if none is.
+ * Only the fallback path ever gets here -- see ini_override(). */
+static int pick_mode(mode_t *out)
+{
+    if (g_staged_fallback && pick_mode_pass(out, 1)) {
+        logf_("  -> %lux%lu chosen because its art set is STAGED (s85)", out->w, out->h);
+        return 1;
+    }
+    return pick_mode_pass(out, 0);
 }
 
 /* Optional override so a user can force a mode without a rebuild. */
@@ -548,9 +654,51 @@ static void apply_patches(void)
      * FINDINGS s8: patching the data table alone is not enough. A parallel
      * mapping lives in code and silently drops any mode it does not recognise. */
     mode_t m;
+    {
+        /* Read before the picker runs -- it is the picker's behaviour this changes. */
+        char ip3[MAX_PATH];
+        snprintf(ip3, sizeof ip3, "%s\\tropico-fix.ini", g_dir);
+        g_staged_fallback = GetPrivateProfileIntA("Display", "StagedFallback", 1, ip3);
+    }
     if (!ini_override(&m) && !pick_mode(&m)) {
         logf_("[-] no mode satisfied the constraints; leaving slot 4 stock (1600x1200)");
     } else {
+        /* s85: only on the FALLBACK path. If we are here because the configured mode
+         * did not fit, the art the launcher staged is for that unusable mode, so it is
+         * wrong for whatever we picked instead -- and switching the art is the only
+         * thing that can make the fallback look right rather than merely run. On the
+         * normal ini path the launcher already matched them and this is skipped. */
+        if (g_ini_mode_unusable && g_staged_fallback && mode_is_staged(m.w, m.h)) {
+            char active[64] = {0};
+            char mk[MAX_PATH];
+            DWORD rd = 0;
+            HANDLE hm;
+            snprintf(mk, sizeof mk, "%s\\data\\ARTSET-MODE.txt", g_dir);
+            hm = CreateFileA(mk, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                             FILE_ATTRIBUTE_NORMAL, NULL);
+            if (hm != INVALID_HANDLE_VALUE) {
+                ReadFile(hm, active, sizeof active - 1, &rd, NULL);
+                CloseHandle(hm);
+            }
+            {
+                char want[64];
+                snprintf(want, sizeof want, "%lux%lu", m.w, m.h);
+                /* Require a terminator after the match. A bare prefix compare would
+                 * read "2560x14400" as "2560x1440" and silently skip the switch --
+                 * and a skipped switch looks exactly like a HUD bug, not like a bug
+                 * here. Cheap insurance against the worst failure mode this has. */
+                size_t wl = strlen(want);
+                if (strncmp(active, want, wl) == 0
+                    && (active[wl] == '\0' || active[wl] == '\n' || active[wl] == '\r')) {
+                    logf_("  [artset] %s art is already active -- nothing to switch", want);
+                } else {
+                    int n = activate_artset(m.w, m.h);
+                    if (n)
+                        logf_("[+] [artset] switched data\\ to the staged %s set (%d files)"
+                              " -- the fallback now has art that matches its mode (s85)", want, n);
+                }
+            }
+        }
         BYTE *chain = find_unique(CHAIN_SIG, sizeof CHAIN_SIG, g_text, g_textlen, "chain");
         if (chain) {
             DWORD wh[2] = { m.w, m.h };

@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Nested-display test rig -- run the game at a mode LARGER than any panel you own.
 #
-#   tropico-rig.sh [WxH]        default 3840x2160
+#   tropico-rig.sh [WxH]              default 3840x2160
 #   TROPICO_TRACE=1 tropico-rig.sh    also capture Wine's d3d channels
+#   TROPICO_KEEP_MODE=1 tropico-rig.sh 2560x1440
+#                                     do NOT match the ini/art to the screen -- run what
+#                                     is configured against a smaller screen, which is
+#                                     how the fallback path is reached deliberately
 #
 # WHY THIS EXISTS (FINDINGS 81/83)
 # A Wine virtual desktop cannot be larger than the host panel -- Wine clamps it at
@@ -89,8 +93,19 @@ done
 DISPLAY="$DISP" xdpyinfo >/dev/null 2>&1 || { echo "!! $DISP never came up" >&2; exit 1; }
 echo "   $DISP reports: $(DISPLAY=$DISP xdpyinfo | awk '/dimensions:/{print $2; exit}')"
 
-echo "== activating ${W}x${H} (ini + art set)"
-"$SELF/tropico-setmode.sh" "$W" "$H" >/dev/null
+# TROPICO_KEEP_MODE=1 runs whatever the ini and data/ already say, instead of matching
+# them to the rig's screen size. That is the only way to reach the FALLBACK path on
+# purpose: a nested screen SMALLER than the configured mode makes the mode not fit, which
+# is the situation the staged-art fallback exists for (FINDINGS 85). Useless for a normal
+# layout run -- the art would not match the screen, which is the whole point.
+if [ -n "${TROPICO_KEEP_MODE:-}" ]; then
+  echo "== KEEPING the configured mode: ini=$(awk -F= '/^Width=/{w=$2} /^Height=/{h=$2} END{print w"x"h}' "$GAMEDIR/tropico-fix.ini" 2>/dev/null)  art=$(cat "$GAMEDIR/data/ARTSET-MODE.txt" 2>/dev/null)"
+  echo "   (running them against a ${W}x${H} screen on purpose)"
+  PREV_MODE=""      # nothing was changed here, so nothing is restored here
+else
+  echo "== activating ${W}x${H} (ini + art set)"
+  "$SELF/tropico-setmode.sh" "$W" "$H" >/dev/null
+fi
 
 export WINEPREFIX="${WINEPREFIX:-$HOME/.wine-tropico-gog}"
 export WINEARCH=win32
@@ -123,7 +138,7 @@ fi
     if grep -q "desktop as Wine sees it" "$LOG" 2>/dev/null; then
       echo
       echo "=================== VERDICT ==================="
-      grep -E "desktop as Wine sees it|DOES NOT FIT|slot 4|art cap|\[vtext\]|world|no mode satisfied" \
+      grep -E "desktop as Wine sees it|DOES NOT FIT|slot 4|art cap|artset|STAGED|candidate mode|\[vtext\]|world|no mode satisfied" \
            "$LOG" | head -20
       echo "==============================================="
       echo "capture the whole ${W}x${H} frame with:"

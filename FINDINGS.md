@@ -6099,3 +6099,79 @@ layout and never for the graphics stack.
 
 One asymmetry to keep in mind: this crash is only *reachable* because s16 makes the game
 accept Hardware 3D at all. Stock, the signed VRAM compare refuses it on any modern card.
+
+## 85. The fallback picks a mode but cannot fix the art — unless it switches the art too
+
+`pick_mode()` runs only on the fallback path: the mode in `tropico-fix.ini` did not fit
+the screen Wine measured, so the ini is ignored and a mode that fits is chosen instead
+(s80's fit guard, which exists to avoid the black-screen-with-intro-audio symptom).
+
+That path had a defect no choice of mode could repair. The launcher stages art to match
+the ini, so on the fallback path **the art on disk is for the mode that does not fit**.
+Whatever the picker chooses, the HUD is wrong. The fallback ran; it never looked right.
+
+### 85.1 The stale caps made it worse
+
+The picker's filters included two constants:
+
+```c
+if (w > ART_WIDTH_CAP) continue;   /* 1600 */
+if (h > 1200) continue;
+```
+
+Both are pre-pipeline: a rough proxy for "does art exist at this size", from when art was
+whatever PopTop shipped. Art is now generated per mode, so the proxy is wrong — and
+strictly so. `h > 1200` rejects **2560x1440 outright**, so on a 1440p screen the fallback
+could not choose the panel's own mode even with that mode's art sitting staged on disk.
+Measured before the fix: it chose **1600x900**, the aspect-perfect winner of a field
+capped at stock-art dimensions (s81.1).
+
+The proof the caps are stale is on the ini path, which only *warns*: every 2560x1440
+launch logs `WARNING width 2560 exceeds the 1600 art cap; expect an unpainted strip`, and
+there is no unpainted strip. `ini_override()` was softened years ago; `pick_mode()` was
+never updated to match.
+
+### 85.2 What was built
+
+**Two passes.** The picker first considers only modes with a staged art set
+(`<gamedir>\artsets\<WxH>\`), ignoring the stock caps entirely — a staged set answers
+"does art exist at this size" exactly, where the caps only approximated it. If nothing
+staged fits, it falls back to the old capped pass, so an install with no `artsets\` at
+all behaves exactly as before.
+
+**Then it switches the art.** `activate_artset()` copies the staged set over `data\` and
+rewrites `data\ARTSET-MODE.txt`. Measured first: **every staged set has an identical
+filename list** (267 files, same names across 1920x1080 / 2560x1440 / 3840x2160), so this
+is a plain overwrite-copy. No manifest-driven deletion, no stale files, and no window in
+which `data\` holds a mixture — a partial copy is detected and reported loudly instead,
+because a silently mixed set looks like a HUD bug rather than like a bug here.
+
+Only on the fallback path (`g_ini_mode_unusable`), never on the normal one. Opt out with
+`[Display] StagedFallback=0`.
+
+### 85.3 The ordering assumption, verified rather than assumed
+
+The whole design rests on the copy landing before the game opens its first art file. The
+proxy patches from `DllMain` at import time, before `WinMain`, so it should — but "should"
+is not evidence, and being wrong means half-loaded art on a path that only fires when
+something is already wrong.
+
+Tested deliberately with `TROPICO_KEEP_MODE=1 tools/tropico-rig.sh 2560x1440`: ini and
+art both `3840x2160`, nested screen `2560x1440`, so the configured mode cannot fit.
+
+```
+[x] CONFIGURED MODE DOES NOT FIT ... asks for 3840x2160 but the screen ... is 2560x1440
+  2 candidate mode(s) passed the constraints (fit within 2560x1440, ..., art set staged)
+  -> 2560x1440 chosen because its art set is STAGED (s85)
+[+] [artset] switched data\ to the staged 2560x1440 set (267 files)
+[+] slot 4 -> 2560x1440
+```
+
+HUD confirmed correct in game. The ordering holds.
+
+### 85.4 An aside worth keeping
+
+The same run reported `peak address space: 2639 MB` at **2560x1440** under llvmpipe --
+already near the 2-3 GB ceiling of a 32-bit process, with no 3D-mode toggling at all.
+That is independent corroboration of s84: under a VRAM-less renderer the address space is
+the binding constraint, and it is close to exhausted before any device churn begins.
