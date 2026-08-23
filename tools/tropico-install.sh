@@ -142,9 +142,39 @@ if [ "$UNINSTALL" = 1 ]; then
   rm -rf "$GAMEDIR/artsets"
   echo "   removed $a active + $b menu art file(s), and every staged set"
   rm -f "$GAMEDIR/tropico-fix.ini"
-  rm -f "$HOME/.local/share/applications/tropico-patch.desktop"
-  rm -f "$HOME/.local/share/icons/tropico-patch.png"
-  echo "   removed the desktop entry and its icon"
+  # THE DESKTOP ENTRY IS SHARED; THIS SCRIPT IS PER-INSTALL. One entry lives in
+  # $HOME and is written only for non-Steam installs, but uninstall runs once per
+  # discovered game directory -- so removing it unconditionally meant that
+  # uninstalling ANY install silently took the applications-menu launcher away from
+  # every OTHER one. Sequence-dependent and invisible: measured 2026-08-23 as
+  # GOG install (writes it) -> Steam uninstall (removed it) -> Steam install (writes
+  # none, correctly), leaving a working GOG install with no way to start it from the
+  # menu. Invisible with one install, which is why it lasted.
+  #
+  # So remove it only when no OTHER patched non-Steam install is left to need it.
+  #
+  # Read line by line, NOT `for _d in $(...)`: the commonest GOG path on Linux is
+  # "/mnt/.../GOG Games/Tropico/app" and word-splitting on that space turns one
+  # install into two nonexistent ones, so the check silently finds nothing and the
+  # bug survives its own fix. (It did, once.)
+  KEEP_ENTRY=0
+  while IFS= read -r _d; do
+    [ -n "$_d" ] || continue
+    [ "$_d" = "$GAMEDIR" ] && continue
+    case "$_d" in *steamapps*) continue ;; esac      # Steam has no entry to keep
+    if has_mark "$_d/binkw32.dll"; then KEEP_ENTRY=1; fi
+  done <<EOF
+$(tropico_find_all)
+EOF
+  if [ "$KEEP_ENTRY" = 1 ]; then
+    echo "   left the desktop entry in place (another patched install still uses it)"
+  elif [ -f "$HOME/.local/share/applications/tropico-patch.desktop" ]; then
+    rm -f "$HOME/.local/share/applications/tropico-patch.desktop"
+    rm -f "$HOME/.local/share/icons/tropico-patch.png"
+    echo "   removed the desktop entry and its icon"
+  fi
+  # Say nothing when there was no entry -- uninstalling every install runs this
+  # block once per install, and an unconditional message claimed the removal twice.
   echo "== uninstalled. TROPICO.CFG and px*.PK2 are untouched."
   exit 0
 fi
