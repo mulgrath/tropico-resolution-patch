@@ -350,8 +350,9 @@ fi
 if [ "$STEAM" = 1 ]; then
   echo "   PLAY:               press Play in Steam, on the monitor you want to play on."
   echo "                       The patch picks that monitor and its resolution by itself."
-  echo "   NOTE:               use Software 3D on this edition -- Proton's Hardware 3D"
-  echo "                       smears at every resolution, stock ones included (§23)."
+  echo "   NOTE:               the software renderer is the only one now. Hardware 3D is"
+  echo "                       refused on every edition (§91): it smears under Proton and"
+  echo "                       crashes on Windows, and picking it used to brick the install."
 else
   echo "   PLAY:               $PLAY_CMD   (or the Tropico entry in your applications menu)"
 fi
