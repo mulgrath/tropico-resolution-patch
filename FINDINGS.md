@@ -6715,71 +6715,88 @@ than creating one. If the stock exe refuses hardware there instead, then `GetAva
 returns something positive on Windows and the stock gate blocks by luck. Either result argues
 for the deterministic refusal above; the second just makes the case louder.
 
-## 92. Display scaling lies to the game, and it is the tier-1 gate that gets lied to — FIXED, one confirmation outstanding
+## 92. Display scaling is not a lie — it is the resolution the user asked for. DECIDED, and a fix reverted
 
-`Tropico.EXE` carries no DPI manifest, so on Windows it is a DPI-**unaware** process and every
-geometry it is told is virtualized: the logical, scaled size instead of the panel's. On a
-3840x2160 panel at 200%, `SM_CXSCREEN` and `GetDeviceCaps(HORZRES)` both read **1920x1080**.
+`Tropico.EXE` carries no DPI manifest, so on Windows it is a DPI-**unaware** process and
+every geometry it is told is the **logical** desktop size rather than the panel's
+physical one. A 3840x2160 panel at 200% reports 1920x1080 to `SM_CXSCREEN`, to
+`GetDeviceCaps(HORZRES)`, and therefore to the desktop-width gate at `0x515160` that the
+whole tier-1 mechanism rests on.
 
-Three consumers, and the third is not ours:
+This was first written up as a bug and fixed by declaring per-monitor DPI awareness
+(commit `0e290a7`). **That fix has been reverted** — owner's decision, 2026-08-23 — and
+this section records why, because the absence of a DPI call now looks exactly like the
+oversight it used to be.
 
-| site | what it gates |
-|---|---|
-| `tropico_fix.c` `pick_mode_pass` | `deskw`/`deskh`, the picker's fit filter |
-| `tropico_fix.c` `apply_patches` | the same fit check against the configured ini mode |
-| **the game's own `GetDeviceCaps(NULL, HORZRES)`** | **the desktop-width gate at `0x515160` -> `[0x60c118]` (§2)** |
+### The rule
 
-The third is the tier-1 mechanism itself gating the resolution table against a width the
-monitor does not have. A correctly configured 3840x2160 install therefore trips the fit
-check, is pushed into the picker, is filtered on the same wrong number, falls through to the
-stock art caps, and lands on something like 1400x1050 — with a log blaming the user's
-monitor. There was no DPI call anywhere in the proxy, so this affected **every** scaled
-Windows display: 1440p at 125% as much as 4K at 200%. The one native-Windows run that
-worked was at 100%, which is why it had not been seen.
+**Honour the resolution the user asked for, which is the logical desktop size.**
 
-### Linux is unaffected, and cannot reproduce it
+| the user has | they asked for | the game runs at |
+|---|---|---|
+| 3840x2160 panel at 200% | a 1920x1080 desktop | 1920x1080 |
+| 1920x1080 panel at 50% | a 3840x2160 desktop | 3840x2160, softer |
 
-Measured with `probes/dpiprobe.c` under wine-9.0 at `HKCU\Control Panel\Desktop\LogPixels`
-96 / 144 / 192: `LOGPIXELSX` tracks the setting exactly, and `SM_CXSCREEN`,
-`GetDeviceCaps HORZRES` and `EnumDisplaySettings` all stay at the real 1920x1080 in every
-case. **Wine honours the DPI but virtualizes nothing.** The corollary is that the
-before/after confirmation for this fix has to run on native Windows.
+One rule, both directions. Display scaling is a statement about how big things should
+be, and the logical size is that statement expressed as a resolution. Overriding it to
+chase physical pixels substitutes our judgement for a setting the user already made.
 
-### The fix
+### What the actual defect was
 
-`make_dpi_aware()`, called from `DllMain` before anything measures anything:
-`SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`, falling back to
-`SetProcessDPIAware`. Process-wide, so all three sites — including the game's own — start
-being told physical pixels, and the surrounding logic that was expensive to get right is
-untouched.
+Not the number — a **disagreement about which number**. On a 4K panel at 200%:
 
-**The fallback is the Wine path, not belt-and-braces.** Measured, and re-measured against
-this build: the modern call fails with **87** under wine-9.0 every time.
+1. the installer measured the **physical** panel and staged art for 3840x2160;
+2. the proxy measured the **logical** desktop and saw 1920x1080;
+3. the configured 3840x2160 mode failed the fit check and was discarded;
+4. the picker, filtering on 1920x1080, found no staged set that matched;
+5. it fell through to the stock art caps and landed at ~1400x1050.
 
-**It cannot regress Linux.** In the same probe run `SetProcessDPIAware()` returns 1 and
-moves not a single number, at any DPI setting. Re-confirmed with the built proxy at
-LogPixels 96 and 144: `SM_CXSCREEN` reads 1920x1080 before and after the call.
+Two ends measuring differently. The reverted fix dragged the proxy to physical. The
+decision drags the installer to logical instead — same disagreement, resolved from the
+end that needs no Windows API, no version fallback, and no per-runtime divergence.
 
-It sits *after* the `TROPICO_FIX_DISABLE` early return — that control run must apply
-nothing, and process-wide DPI awareness is something.
+### What the revert buys
 
-**Rejected:** swapping `GetSystemMetrics` for `EnumDisplaySettings` at our two sites. It
-cannot reach the game's own `GetDeviceCaps` at all, and under Wine that fit check is what
-protects against a virtual desktop requested larger than the monitor it lands on (§81).
+* **The entire DPI apparatus disappears**: no awareness call, no
+  `PER_MONITOR_AWARE_V2`, no pre-1703 fallback.
+* **No runtime divergence.** Measured in the same session, and this alone would have
+  become a maintenance problem: `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`
+  **fails with 87 under system wine 9.0** but **succeeds under Proton**, which is new
+  enough to implement it. Two Linux runtimes taking different paths through a call that
+  exists to correct a Windows-only behaviour is exactly the sort of thing that produces
+  an unreproducible bug report. With no call at all, all three runtimes agree.
+* **Exclusive fullscreen stays sharp.** DirectDraw mode setting is not
+  DPI-virtualized, so asking for 1920x1080 on a 4K panel is a genuine 1080p signal the
+  display upscales at an exact 2x, not a composited stretch.
 
-### Making it visible
+### What went with it
 
-`log_environment` now prints `EnumDisplaySettings` — the adapter's real mode, never
-virtualized — directly beneath `SM_CXSCREEN`, and shouts when the pair disagrees, with the
-scaling percentage the difference implies. A single wrong number is invisible in a log; a
-mismatched pair is not.
+`make_dpi_aware()` and its `DllMain` call are gone. The `log_environment` addition
+**stays, reworded**: it still prints `EnumDisplaySettings` beside `SM_CXSCREEN`, because
+the pair makes the scaling factor visible and lets an unexpected run size be diagnosed
+without asking the user what their settings are. What was removed is the warning that
+fired on a mismatch — under this policy a mismatch is the system working correctly, and
+flagging it as a fault would have been actively misleading. It never fired in a real
+run, which is luck rather than design: `log_environment` is called only from
+`pick_mode_pass`'s second pass, so the staged-only first pass hides it whenever a
+staged set matches.
 
-### Outstanding
+### The measurement that still stands
 
-The intro and the menu run *before* exclusive fullscreen is entered, and declaring the
-process DPI-aware changes how a non-fullscreen window is presented on a scaled display.
-That needs confirming on real scaled Windows hardware — Display Settings -> Scale 150%, no
-4K required — before the fix is called done. `dpiprobe.exe` is the before/after harness.
+`probes/dpiprobe.c` under wine-9.0 at `LogPixels` 96 / 144 / 192: `LOGPIXELSX` tracks
+the setting, and `SM_CXSCREEN`, `GetDeviceCaps HORZRES` and `EnumDisplaySettings` all
+stay at the real 1920x1080. **Wine reports the DPI and virtualizes nothing.** So Linux
+cannot exercise any of this either way, and the probe remains the harness if it is ever
+revisited.
+
+### Known gap, recorded rather than solved
+
+A mixed-DPI multi-monitor Windows setup — a 4K laptop panel at 200% beside a 1080p
+external at 100% — applies the **system** DPI uniformly to an unaware process. The
+numbers reported for the monitor that is not at system DPI are then neither physical nor
+that monitor's own logical size. Per-monitor awareness is the only thing that gets that
+case right, and it is incompatible with the rule above. Rare, Windows-only, and named
+here so it is not rediscovered as a mystery.
 
 ## 93. The C codec is 36x the Python and byte-exact — and the 30 s was never allocation churn
 

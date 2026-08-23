@@ -133,13 +133,25 @@ which is obvious from the code alone:
 
 ## 5. What survives, and what the proxy gains
 
-**The DPI fix is now more important, not less** (`tropico_fix.c:470`, `:709`, and the
-game's own `GetDeviceCaps` feeding the gate at `0x515160`). With generation driven by the
-proxy's own measurement, a virtualized number does not merely pick a wrong mode — it
-generates a whole art set for a screen that does not exist. Lands first, unchanged from
-the earlier design. Confirmed safe under Wine: `SetProcessDPIAware` returns 1 and moves
-no number; `SetProcessDpiAwarenessContext` fails with 87 there, so the fallback is the
-path Wine takes.
+**The DPI fix is REVERTED, and the requirement it served is inverted** (owner's
+decision, 2026-08-23; FINDINGS 92). The rule is now: honour the resolution the user asked
+for, which is the **logical** desktop size. 200% on a 4K panel means a 1920x1080 desktop
+and the game runs at 1920x1080; 50% on a 1080p panel means 3840x2160 and the game runs
+there. The patch is therefore deliberately DPI-**unaware** and there is no DPI call in
+the proxy at all.
+
+What the defect actually was: a disagreement, not a wrong number. The installer measured
+the physical panel and the proxy measured the logical desktop, so nothing matched and the
+run fell to the stock art caps. The fix is to make **the installer** measure logically
+too — which is what this design must do when generation moves into the proxy, since then
+one measurement drives both the mode and the art.
+
+That still makes the measurement load-bearing: a wrong number generates a whole art set
+for a screen that does not exist. It just has to be the *logical* number. Two things fall
+out that the earlier design would have carried: no Windows-version fallback, and no
+runtime divergence — measured, `SetProcessDpiAwarenessContext` fails with 87 under system
+wine 9.0 but **succeeds under Proton**, so the reverted call had two Linux runtimes taking
+different paths through it.
 
 **Windows monitor selection becomes possible.** It was blocked because the proxy could
 not generate art for a monitor nothing had staged. That blocker is gone: the proxy can

@@ -78,6 +78,21 @@ staged sets; the README mentions it once, late.
 
 ## 2. Display scaling — a bug in the current release
 
+> **SUPERSEDED 2026-08-23 by the owner's decision; see FINDINGS 92.** The fix this
+> section designs — `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` — was
+> implemented, shipped in commit `0e290a7`, and then **reverted**. The rule instead is:
+> honour the resolution the user asked for, which is the **logical** desktop size. A 4K
+> panel at 200% is a request for a 1920x1080 desktop and the game runs at 1920x1080; a
+> 1080p panel at 50% is a request for 3840x2160 and it runs there. The patch is
+> deliberately DPI-unaware.
+>
+> The *defect* described below is real, but it is a **disagreement** — the installer
+> measured the physical panel while the proxy measured the logical desktop — and it is
+> fixed by making the installer measure logically, not by making the proxy measure
+> physically. Everything below about virtualized metrics being "wrong" reads the
+> opposite way now. The measurement table and the Wine probe results remain accurate.
+
+
 This was found while designing the installer's display query and is the most
 important thing in this document.
 
