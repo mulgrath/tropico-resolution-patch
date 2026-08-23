@@ -181,13 +181,13 @@ else
     if [ "$mode" != "-" ] && tropico_validate_mode "$w" "$h" 2>/dev/null; then
       use="$mode"
     else
-      alt="$(tropico_best_mode "$name" "${w:-99999}" "${h:-99999}" || true)"
-      if [ -n "$alt" ]; then
-        echo "   $name: $mode is not usable ($(tropico_validate_mode "$w" "$h" 2>&1 >/dev/null || true)); using $alt instead"
-        use="$alt"
-      else
-        echo "   $name: no usable mode found; this monitor will use the game's stock resolutions"
-      fi
+      # Same removal as tools/tropico: `tropico_best_mode` was to pick the largest
+      # mode this panel actually offers, is defined nowhere, and had its failure
+      # swallowed by `|| true` -- so this has always fallen straight through to the
+      # message below. The reason the mode was rejected is now printed, which the
+      # dead branch used to carry and the surviving one did not.
+      echo "   $name: $mode is not usable ($(tropico_validate_mode "$w" "$h" 2>&1 >/dev/null || true));" \
+           "this monitor will use the game's stock resolutions"
     fi
     [ -n "$use" ] && MODES="$MODES $use"
     [ "$prim" = "primary" ] && [ -n "$use" ] && ACTIVE="$use"

@@ -120,19 +120,33 @@ if [ -n "$MONITOR" ]; then
     say "== $MONITOR is primary for this run (was $CUR; it will be put back)"
   fi
 fi
+# ORDER IS LOAD-BEARING: MEASURE AFTER THE PRIMARY SWITCH, NEVER BEFORE.
+#
+# The block above may have just made a different output primary. Everything below --
+# and the proxy itself, which measures the display for real at launch -- must see the
+# display in the state the GAME will run in, not the state the desktop was idling in.
+# Measured: a 2560x1440 panel scaled to 200%, whose idle `xrandr` reports 1280x720,
+# yields the correct 2560x1440 only because these two lines run after the switch.
+#
+# This is currently correct BY LINE ORDER ALONE -- there is no assertion holding it in
+# place, so a refactor that hoists the measurement for tidiness would break it silently
+# and the symptom would be a wrong art set rather than an error. Keep them below.
 WANT="$(tropico_primary_mode || true)"
 MONITOR="$(tropico_outputs | awk '$3=="primary"{print $1; exit}')"
 if [ -z "$WANT" ]; then
   fail "Could not read any monitor's resolution. Is xrandr installed, and is DISPLAY set?"
 fi
-# A monitor whose own mode the patch cannot use (a width that is not a multiple of
-# 4 shears -- 1366x768 is the common case) falls back to the best mode that monitor
-# actually offers, never to a fixed guess.
+# A monitor whose own mode the patch cannot use -- a width that is not a multiple of
+# 4 shears (FINDINGS 10), 1366x768 being the common case -- stops here.
+#
+# There used to be a fallback on this branch: `tropico_best_mode` was to pick the
+# largest mode the monitor actually offers. It is DEFINED NOWHERE and never was, and
+# the call swallowed its own failure with `|| true`, so ALT was unconditionally empty
+# and this branch has only ever reached the `fail` below. Removing it changes no
+# behaviour whatever; it just stops the code claiming a fallback that does not exist.
+# If the fallback is wanted, it is a new feature and needs writing, not restoring.
 if ! tropico_validate_mode "${WANT%x*}" "${WANT#*x}" 2>/dev/null; then
-  ALT="$(tropico_best_mode "${MONITOR:-}" "${WANT%x*}" "${WANT#*x}" 2>/dev/null || true)"
-  [ -n "$ALT" ] || fail "$WANT cannot be used by this patch, and this monitor offers no alternative mode."
-  say "== $WANT is not usable; running at $ALT instead"
-  WANT="$ALT"
+  fail "$WANT cannot be used by this patch: $(tropico_validate_mode "${WANT%x*}" "${WANT#*x}" 2>&1 >/dev/null || true)"
 fi
 
 # Match the art set to the size the game is about to run at. Staged sets make this

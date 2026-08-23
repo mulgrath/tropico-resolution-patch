@@ -147,16 +147,22 @@ make a chosen monitor primary (`ChangeDisplaySettingsEx`, `CDS_SET_PRIMARY`, res
 exit and on crash), measure it, and generate to match. Recorded as newly-unblocked; not
 yet scheduled.
 
-**The Linux ordering rule still holds and still needs writing down**: measure the display
-in the state the game will run in, never before. `tools/tropico:119,123` switches the
-primary and *then* measures, which is why a 2560x1440 panel scaled to 200% (idle
-`xrandr`: 1280x720) correctly yields 2560x1440. It is currently correct by line order
-alone. The launcher keeps this job; it loses its art-staging job entirely.
+**The Linux ordering rule still holds — and is now written down** (commit below):
+measure the display in the state the game will run in, never before. `tools/tropico`
+switches the primary and *then* measures, which is why a 2560x1440 panel scaled to 200%
+(idle `xrandr`: 1280x720) correctly yields 2560x1440. It was correct by line order alone
+with nothing holding it there; the two lines now carry a comment saying so, because the
+symptom of hoisting them is a wrong art set rather than an error. The launcher keeps
+this job; it loses its art-staging job entirely.
 
-**`tropico_best_mode` is called from `tropico-install.sh:184` and `tools/tropico:132` and
-is defined nowhere**; both callers end in `|| true`, so the documented fallback for an
-unusable primary mode has never once run. Independent of this redesign. It may become
-moot — decide it, do not leave it as an oversight.
+**`tropico_best_mode` — DECIDED: both call sites deleted** (owner's call, 2026-08-23).
+It was called from `tropico-install.sh` and `tools/tropico`, defined nowhere, and both
+callers swallowed the failure with `|| true`, so the variable was unconditionally empty
+and the documented fallback for an unusable primary mode had never once run. Deleting
+the calls is therefore a **behaviour-preserving** change: both branches already fell
+straight through to the path that survives. What it removes is code that claimed a
+fallback the release does not have. If that fallback is wanted it is a new feature and
+gets written; it does not get restored.
 
 **The Python stays** as the reference implementation and the oracle (§7). It is no longer
 shipped.

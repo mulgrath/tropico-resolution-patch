@@ -432,8 +432,21 @@ def main():
     ok = bad = 0
     skipped = []
     n_sprites = in_b = out_b = 0
+    # CACHE THE ARCHIVE BLOBS. This loop used to re-read the whole containing archive
+    # for every asset, and px.PK2 is 372 MB -- 318 reads of a gigabyte-plus. It was
+    # never disk (0 major page faults; the page cache served all of it), which is why
+    # it hid: it showed up as 16.1 M MINOR faults and 17.9 s of SYSTEM time, and was
+    # misread as allocation churn in the resampling. Measured, 2560x1440 full set
+    # (FINDINGS 93): 27.6 s -> 9.0 s, sys 19.2 -> 0.78, minor faults 16.1 M -> 678 k.
+    #
+    # Worth having even though this tool is no longer shipped: it is the ORACLE the
+    # C port is diffed against at every stage, so its runtime is paid on every run of
+    # probes/artgen_oracle.py.
+    _blobs = {}
     for name, e in names:
-        blob = open(e['archive'], 'rb').read()
+        blob = _blobs.get(e['archive'])
+        if blob is None:
+            blob = _blobs[e['archive']] = open(e['archive'], 'rb').read()
         d = blob[e['offset']: e['offset'] + e['size']]
         try:
             r = hs.parse(d)
