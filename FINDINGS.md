@@ -6714,3 +6714,69 @@ does, this is purely a runtime defect and §16 is exonerated — it exposed a br
 than creating one. If the stock exe refuses hardware there instead, then `GetAvailableVidMem`
 returns something positive on Windows and the stock gate blocks by luck. Either result argues
 for the deterministic refusal above; the second just makes the case louder.
+
+## 92. Display scaling lies to the game, and it is the tier-1 gate that gets lied to — FIXED, one confirmation outstanding
+
+`Tropico.EXE` carries no DPI manifest, so on Windows it is a DPI-**unaware** process and every
+geometry it is told is virtualized: the logical, scaled size instead of the panel's. On a
+3840x2160 panel at 200%, `SM_CXSCREEN` and `GetDeviceCaps(HORZRES)` both read **1920x1080**.
+
+Three consumers, and the third is not ours:
+
+| site | what it gates |
+|---|---|
+| `tropico_fix.c` `pick_mode_pass` | `deskw`/`deskh`, the picker's fit filter |
+| `tropico_fix.c` `apply_patches` | the same fit check against the configured ini mode |
+| **the game's own `GetDeviceCaps(NULL, HORZRES)`** | **the desktop-width gate at `0x515160` -> `[0x60c118]` (§2)** |
+
+The third is the tier-1 mechanism itself gating the resolution table against a width the
+monitor does not have. A correctly configured 3840x2160 install therefore trips the fit
+check, is pushed into the picker, is filtered on the same wrong number, falls through to the
+stock art caps, and lands on something like 1400x1050 — with a log blaming the user's
+monitor. There was no DPI call anywhere in the proxy, so this affected **every** scaled
+Windows display: 1440p at 125% as much as 4K at 200%. The one native-Windows run that
+worked was at 100%, which is why it had not been seen.
+
+### Linux is unaffected, and cannot reproduce it
+
+Measured with `probes/dpiprobe.c` under wine-9.0 at `HKCU\Control Panel\Desktop\LogPixels`
+96 / 144 / 192: `LOGPIXELSX` tracks the setting exactly, and `SM_CXSCREEN`,
+`GetDeviceCaps HORZRES` and `EnumDisplaySettings` all stay at the real 1920x1080 in every
+case. **Wine honours the DPI but virtualizes nothing.** The corollary is that the
+before/after confirmation for this fix has to run on native Windows.
+
+### The fix
+
+`make_dpi_aware()`, called from `DllMain` before anything measures anything:
+`SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`, falling back to
+`SetProcessDPIAware`. Process-wide, so all three sites — including the game's own — start
+being told physical pixels, and the surrounding logic that was expensive to get right is
+untouched.
+
+**The fallback is the Wine path, not belt-and-braces.** Measured, and re-measured against
+this build: the modern call fails with **87** under wine-9.0 every time.
+
+**It cannot regress Linux.** In the same probe run `SetProcessDPIAware()` returns 1 and
+moves not a single number, at any DPI setting. Re-confirmed with the built proxy at
+LogPixels 96 and 144: `SM_CXSCREEN` reads 1920x1080 before and after the call.
+
+It sits *after* the `TROPICO_FIX_DISABLE` early return — that control run must apply
+nothing, and process-wide DPI awareness is something.
+
+**Rejected:** swapping `GetSystemMetrics` for `EnumDisplaySettings` at our two sites. It
+cannot reach the game's own `GetDeviceCaps` at all, and under Wine that fit check is what
+protects against a virtual desktop requested larger than the monitor it lands on (§81).
+
+### Making it visible
+
+`log_environment` now prints `EnumDisplaySettings` — the adapter's real mode, never
+virtualized — directly beneath `SM_CXSCREEN`, and shouts when the pair disagrees, with the
+scaling percentage the difference implies. A single wrong number is invisible in a log; a
+mismatched pair is not.
+
+### Outstanding
+
+The intro and the menu run *before* exclusive fullscreen is entered, and declaring the
+process DPI-aware changes how a non-fullscreen window is presented on a scaled display.
+That needs confirming on real scaled Windows hardware — Display Settings -> Scale 150%, no
+4K required — before the fix is called done. `dpiprobe.exe` is the before/after harness.

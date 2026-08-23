@@ -289,6 +289,76 @@ static const DWORD TABLE_SIG[10] = {640,480, 800,600, 1024,768, 1280,1024, 1600,
 typedef struct { DWORD w, h; } mode_t;
 static int launch_override(mode_t *m);   /* s90, defined with the monitor code */
 
+/* ------------------------------------------------------- display scaling (DPI)
+ *
+ * Tropico.EXE ships no DPI manifest, so on Windows it is a DPI-UNAWARE process
+ * and every geometry it is told is VIRTUALIZED: the logical, scaled size rather
+ * than the panel's real one. On a 3840x2160 panel at 200% both SM_CXSCREEN and
+ * GetDeviceCaps(HORZRES) read 1920x1080.
+ *
+ * Three sites consume those numbers, and the third is not even ours:
+ *
+ *   pick_mode_pass()   deskw/deskh, the "does this mode fit the desktop" filter
+ *   apply_patches()    the same check against the configured ini mode
+ *   the GAME's own GetDeviceCaps(NULL, HORZRES) -> the desktop-width gate at
+ *                      0x515160 -> [0x60c118] (FINDINGS 2)
+ *
+ * The third is the whole tier-1 mechanism reading a width the monitor does not
+ * have. A correctly configured 3840x2160 install then trips the fit check, is
+ * pushed into the picker, is filtered on the same wrong number, falls back to
+ * the stock art caps, and lands on something like 1400x1050 -- with a log
+ * blaming the user's monitor. Every scaled display is affected, 1440p at 125%
+ * as much as 4K at 200%.
+ *
+ * The fix is process-wide, one call, and leaves all three sites' logic alone --
+ * they simply start being told physical pixels. The alternative, swapping
+ * GetSystemMetrics for EnumDisplaySettings at our two sites, was rejected: it
+ * cannot reach the game's own GetDeviceCaps at all, and under Wine that fit
+ * check is what protects against a virtual desktop requested larger than the
+ * monitor it lands on. Do not "simplify" it back.
+ *
+ * SetProcessDpiAwarenessContext is the modern call and is absent on pre-1703
+ * Windows; resolve it dynamically. The fallback is NOT belt-and-braces --
+ * measured under wine-9.0, the modern call fails with 87 and Wine takes
+ * SetProcessDPIAware every time.
+ *
+ * SAFE FOR LINUX, measured rather than assumed (probes/dpiprobe.c, LogPixels
+ * 96/144/192): Wine honours the DPI setting for LOGPIXELSX but virtualizes
+ * NOTHING, and SetProcessDPIAware there returns 1 while moving not a single
+ * number. Wine cannot reproduce the bug, which is also why the confirmation for
+ * this fix has to run on native Windows.
+ *
+ * Must run before ANY measurement -- awareness set after a metric is read does
+ * not retroactively correct it.
+ */
+static void make_dpi_aware(void)
+{
+    HMODULE u32 = GetModuleHandleA("user32.dll");
+    typedef BOOL (WINAPI *SPDAC_t)(HANDLE);
+    SPDAC_t spdac = u32 ? (SPDAC_t)(void *)GetProcAddress(u32, "SetProcessDpiAwarenessContext") : NULL;
+
+    /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4. Per-monitor
+     * rather than system-aware because the game can be started on one monitor
+     * and opened on another, and we want the real numbers for whichever it
+     * lands on. */
+    if (spdac && spdac((HANDLE)-4)) {
+        logf_("[+] DPI: SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2) -- metrics are physical pixels");
+        return;
+    }
+    if (spdac)
+        logf_("[*] DPI: SetProcessDpiAwarenessContext failed (%lu) -- this is the Wine path; falling back",
+              GetLastError());
+    else
+        logf_("[*] DPI: SetProcessDpiAwarenessContext not exported (pre-1703 Windows); falling back");
+
+    if (SetProcessDPIAware())
+        logf_("[+] DPI: SetProcessDPIAware -- metrics are physical pixels");
+    else
+        logf_("[x] DPI: SetProcessDPIAware failed (%lu). On a SCALED Windows display every"
+              " size below will be the logical one, and the mode picked will be too small.",
+              GetLastError());
+}
+
 /* ------------------------------------------------------------- diagnostics
  *
  * Added while chasing DDERR_INVALIDRECT (#150) on a 2560x1440 secondary monitor
@@ -304,6 +374,26 @@ static void log_environment(void)
     logf_("  SM_CMONITORS      = %d", GetSystemMetrics(SM_CMONITORS));
     logf_("  SM_CXSCREEN       = %d x %d   (primary monitor)",
           GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+
+    /* The scaling factor, made visible. EnumDisplaySettings reports the adapter's
+     * real mode and is NOT DPI-virtualized, so when it disagrees with the metrics
+     * above the difference IS the display scaling -- which means make_dpi_aware()
+     * did not take, and every mode decision below is being made against a screen
+     * that does not exist. Printed side by side because a single wrong number is
+     * invisible and a mismatched PAIR is unmistakable. */
+    {
+        DEVMODEA real; memset(&real, 0, sizeof real); real.dmSize = sizeof real;
+        if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &real)) {
+            logf_("  EnumDisplaySettings = %lu x %lu   (the adapter's real mode, never scaled)",
+                  real.dmPelsWidth, real.dmPelsHeight);
+            int mw = GetSystemMetrics(SM_CXSCREEN);
+            if (mw && real.dmPelsWidth && (DWORD)mw != real.dmPelsWidth)
+                logf_("  [!] THESE DISAGREE -- Windows display scaling is about %d%% and this"
+                      " process is still being told the logical size. Everything below is"
+                      " wrong. Set Display Settings -> Scale to 100%%, or report this.",
+                      (int)((real.dmPelsWidth * 100 + mw / 2) / mw));
+        }
+    }
     logf_("  virtual screen    = %d x %d at (%d,%d)",
           GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN),
           GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
@@ -5529,6 +5619,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
      * exists to test the hook-and-patch mechanism itself without needing the
      * Steam DRM to cooperate -- it isolates "does deferral work" from "does
      * SteamStub decrypt in time", which are separate claims. */
+    /* Before anything measures anything. Deliberately AFTER the DISABLE check
+     * above: that control run must apply NOTHING, and process-wide DPI awareness
+     * is something. */
+    make_dpi_aware();
+
     char defer[8] = {0};
     GetEnvironmentVariableA("TROPICO_FIX_DEFER", defer, sizeof defer);
     int force_defer = (defer[0] == '1');
