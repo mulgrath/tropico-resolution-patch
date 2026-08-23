@@ -2,6 +2,16 @@
 
 2026-08-23.
 
+> **PARTLY SUPERSEDED, same day**, by
+> `2026-08-23-runtime-art-generation-design.md`. Measurement showed that art
+> generation is ~1 s in C rather than 30 s in Python, which moves it into the proxy at
+> launch and deletes the parts of this document that exist to schedule it ahead of
+> time: install-time generation, `artsets\` staging, one set per connected monitor,
+> mode prediction, and the embeddable CPython that shipped it. That document's §9
+> lists precisely what survives here — most of the packaging, the console contract and
+> the user surface do. Its §2 also corrects the Wayland reasoning in this document's
+> §2, which was wrong.
+
 The runtime half of the Windows port is already done. A GOG install on native
 Windows runs the unmodified proxy at 2560x1440 exclusive fullscreen, `tropico-fix.log`
 reads "16 applied, 0 failed", and nothing in the C had to change to get there
