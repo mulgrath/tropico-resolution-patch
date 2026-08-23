@@ -6780,3 +6780,103 @@ The intro and the menu run *before* exclusive fullscreen is entered, and declari
 process DPI-aware changes how a non-fullscreen window is presented on a scaled display.
 That needs confirming on real scaled Windows hardware — Display Settings -> Scale 150%, no
 4K required — before the fix is called done. `dpiprobe.exe` is the before/after harness.
+
+## 93. The C codec is 36x the Python and byte-exact — and the 30 s was never allocation churn
+
+The runtime-art-generation design rests on one estimate: that generating the UI art set
+in C takes about a second rather than the Python's thirty, which is what moves generation
+out of the installer and into the proxy at launch. §7 of that spec turns the estimate into
+a gate with two numeric pass criteria. Both are now measured.
+
+`probes/artgen_probe.c` ports exactly the slice §7 named — `decode_row`, `emit_row`,
+`pick`, `rescale_sprite` — and nothing else. `probes/artgen_oracle.py` extracts the corpus,
+runs `tools/tropico-artset.py`'s **own** `rescale_sprite` over it (not a reimplementation,
+so there is no second Python to keep in step), runs the C over the same bytes, and diffs.
+
+### Criterion 1 — byte-identical: PASS, first run
+
+```
+1300 assets (5 skipped), 25820 sprites, 883554 rows, 68744751 -> 129612466 bytes
+IDENTICAL: 129841486 bytes
+```
+
+Every archived UI sprite, in all five art classes, at 1600x1200 -> 2560x1440. The five
+skipped are `glastube` and its siblings, whose containers have sections outside the sprite
+chain (§26); the Python refuses those too, so both sides skip them and neither guesses.
+
+The spec says 23,246 sprites; that was the count when §62.4 was written, before the
+`brNN` family (§90) grew the name harvest. 25,820 is the same "every archived UI sprite"
+corpus, measured today.
+
+Rebuilt as a **32-bit Windows binary** — the shape the proxy actually is — and run under
+wine: byte-identical to the 64-bit Linux build, so nothing here depends on word size or
+on the host libm.
+
+The terminator rules of §62.3 were the predicted trap and they were not sprung: the
+positional assignment (non-final row always `0x00`; final row keeps its own, except that
+`0x00` becomes nothing) transferred intact, and any error in it would have desynced a row
+and changed a byte in 1.75 M packets.
+
+### Criterion 2 — under 3 s: PASS, with margin
+
+The full 2560x1440 set is 267 assets / 5216 sprites. The i16 corpus that feeds it is
+260 assets / 5164 sprites / 259,811 rows, and on that:
+
+| | compute |
+|---|---|
+| Python `rescale_sprite` | 5.420 s |
+| C, native x86-64 | **0.142 s** |
+| C, 32-bit Windows binary under wine | **0.151 s** |
+
+**36x.** Both sides load the corpus before the clock starts and write after it stops, so
+what is timed is compute alone.
+
+Extrapolating the *whole* generator, pessimistically:
+
+| | |
+|---|---|
+| codec core — **measured**, 32-bit | 0.15 s |
+| archive read — **measured**: all four PK2s, 1.06 GB, in C | 0.33 s |
+| font path (`rescale_font_sprite` + `box_resample`), Python 5.7 s, at a deliberately low 10x | 0.57 s |
+| name harvest, `check`, container assembly, writing 61 MB | 0.50 s |
+| **total** | **~1.6 s** |
+
+The real generator reads ~28 MB of slices rather than the whole gigabyte, and the font
+path is the same shape of loop that just measured 36x, so 1.6 s is a ceiling rather than
+an estimate. Under 3 s either way. **The design is go.**
+
+### The spec's §1 diagnosis is wrong, and it does not matter — but it should be corrected
+
+§1 attributes 60% of the 30 s to allocation churn: 16.1 M minor faults from
+`rescale_sprite` building a list per row and `box_resample` building list-of-lists grids.
+The profile says otherwise. The single largest item in a 36 s profiled run is
+
+```
+318   17.487   {method 'read' of '_io.BufferedReader' objects}
+```
+
+`tropico-artset.py:main` re-reads the **entire containing archive**, once per asset —
+and `px.PK2` is 372 MB. Three lines of cache, measured:
+
+| | stock | archive blob cached |
+|---|---|---|
+| wall | 27.6 s | **9.0 s** |
+| system | 19.2 s | 0.78 s |
+| minor faults | 16,115,375 | 677,995 |
+
+So the 17.9 s of system time and essentially all 16 M faults are that repeated slurp, not
+the codec. The conclusion is unchanged and in fact stronger: the ~9 s that remains **is**
+interpreter work on the pixels, and against that the C measured 0.15 s for the largest
+piece of it. But two things follow that the spec should say:
+
+* the Python oracle can be made ~3x faster for free, which matters because it is the
+  reference implementation every future port stage is diffed against; and
+* the honest argument for moving generation into the proxy is 9 s versus 0.15 s, not
+  30 s versus 1 s. It is the same decision — 9 s is still install-shaped and 0.15 s is
+  not — but it should be made on the real number.
+
+### What is deliberately NOT in the probe
+
+No resampling, no name harvesting, no archive walking: the corpus arrives as loose
+container files and a manifest, so a probe failure is a codec failure and cannot be
+anything else. That scope is §7's and it is why the result is worth what it is.

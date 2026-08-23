@@ -33,19 +33,30 @@ the bottleneck was tested by copying the 1 GB of archives to ext4 and re-running
 29.9 s versus 32.1 s. The filesystem is irrelevant.
 
 **60% of the runtime is allocation overhead.** 16.1 M minor faults at ~1.1 us each
-accounts for essentially all 17.9 s of system time. The cause is visible in the code:
+accounts for essentially all 17.9 s of system time.
+
+> **CORRECTED by the probe (FINDINGS 93).** The faults are real; the cause named below
+> was wrong. Profiling puts the single largest item at 17.5 s in
+> `BufferedReader.read` over 318 calls: `tropico-artset.py:main` re-reads the entire
+> containing archive once per asset, and `px.PK2` is 372 MB. Three lines of cache take
+> the run from **27.6 s to 9.0 s**, system time from 19.2 s to 0.78 s, and minor faults
+> from 16.1 M to 678 k. The remaining 9 s *is* interpreter work on the pixels. The
+> decision below is unchanged — 9 s is still install-shaped and the measured C is
+> 0.15 s — but the honest comparison is 9 s versus 0.15 s, not 30 s versus 1 s, and
+> the Python oracle should be given the cache because every future port stage is
+> diffed against it.
+
+The cause was thought to be visible in the code:
 `rescale_sprite` builds a fresh Python list per row (`[line[c] for c in cols]`) and grows
 a `bytearray` by concatenation, across 5216 sprites; `box_resample` and `nn_resample`
-build list-of-lists grids with one Python int object per pixel.
+build list-of-lists grids with one Python int object per pixel. That is what idiomatic
+Python costs, and it is what the 9 s that survives the cache is made of.
 
-That is not a defect — it is what idiomatic Python costs. But it means the 30 seconds is
-**not** the cost of the work. The work is shuffling 28 MB into 62 MB. In C that is two
-reusable buffers and a tight loop: no interpreter, and page faults in the thousands
-rather than sixteen million.
+Either way the 30 seconds is **not** the cost of the work. The work is shuffling 28 MB
+into 62 MB. In C that is two reusable buffers and a tight loop: no interpreter, and page
+faults in the thousands rather than sixteen million.
 
-**Estimate: ~1 s.** Tightening the Python instead (preallocated buffers, `memoryview`,
-`bytes.translate`) would buy perhaps 2x — 30 s to 15 s — which changes no architectural
-decision. Only the C port crosses the threshold where generation stops being a *step*.
+**Estimate: ~1 s.** — **now measured at ~1.6 s as a ceiling, §7.**
 
 
 ## 2. What ~1 second changes
@@ -201,6 +212,28 @@ number; do not rescue the plan.
 
 **If it fails on correctness**, the mismatching sprite is the finding. Terminator handling
 is the most likely culprit and the rules are in §4.
+
+### RESULT — both criteria PASS (2026-08-23, FINDINGS 93)
+
+`probes/artgen_probe.c` is the port; `probes/artgen_oracle.py` extracts the corpus, runs
+`tropico-artset.py`'s own `rescale_sprite` over it, runs the C over the same bytes, and
+diffs.
+
+**1. Byte-identical, first run.** 25,820 / 25,820 sprites, 883,554 rows, all five art
+classes, 1600x1200 -> 2560x1440. (The spec's 23,246 predates the `brNN` harvest; this is
+the same corpus, larger.) Five containers skipped — `glastube` and siblings, sections
+outside the sprite chain — which the Python refuses too. Rebuilt as a 32-bit Windows
+binary and run under wine: identical output, so nothing depends on word size or host libm.
+The predicted terminator trap was not sprung.
+
+**2. Speed.** On the 260-asset i16 corpus that feeds the full set (5,164 sprites,
+259,811 rows): Python `rescale_sprite` **5.420 s**, C **0.142 s** native, **0.151 s** as a
+32-bit Windows binary. **36x.** Extrapolating the whole generator pessimistically —
+measured codec 0.15 s, measured full 1.06 GB archive read in C 0.33 s, font path at a
+deliberately low 10x 0.57 s, everything else 0.50 s — gives **~1.6 s as a ceiling**,
+against a 3 s gate.
+
+Step 3 of §8 is unblocked.
 
 
 ## 8. Sequence
