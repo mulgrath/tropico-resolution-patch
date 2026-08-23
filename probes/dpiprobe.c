@@ -76,5 +76,10 @@ int main(void)
     printf("\n");
 
     snapshot("AFTER  (this is what the fix would give it)");
+
+    /* Run by double-click on Windows as often as from a console, and a console app
+     * that exits takes its window with it. Wait, so the numbers can be read. */
+    printf("\nPress Enter to close.\n");
+    getchar();
     return 0;
 }
