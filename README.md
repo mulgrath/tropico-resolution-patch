@@ -167,11 +167,17 @@ glob — a glob would sweep up art the game ships loose), and removes the deskto
 ## Building from source
 
 The release ships a prebuilt `known-good/binkw32.dll`, which is entirely this project's
-own code — the C source sits beside it in `proxy/`. To rebuild and compare:
+own code — the C source sits beside it in `proxy/`. The build is **reproducible**, so you
+can check the shipped binary against one you built yourself and expect an exact match:
 
 ```bash
-proxy/build.sh && sha256sum proxy/binkw32.dll
+proxy/build.sh /tmp/mine.dll && sha256sum /tmp/mine.dll known-good/binkw32.dll
 ```
+
+Two identical hashes mean the DLL you were given is the source you can read. (This used
+to be untrue: `ld` picks a random image base for a DLL when none is given, and `strip`
+re-stamps the timestamp afterwards, so two builds of identical source differed in ~5,500
+bytes. `proxy/build.sh` pins all three sources of drift and explains why.)
 
 That needs `mingw-w64`. Building the measurement probes in `probes/`:
 `i686-w64-mingw32-gcc -o x.exe x.c -lddraw -ldxguid -luser32`.
