@@ -1,0 +1,37 @@
+MIT License
+
+Copyright (c) 2026 the Tropico resolution patch contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+WHAT THIS COVERS, AND WHAT IT DOES NOT
+
+The MIT licence above applies to the code in this repository: the binkw32 proxy
+(proxy/), the installer and tooling (tools/), and the documentation.
+
+It does NOT cover anything belonging to Tropico. Tropico is the property of its
+rights holders (PopTop Software, Kalypso Media). No game code, game art, sound,
+text or data is contained in this repository or in any release built from it.
+
+The user interface art this patch installs is GENERATED ON YOUR OWN MACHINE from
+the game archives in your own legally obtained copy, by tools/tropico-artset.py.
+It is derived from your files, it never leaves your machine, and it is not
+redistributed here. Installing this patch requires that you already own the game.

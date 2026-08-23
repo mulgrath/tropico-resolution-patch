@@ -25,3 +25,11 @@ known-good/fonts-scale*/
 # tools/tropico-set-resolution.sh, so they are kept out of history by choice, not
 # because they are unimportant.
 generated/
+
+# Python byte-code: never ship it, never commit it.
+__pycache__/
+*.pyc
+
+# Release tarballs. tools/make-release.sh rebuilds them from `git ls-files` at any
+# time, so keeping them in history would only add a copy of the tree per release.
+dist/

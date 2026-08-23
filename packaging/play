@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Play the GOG version. (The Steam version is started from Steam's Play button: its
+# copy protection only unlocks for a process Steam itself started.)
+set -eu
+HERE="$(cd "$(dirname "$0")" && pwd)"
+exec "$HERE/lib/tools/tropico" "$@"
