@@ -35,6 +35,10 @@
 # NOT interchangeable: it exposes a dozen research knobs TESTING.md depends on.
 set -eu
 
+# s90: tell the proxy that this launcher has already chosen the monitor, so it
+# does not choose a second time from inside the game (they would disagree).
+export TROPICO_LAUNCHER=1
+
 SELF="$(cd "$(dirname "$0")" && pwd)"
 . "$SELF/tropico-common.sh"
 

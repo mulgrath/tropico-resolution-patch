@@ -6450,3 +6450,169 @@ engine's own near-white if pure white reads too stark.
 `[TextProbe] Enable=1` keeps the round-2 probe, off by default. It is the instrument for
 any future "why is this text like that" question, and it now prints the markup tags
 verbatim, which is how the whole markup language surfaced in the first place.
+
+## 88. SOLVED: the world painter's call-site filter was a hardcoded GOG address
+
+The Steam build painted terrain 1600 wide on a 1920 screen while its log said the fix
+applied. Both claims were true: the patch was installed and it never executed a store.
+
+`patch_world_draw()` finds the painter by signature -- which is why it located it at
+`0x5261f0` on Steam against GOG's `0x526220` -- and then filters by the RETURN ADDRESS of
+the world's own call, so the zoomed detail preview drawn through the same function is left
+alone. That return address was written as `g_base + 0x10b15b`: a hardcoded GOG RVA, the
+last one in the patch. Steam's `.text` is 45 bytes shorter and shifted; its call site is
+`0x50b12b`, 0x30 lower. `cmp eax,callsite` therefore never matched, the stub jumped
+straight to its epilogue, and every `[+]` line in the log was still printed -- because they
+are emitted at PATCH time, and firing is a different claim.
+
+**Why it was hardcoded, and the fix.** The world calls the painter INDIRECTLY --
+`lea ecx,[esi+0x7a]; call edi` at `0x50b159` -- so it cannot be found by scanning for a
+`call rel32` that targets the painter, which is how every other site in this project was
+located. But the call site can be matched directly. `8d 4e 7a ff d7` occurs three times in
+that one function; the two `push 0` before it are the discriminator:
+
+    6a 00 6a 00 51 03 50 11 52 ba ?? ?? ?? ?? 8d 4e 7a ff d7
+
+Unique in `.text`, one masked `imm32`, and the return address is match+19. On GOG it
+resolves to exactly the hardcoded `0x50b15b`; on Steam it resolves to `0x50b12b` and the
+terrain is correct at full width, confirmed in game 2026-08-22.
+
+### 88.1 The trap, which is the part worth keeping
+
+"Applied" meant "the bytes were written", and nothing in this project measured "the fix
+RAN". Those two look identical in a log and differ completely on screen. §82 hit the same
+shape (the guard skipped its own fix, install-time log unchanged) and it was written up as
+a guard bug rather than as a class of bug.
+
+The stub now counts. `g_world_seen`/`g_world_lastret` record every draw that passes the
+size gate whatever it returns to; `g_world_fires` records the ones the filter accepted. A
+watcher logs `[worldfix] FIRING -- N draw(s) corrected`, or, after three minutes,
+`INSTALLED BUT NEVER FIRED` **naming the address this build actually calls from** -- so the
+run that fails also produces the number needed to fix it.
+
+### 88.2 The packaging bug this uncovered, which was the bigger one
+
+The grey readouts on Steam were not a Steam defect. `known-good/binkw32.dll` -- the artifact
+`tools/tropico-install.sh` ships -- was last rebuilt at `ccb516c`, before §86 (aspect-only
+VText dials) and §87 (the `[C2]` repaint). Both changed `proxy/tropico_fix.c`; neither was
+rebuilt into the shipped file. The GOG install only looked correct because it was running a
+hand-copied `proxy/binkw32.dll`.
+
+So for roughly a day, **what the installer produced was not what was being tested**, on both
+editions. The build step is manual and nothing verifies the artifact is newer than its
+source. Any future "is the mod done" answer has to check that first.
+
+## 89. The Proton cursor drift: measured, narrowed, and NOT reproduced
+
+Under Steam/Proton with the desktop's monitors NOT top-aligned, the map panned toward the
+top-left whenever the mouse moved. Top-aligning the monitors stopped it. It is recorded here
+because four sessions showed it consistently and four later ones could not reproduce it under
+any condition we could name -- including the ones that had seemed to trigger it.
+
+**What was measured, and what each measurement killed:**
+
+* `[Cursor] Probe` hooks `USER32!GetCursorPos` (the game imports it and `ScreenToClient`, and
+  no DirectInput at all) and logs the point beside the window, client, monitor, virtual-screen
+  and primary rectangles. Result: **every rectangle correct** -- window `0,0 1920x1080`,
+  monitor `0,0`, screen coordinate identical to client. There is no 360-pixel offset anywhere
+  in what the game reads. The virtual screen does carry the layout (`virt 0,-360 4480x1440`),
+  which is how the run proves in-log which condition it ran under.
+* An occasional exact `0,0` return appeared between good samples, and "the game reads 0,0 as
+  its pan-up-left command" was a clean-looking theory. `[Cursor] Fix` suppresses those,
+  substituting the last believed position (refusing when that position was itself near the
+  corner, so a genuine corner pan still works). Measured: **2309 zeros in 1046000 calls, all
+  in one burst, drift continuing through the other million.** Theory refuted by its own fix.
+* `[Cursor] MsgProbe` hooks `WH_GETMESSAGE` and `WH_CALLWNDPROC` and logs `WM_MOUSEMOVE`
+  lParam beside `GetMessagePos` and `GetCursorPos` at the same instant. Under system wine
+  (control, no virtual desktop, offset layout, no drift) all three agree exactly. Under
+  Proton, once the drift stopped reproducing, **all three also agree exactly**. The stream
+  disagreement this probe existed to find has never been observed.
+
+**What is known to be true:** it is motion-driven (nothing creeps with the mouse still), it is
+layout-driven (top-aligning always stopped it), it is resolution-INDEPENDENT (it occurred at
+stock modes too -- an early "only at 1920x1080" reading was wrong), and system wine without a
+virtual desktop does NOT show it, which places it on the Proton side rather than in the game.
+GOG is immune for a structural reason and not by luck: `tools/tropico` runs inside a virtual
+desktop, where the game cannot see the monitor layout at all.
+
+**Hypotheses tested and refuted:** the monitor origin reaching the game (no offset in any rect);
+spurious `0,0` samples (suppressed, drift continued); the message hooks themselves acting as an
+accidental fix (removed, drift still absent); a mid-session mode change as the trigger (F2 mode
+change performed deliberately, no drift).
+
+**Standing advice.** If it recurs: set `[Cursor] Probe=1 MsgProbe=1`, reproduce, and read the
+three streams. The instrument is built, off by default, and costs nothing when disabled. Do not
+re-derive it. And do not accept a single clean run as evidence it is fixed -- this symptom
+produced four consecutive clean runs while nothing was fixed at all.
+
+## 90. The Steam edition drives the display from inside, because nothing else can
+
+Steam's Play button is the only way past this build's DRM (`Application load error
+5:0000065434` outside it), so `tools/tropico` -- which chooses the monitor, makes it
+primary and builds a virtual desktop -- is not in the launch path. Without it, a game
+launched on a non-primary monitor dies with DirectDraw #150 before the menu, because Wine
+measures only the primary (§74). The fix puts that job in the one thing Steam does load:
+the proxy.
+
+### 90.1 A Windows process under Proton CAN execute host binaries
+
+Measured, because no documentation answers it for pressure-vessel:
+
+* `Z:\usr\bin\xrandr`, `python3`, `sh`, `touch` are all **visible** -- the container maps
+  the host filesystem.
+* `CreateProcess("Z:\\bin\\sh", ...)` returns **ERROR_BAD_EXE_FORMAT (193) and the process
+  still runs.** Wine execs the ELF, then fails to produce a Windows process object for it.
+  Proven by side effect: the marker file the "failed" call created is on disk. So the
+  return code is not evidence; the caller must poll for the command's OUTPUT.
+* `xrandr --query` run this way sees the real display -- both outputs, their modes and
+  positions, on `DISPLAY=:1`.
+
+**`start.exe /unix` also works but is unusable in front of a player.** It ran the script
+correctly, then popped one dialog per argument word ("No file found", ~10 of them, plus a
+"No Windows program available"). Passing the payload as a FILE (`sh /path/script.sh`)
+did not help -- the dialogs come from start.exe parsing, not from the script. Direct
+`CreateProcess` on `sh` is silent, and is what shipped.
+
+### 90.2 The monitor is chosen from where the player launched, not from the ini
+
+The first version let the configured mode decide: it made the 1440p panel primary because
+the ini said 2560x1440. If the player had clicked Play on the 1080p screen, the window
+opened there while Wine measured the other -- #150, with black flashing as the pin watcher
+(§74) and the compositor fought over placement (§75). Cause and effect were inverted.
+
+It also ran too late. The mode picker validates a requested mode against the desktop Wine
+measures, so with a 1080p primary a 1440p request is already rejected and fallen back
+before any later code can act on it. The monitor step therefore runs BEFORE the picker,
+and the mode adopted from the launch monitor beats `[Resolution]`.
+
+### 90.3 The detector's first signal was indistinguishable from a wrong answer
+
+`GetCursorPos` returns **0,0** this early -- Wine has no pointer state before the game has
+a window -- and 0,0 maps inside the primary monitor whatever the layout. So the detector
+always answered "the primary", which is correct precisely when no detection is needed.
+It passed two tests and failed two, and the passing ones proved nothing.
+
+`XQueryPointer`, run through the host channel above, has no such failure mode and reports
+ROOT coordinates -- the same space xrandr reports output positions in, so no conversion is
+needed. Wine's answer is kept only as a fallback, and an exact 0,0 from it is now REFUSED
+rather than allowed to masquerade as a detection.
+
+This is the third time in this project an in-band value has posed as an answer (§89's zero
+samples, §88's "applied" meaning "written"). The rule: when a sentinel is also a legal
+value, the measurement cannot distinguish them -- get the fact from a source that has no
+such overlap.
+
+### 90.4 Restoring the primary must survive a crash
+
+A "restore on exit" inside the game cannot, by definition. So the restore runs on the host:
+a detached shell watches a marker file the game rewrites every two seconds and puts the
+primary back when the heartbeat stops for ten -- clean exit, crash or kill alike.
+
+### 90.5 Confirmed
+
+Alternating launches from each monitor, repeatedly: each run makes its own monitor primary,
+adopts that monitor's mode, switches to its staged art set, renders correctly, and hands the
+primary back afterwards. No dialogs. `TROPICO_LAUNCHER=1`, exported by `tools/tropico` and
+`tools/tropico-gog.sh`, disables the whole step so the GOG launcher stays the only thing
+choosing a monitor on that path.
+

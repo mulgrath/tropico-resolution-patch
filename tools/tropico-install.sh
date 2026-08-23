@@ -25,11 +25,72 @@ ROOT="$(cd "$SELF/.." && pwd)"
 . "$SELF/tropico-common.sh"
 
 PROXY="$ROOT/known-good/binkw32.dll"
+SRC="$ROOT/proxy/tropico_fix.c"
+# s88.2: the shipped proxy once fell a day behind its source -- two confirmed fixes
+# were missing from every install while the development box ran a hand-copied build,
+# and nothing anywhere said so. Cheap to check, so check.
+# Only in a development checkout. A release tarball or a fresh clone writes every file
+# at extraction time in arbitrary order, so an mtime comparison there is a coin flip --
+# and refusing to install for a user whose files are perfectly fine is a worse failure
+# than the one this guards against.
+if [ -d "$ROOT/.git" ] && [ -f "$SRC" ] && [ "$SRC" -nt "$PROXY" ]; then
+  echo "!! known-good/binkw32.dll is OLDER than proxy/tropico_fix.c."
+  echo "   Installing it would ship a proxy that does not contain the current fixes."
+  echo "   Run proxy/build.sh and copy the result to known-good/ first."
+  exit 1
+fi
 TEMPLATE="$ROOT/known-good/tropico-fix.ini"
 MARK='tropico_fix (binkw32 proxy)'
 
+# In a release the user runs ./play at the top level, not the script inside lib/. The
+# wrapper exports this; in a git checkout it is unset and the path below is correct.
+PLAY_CMD="${TROPICO_PLAY_CMD:-$SELF/tropico}"
+
+ORIG_ARGV=("$@")          # kept intact for the per-install re-exec below
 UNINSTALL=0
 if [ "${1:-}" = "--uninstall" ]; then UNINSTALL=1; shift; fi
+
+# ------------------------------------------------------------------ dependencies
+# Checked up front and by name. Without this the failure is a Python traceback or a
+# silently empty art set forty seconds in, neither of which tells someone that they
+# are missing a package.
+MISSING=""
+command -v python3 >/dev/null 2>&1 || MISSING="$MISSING python3"
+command -v xrandr  >/dev/null 2>&1 || MISSING="$MISSING xrandr (x11-xserver-utils)"
+if [ -n "$MISSING" ]; then
+  echo "!! missing:$MISSING"
+  echo "   The installer needs python3 to generate the art set from your own game"
+  echo "   archives, and xrandr to see what modes your monitors are in."
+  exit 1
+fi
+
+# ---------------------------------------------------------------- every install
+# Someone who owns the game on both stores has two copies, and patching only the
+# first one found is how a machine ends up half-patched -- worse on --uninstall,
+# which would report success while leaving the other copy patched. So with no
+# TROPICO_DIR naming a target, act on all of them: list what was found, then run
+# this script once per install. Re-exec rather than a loop inside the script,
+# because everything below assumes a single $GAMEDIR.
+if [ -z "${TROPICO_DIR:-}" ]; then
+  ALL="$(tropico_find_all)"
+  COUNT=$(printf '%s' "$ALL" | grep -c . || true)
+  if [ "${COUNT:-0}" -gt 1 ]; then
+    if [ "$UNINSTALL" = 1 ]; then echo "== $COUNT Tropico installs found; removing the patch from each:"
+    else                          echo "== $COUNT Tropico installs found; patching each:"; fi
+    printf '%s\n' "$ALL" | sed 's/^/   /'
+    echo
+    RC=0
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      TROPICO_DIR="$d" "$0" "${ORIG_ARGV[@]}" || RC=$?
+      echo
+    done <<< "$ALL"
+    if [ "$RC" != 0 ]; then
+      echo "!! at least one install did not complete (exit $RC) -- see the output above" >&2
+    fi
+    exit "$RC"
+  fi
+fi
 
 GAMEDIR="$(tropico_find_dir)"
 if [ -z "$GAMEDIR" ]; then
@@ -37,6 +98,14 @@ if [ -z "$GAMEDIR" ]; then
   exit 1
 fi
 echo "== install: $GAMEDIR"
+
+# Which edition this is changes how the game is STARTED, and therefore what this
+# script may promise. The Steam build is SteamStub-wrapped: the DRM only decrypts the
+# exe for a process Steam itself started, so tools/tropico gets "Application load
+# error 5:0000065434" and a desktop entry pointing at it would be a broken shortcut
+# on someone's menu (FINDINGS 90).
+STEAM=0
+case "$GAMEDIR" in *steamapps*) STEAM=1 ;; esac
 
 has_mark() { [ -f "$1" ] && grep -qa "$MARK" "$1" 2>/dev/null; }
 
@@ -224,6 +293,9 @@ done
 # The only thing this patch writes outside the game folder and its own directory.
 # Both files are removed by --uninstall. GOG ships an .ico we can convert; the
 # Steam layout does not, so there the entry simply has no icon.
+if [ "$STEAM" = 1 ]; then
+  echo "   no desktop entry: this edition is started from Steam's Play button"
+else
 APPS="$HOME/.local/share/applications"
 ICONS="$HOME/.local/share/icons"
 ICON=""
@@ -251,7 +323,7 @@ mkdir -p "$APPS"
   echo "Type=Application"
   echo "Name=Tropico"
   echo "Comment=Tropico, widescreen-patched"
-  echo "Exec=$SELF/tropico"
+  echo "Exec=$PLAY_CMD"
   [ -n "$ICON" ] && echo "Icon=$ICON"
   echo "Terminal=false"
   # Ties the running window to this entry, so the taskbar shows the icon and not a
@@ -263,11 +335,31 @@ if command -v desktop-file-validate >/dev/null 2>&1; then
   desktop-file-validate "$APPS/tropico-patch.desktop" || echo "   (desktop entry validation warned; it will still work)"
 fi
 echo "   desktop entry installed$([ -n "$ICON" ] && echo " with icon")"
+fi
 
 echo
 echo "== installed and running at $ACTIVE."
-echo "   PLAY:               $SELF/tropico   (or the Tropico entry in your applications menu)"
-echo "   switch resolution:  $(basename "$SELF")/tropico-setmode.sh W H"
+if [ "$STEAM" = 1 ] && ! command -v wine >/dev/null 2>&1; then
+  : # Steam supplies its own Wine through Proton; a system wine is not needed here.
+elif ! command -v wine >/dev/null 2>&1; then
+  echo
+  echo "!! wine is not installed. The patch is in place, but tools/tropico needs it"
+  echo "   to run the game. Install wine (with 32-bit support) before playing."
+fi
+
+if [ "$STEAM" = 1 ]; then
+  echo "   PLAY:               press Play in Steam, on the monitor you want to play on."
+  echo "                       The patch picks that monitor and its resolution by itself."
+  echo "   NOTE:               use Software 3D on this edition -- Proton's Hardware 3D"
+  echo "                       smears at every resolution, stock ones included (§23)."
+else
+  echo "   PLAY:               $PLAY_CMD   (or the Tropico entry in your applications menu)"
+fi
+if [ -n "${TROPICO_PLAY_CMD:-}" ]; then
+  echo "   switch resolution:  ./set-resolution.sh W H   (--list to see what is ready)"
+else
+  echo "   switch resolution:  $(basename "$SELF")/tropico-setmode.sh W H"
+fi
 echo "   what is staged:     $(basename "$SELF")/tropico-setmode.sh --list"
 echo "   undo everything:    $(basename "$0") --uninstall"
 # The [VText] dials depend on the ASPECT alone now (FINDINGS 86), so every 16:9 mode

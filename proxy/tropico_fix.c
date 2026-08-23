@@ -141,6 +141,14 @@ static int g_hud_nph;
 static DWORD g_hud_table_va;
 static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
                             UINT objm, UINT objw, UINT objhm, UINT objh, int force, UINT guard);
+static int install_cursor_probe(void);   /* s89, defined with the probe below */
+static int g_cur_probe;                  /* s89, armed from [Cursor] Probe   */
+static int g_cur_fix;                    /* s89, armed from [Cursor] Fix     */
+static int g_cur_msg;                    /* s89, armed from [Cursor] MsgProbe */
+static void install_msg_probe(void);      /* s89, defined with the probe below */
+static void unix_probe(void);             /* s90, defined with the probe below */
+static void choose_and_apply_monitor(void); /* s90, the monitor for this run  */
+
 static BYTE *find_unique(const BYTE *pat, SIZE_T len, BYTE *start, SIZE_T size, const char *what)
 {
     BYTE *hit = NULL;
@@ -256,6 +264,7 @@ static const DWORD TABLE_SIG[10] = {640,480, 800,600, 1024,768, 1280,1024, 1600,
 #define WORLD_STOCK_W 1600
 
 typedef struct { DWORD w, h; } mode_t;
+static int launch_override(mode_t *m);   /* s90, defined with the monitor code */
 
 /* ------------------------------------------------------------- diagnostics
  *
@@ -682,6 +691,15 @@ static void apply_patches(void)
         }
     } else { logf_("[-] budget: signature not found"); fail++; }
 
+    /* --- 3.5 the monitor, BEFORE the mode is chosen (s90) -------------------
+     *
+     * Ordering is the whole point. The picker below validates a mode against the
+     * desktop WINE MEASURES -- the primary monitor -- so anything decided after it
+     * is decided too late: with a 1080p primary a 1440p request is already rejected
+     * and fallen back. This runs first, picks the monitor from where the player
+     * launched, makes it primary, and waits for Wine to see it. */
+    choose_and_apply_monitor();
+
     /* --- 4. slot 4, in BOTH tables ----------------------------------------- *
      * FINDINGS s8: patching the data table alone is not enough. A parallel
      * mapping lives in code and silently drops any mode it does not recognise. */
@@ -692,7 +710,7 @@ static void apply_patches(void)
         snprintf(ip3, sizeof ip3, "%s\\tropico-fix.ini", g_dir);
         g_staged_fallback = GetPrivateProfileIntA("Display", "StagedFallback", 1, ip3);
     }
-    if (!ini_override(&m) && !pick_mode(&m)) {
+    if (!launch_override(&m) && !ini_override(&m) && !pick_mode(&m)) {
         logf_("[-] no mode satisfied the constraints; leaving slot 4 stock (1600x1200)");
     } else {
         /* s85: only on the FALLBACK path. If we are here because the configured mode
@@ -823,6 +841,22 @@ static void apply_patches(void)
             } else if (patch_world_draw(mw, nw, mh, nh, om, ow, ohm, oh, force, guard)) ok++;
               else fail++;
             if (mode_ctor) { if (patch_world_viewport(mw, nw)) ok++; else fail++; }
+        }
+    }
+
+    /* s89 cursor probe. Off by default: it is diagnostic only and changes nothing. */
+    {
+        char ip[MAX_PATH];
+        snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+        g_cur_fix = GetPrivateProfileIntA("Cursor", "Fix", 0, ip);
+        g_cur_msg = GetPrivateProfileIntA("Cursor", "MsgProbe", 0, ip);
+        if (GetPrivateProfileIntA("Unix", "Probe", 0, ip)) unix_probe();
+        if (g_cur_msg) install_msg_probe();
+        if (GetPrivateProfileIntA("Cursor", "Probe", 0, ip) || g_cur_fix) {
+            g_cur_probe = GetPrivateProfileIntA("Cursor", "Probe", 0, ip);
+            if (!install_cursor_probe())
+                logf_("[x] [cursor] probe: USER32!GetCursorPos not found in the import"
+                      " table -- nothing hooked");
         }
     }
 
@@ -1196,6 +1230,704 @@ static int install_iat_hook(void)
         }
     }
     return 0;
+}
+
+/* ------------------------------------------------ s89: the cursor probe
+ *
+ * The map pans toward the top-left on its own when the desktop's monitors are not
+ * top-aligned, and stops the moment they are. The pointer leaving the window shows
+ * the same "pan up-left" cursor at every resolution. So some coordinate the game
+ * reads carries a monitor origin that something else does not -- but WHICH one is
+ * three different fixes, and the picture cannot tell them apart.
+ *
+ * The game imports GetCursorPos and ScreenToClient and no other cursor API (no
+ * DirectInput, no GetCursorInfo, no ClipCursor), so the whole chain is those two
+ * calls. This logs both halves of it side by side with every rectangle that could
+ * be supplying the origin: the window, the client area, the monitor the window is
+ * on, the virtual screen, and the primary metrics.
+ *
+ * Rate-limited to one line a second, 60 lines max: it is called every frame, and a
+ * probe that floods the log is a probe nobody reads. */
+static HWND find_game_window(void);   /* defined with the display watcher below */
+
+typedef BOOL (WINAPI *GetCursorPos_t)(LPPOINT);
+static GetCursorPos_t  g_real_gcp;
+static volatile LONG g_cur_calls;        /* every call, not a sample            */
+static volatile LONG g_cur_zeros;        /* those that came back exactly 0,0    */
+static volatile LONG g_cur_dropped;      /* zeros replaced with the last good   */
+static POINT g_cur_last;                 /* the last position we believed       */
+static int   g_cur_have_last;
+static GetCursorPos_t *g_gcp_slot;
+static LONG  g_cur_logged;
+static DWORD g_cur_last_ms;
+
+static BOOL WINAPI hook_GetCursorPos(LPPOINT pt)
+{
+    BOOL r = g_real_gcp(pt);
+
+    /* s89. Wine hands the game an exact 0,0 every so often while the pointer is
+     * somewhere else entirely -- measured mid-screen, between two good samples.
+     * The game reads 0,0 as "pointer in the top-left corner", which is its
+     * pan-up-left command, so the map creeps on its own.
+     *
+     * COUNT EVERY CALL, not one a second: the earlier 1 Hz sample could not say
+     * whether the two zeros it caught were spurious or the pointer genuinely
+     * leaving the window, and that is the whole question.
+     *
+     * The filter substitutes the last position we believed. It refuses to do so
+     * when that position was itself near the corner, so a player who really is
+     * panning into the top-left still gets what they asked for -- the only thing
+     * suppressed is a jump to the corner from somewhere far away, which no hand
+     * can produce. */
+    if (r && pt) {
+        LONG n = InterlockedIncrement(&g_cur_calls);
+        if (pt->x == 0 && pt->y == 0) {
+            LONG z = InterlockedIncrement(&g_cur_zeros);
+            int near_corner = g_cur_have_last &&
+                              g_cur_last.x < 32 && g_cur_last.y < 32;
+            if (g_cur_fix && g_cur_have_last && !near_corner) {
+                *pt = g_cur_last;
+                InterlockedIncrement(&g_cur_dropped);
+            }
+            if (z <= 20)
+                logf_("[*] [cursor] ZERO sample #%ld at call %ld (last good %ld,%ld)%s",
+                      z, n, g_cur_last.x, g_cur_last.y,
+                      (g_cur_fix && g_cur_have_last && !near_corner)
+                          ? " -- replaced" : "");
+        } else {
+            g_cur_last = *pt;
+            g_cur_have_last = 1;
+        }
+        /* A periodic denominator. Zeros alone say nothing without the call count
+         * they came out of. */
+        if ((n % 2000) == 0)
+            logf_("[*] [cursor] %ld calls, %ld zero(s), %ld replaced",
+                  n, g_cur_zeros, g_cur_dropped);
+    }
+
+    if (g_cur_probe && r && pt && g_cur_logged < 60) {
+        DWORD now = GetTickCount();
+        if (now - g_cur_last_ms >= 1000) {
+            HWND w = find_game_window();
+            RECT wr, cr;
+            POINT cl = *pt;
+            MONITORINFO mi;
+            g_cur_last_ms = now;
+            InterlockedIncrement(&g_cur_logged);
+            memset(&wr, 0, sizeof wr);
+            memset(&cr, 0, sizeof cr);
+            mi.cbSize = sizeof mi;
+            mi.rcMonitor.left = mi.rcMonitor.top = 0;
+            mi.rcMonitor.right = mi.rcMonitor.bottom = 0;
+            if (w) {
+                GetWindowRect(w, &wr);
+                GetClientRect(w, &cr);
+                ScreenToClient(w, &cl);
+                GetMonitorInfoA(MonitorFromWindow(w, MONITOR_DEFAULTTOPRIMARY), &mi);
+            }
+            logf_("[*] [cursor] screen %ld,%ld -> client %ld,%ld | window %ld,%ld"
+                  " %ldx%ld | client %ldx%ld | monitor %ld,%ld %ldx%ld | virt %d,%d"
+                  " %dx%d | primary %dx%d",
+                  pt->x, pt->y, cl.x, cl.y,
+                  wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
+                  cr.right - cr.left, cr.bottom - cr.top,
+                  mi.rcMonitor.left, mi.rcMonitor.top,
+                  mi.rcMonitor.right - mi.rcMonitor.left,
+                  mi.rcMonitor.bottom - mi.rcMonitor.top,
+                  GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+                  GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN),
+                  GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        }
+    }
+    return r;
+}
+
+/* Same IAT walk as the GetDeviceCaps hook, parameterised. */
+static void *hook_import(const char *dll, const char *fn, void *replacement, void **real)
+{
+    BYTE *base = (BYTE *)GetModuleHandleA(NULL);
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
+    IMAGE_NT_HEADERS *nt  = (IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+    DWORD rva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (!rva) return NULL;
+    for (IMAGE_IMPORT_DESCRIPTOR *imp = (IMAGE_IMPORT_DESCRIPTOR *)(base + rva); imp->Name; imp++) {
+        if (_stricmp((const char *)(base + imp->Name), dll)) continue;
+        IMAGE_THUNK_DATA *oft = (IMAGE_THUNK_DATA *)(base + imp->OriginalFirstThunk);
+        IMAGE_THUNK_DATA *ft  = (IMAGE_THUNK_DATA *)(base + imp->FirstThunk);
+        for (; oft->u1.AddressOfData; oft++, ft++) {
+            IMAGE_IMPORT_BY_NAME *ibn;
+            if (oft->u1.Ordinal & IMAGE_ORDINAL_FLAG) continue;
+            ibn = (IMAGE_IMPORT_BY_NAME *)(base + oft->u1.AddressOfData);
+            if (strcmp((const char *)ibn->Name, fn)) continue;
+            *real = (void *)ft->u1.Function;
+            if (!poke(&ft->u1.Function, &replacement, sizeof replacement)) return NULL;
+            return (void *)&ft->u1.Function;
+        }
+    }
+    return NULL;
+}
+
+/* The message stream, s89 round 3.
+ *
+ * Round 2 measured GetCursorPos and found it CORRECT -- and the drift continued
+ * through a million calls with no bad sample in them. So the position the game
+ * polls is not what pans the map. The remaining input path is the message queue:
+ * the game imports SetCapture/ScreenToClient/GetClientRect, which is the shape of
+ * a WM_MOUSEMOVE consumer, and the map only creeps WHILE THE MOUSE MOVES -- i.e.
+ * while messages are being delivered.
+ *
+ * So log the two streams side by side at the same instant: the client coordinate
+ * carried in the message, the screen coordinate the window manager stamped on it
+ * (GetMessagePos), and what GetCursorPos says right now. If the layout offset is
+ * reaching the game at all, it is one of the first two disagreeing with the third.
+ *
+ * WH_GETMESSAGE sees what the loop pulls; WH_CALLWNDPROC sees what is sent past
+ * the queue. Both, because "the game never reads this message" and "the message
+ * carries a good value" look identical from one of them alone. */
+static HHOOK g_msg_hook, g_snd_hook;
+static LONG  g_msg_logged;
+static DWORD g_msg_last_ms;
+
+static void log_mouse(const char *where, HWND w, UINT msg, LPARAM lp)
+{
+    DWORD mp;
+    POINT now;
+    RECT wr;
+    short cx, cy;
+    if (msg != WM_MOUSEMOVE && msg != WM_NCMOUSEMOVE) return;
+    /* First 40 unconditionally -- the burst right after a movement starts is the
+     * interesting part -- then one a second so a long session stays readable. */
+    if (g_msg_logged >= 40) {
+        DWORD t = GetTickCount();
+        if (t - g_msg_last_ms < 1000) return;
+        g_msg_last_ms = t;
+    }
+    if (g_msg_logged >= 140) return;
+    InterlockedIncrement(&g_msg_logged);
+    cx = (short)LOWORD(lp);
+    cy = (short)HIWORD(lp);
+    mp = GetMessagePos();
+    now.x = now.y = -1;
+    if (g_real_gcp) g_real_gcp(&now);
+    memset(&wr, 0, sizeof wr);
+    if (w) GetWindowRect(w, &wr);
+    logf_("[*] [mouse] %-9s %-14s lParam %d,%d | GetMessagePos %d,%d |"
+          " GetCursorPos %ld,%ld | hwnd %p at %ld,%ld",
+          where, msg == WM_MOUSEMOVE ? "WM_MOUSEMOVE" : "WM_NCMOUSEMOVE",
+          cx, cy, (int)(short)LOWORD(mp), (int)(short)HIWORD(mp),
+          now.x, now.y, (void *)w, wr.left, wr.top);
+}
+
+static LRESULT CALLBACK getmsg_proc(int code, WPARAM wp, LPARAM lp)
+{
+    if (code == HC_ACTION && lp) {
+        MSG *m = (MSG *)lp;
+        log_mouse("queue", m->hwnd, m->message, m->lParam);
+    }
+    return CallNextHookEx(g_msg_hook, code, wp, lp);
+}
+
+static LRESULT CALLBACK callwnd_proc(int code, WPARAM wp, LPARAM lp)
+{
+    if (code == HC_ACTION && lp) {
+        CWPSTRUCT *c = (CWPSTRUCT *)lp;
+        log_mouse("sent", c->hwnd, c->message, c->lParam);
+    }
+    return CallNextHookEx(g_snd_hook, code, wp, lp);
+}
+
+static void install_msg_probe(void)
+{
+    DWORD tid = GetCurrentThreadId();
+    g_msg_hook = SetWindowsHookExA(WH_GETMESSAGE, getmsg_proc, NULL, tid);
+    g_snd_hook = SetWindowsHookExA(WH_CALLWNDPROC, callwnd_proc, NULL, tid);
+    logf_("[*] [mouse] message probe on thread %lu: queue hook %s, sent hook %s",
+          (unsigned long)tid, g_msg_hook ? "ok" : "FAILED",
+          g_snd_hook ? "ok" : "FAILED");
+    if (!g_msg_hook && !g_snd_hook)
+        logf_("[x] [mouse] neither hook installed -- this probe measured NOTHING."
+              " Do not read the absence of [mouse] lines as 'no mouse messages'.");
+}
+
+/* --------------------------------------------------- s90: can we reach Linux?
+ *
+ * Steam's Play button is the only way past this build's DRM, so tools/tropico is
+ * out of the launch path and nothing sets the primary monitor for the run -- which
+ * is what produces DirectDraw #150 on a second monitor (s74). If a Windows process
+ * under Proton can execute a HOST binary, the proxy can do that job itself: xrandr
+ * for the monitor, and the EWMH helper for fullscreen. Nothing pasted into Steam,
+ * nothing of Valve's touched.
+ *
+ * Unknown, and not answerable from documentation: Proton runs inside a
+ * pressure-vessel container, so both "can it exec" and "does the binary even exist
+ * in that namespace" are open. So probe both, separately, and prove the result
+ * OUTSIDE the process -- each route touches a file in the game directory, which is
+ * bind-mounted and therefore visible to the host. A log line saying CreateProcess
+ * returned success proves only that Wine accepted the request. The file proves the
+ * binary ran. */
+static void run_route(const char *what, char *cmd)
+{
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    DWORD code = 0xffffffff;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    memset(&pi, 0, sizeof pi);
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW,
+                        NULL, NULL, &si, &pi)) {
+        logf_("  [unix] %-12s CreateProcess FAILED (%lu) -- %s",
+              what, (unsigned long)GetLastError(), cmd);
+        return;
+    }
+    WaitForSingleObject(pi.hProcess, 5000);
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    logf_("  [unix] %-12s started, exit code %lu -- %s", what, (unsigned long)code, cmd);
+}
+
+/* --------------------------------------------- s90: the monitor, from inside
+ *
+ * Measured: a Windows process under Proton CAN execute host binaries through
+ * `start.exe /unix`, and xrandr run that way sees the real display -- both outputs,
+ * their modes and their positions, on DISPLAY=:1. So the proxy can do for the Steam
+ * edition what tools/tropico does for GOG: make the monitor the game will run on the
+ * PRIMARY one, because Wine measures only the primary and a game sized for another
+ * screen dies with DirectDraw #150 (s74).
+ *
+ * Deliberately conservative. Changing the primary output moves the user's panels and
+ * icons for the duration of the game, so it happens ONLY when the primary's current
+ * mode does not match the art this install was built for AND another output does
+ * match. On one monitor, or when the primary is already the play monitor, nothing is
+ * touched and nothing is logged beyond saying so.
+ *
+ * Restoring is the hard half: a crash must not leave someone's desktop rearranged.
+ * A Windows-side "restore on exit" cannot survive a crash by definition, so the
+ * restore runs on the HOST: a detached shell watches a marker file that this process
+ * rewrites every two seconds, and puts the primary back when the heartbeat stops for
+ * ten -- whether that is a clean exit, a crash, or a kill. */
+static char g_xr_prev[64];
+static DWORD g_launch_w, g_launch_h;   /* mode adopted from the launch monitor */
+static char g_xr_marker_win[MAX_PATH];
+static char g_xr_marker_unix[MAX_PATH];
+
+/* The game directory as the host sees it. Z: is the host root, so this is g_dir
+ * without the drive and with the slashes turned round. */
+static int game_unix_dir(char *out, size_t cap)
+{
+    const char *r = g_dir + 2;
+    size_t n = 0;
+    if (!((g_dir[0] == 'Z' || g_dir[0] == 'z') && g_dir[1] == ':')) return 0;
+    while (*r && n < cap - 1) { out[n++] = (*r == '\\') ? '/' : *r; r++; }
+    out[n] = 0;
+    return 1;
+}
+
+/* start.exe /unix /bin/sh -c "..." -- the only route that works. CreateProcess on a
+ * Z: path returns ERROR_BAD_EXE_FORMAT, and `start /unix` execs the binary directly
+ * with no shell, so anything needing redirection or a loop has to go through sh. */
+/* Write a file beside the game. Used for the host-side helper scripts: the payload
+ * must never travel on a command line (see unix_sh). */
+static int write_host_file(const char *leaf, const char *body)
+{
+    char win[MAX_PATH];
+    HANDLE h;
+    DWORD wrote;
+    snprintf(win, sizeof win, "%s\\%s", g_dir, leaf);
+    h = CreateFileA(win, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    WriteFile(h, body, (DWORD)strlen(body), &wrote, NULL);
+    CloseHandle(h);
+    return 1;
+}
+
+/* s90.3: ask X where the pointer is, not Wine.
+ *
+ * GetCursorPos returns 0,0 at this point in startup -- Wine has no pointer state
+ * before the game has a window -- and 0,0 maps inside the primary monitor whatever
+ * the layout, so the launch-monitor detector always answered "the primary". It looked
+ * correct whenever the primary WAS the launch monitor, which is exactly the case that
+ * needs no detection. (Same shape as the s89 zero samples: an in-band value that is
+ * indistinguishable from a real answer.)
+ *
+ * XQueryPointer has no such ambiguity and reports ROOT coordinates -- the same space
+ * xrandr reports output positions in -- so no conversion is needed either. */
+static const char POINTER_PY[] =
+    "import ctypes, ctypes.util\n"
+    "lib = ctypes.util.find_library('X11')\n"
+    "x = ctypes.CDLL(lib)\n"
+    "x.XOpenDisplay.restype = ctypes.c_void_p\n"
+    "x.XDefaultRootWindow.restype = ctypes.c_ulong\n"
+    "x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]\n"
+    "d = x.XOpenDisplay(None)\n"
+    "r = x.XDefaultRootWindow(ctypes.c_void_p(d))\n"
+    "rr = ctypes.c_ulong(); cr = ctypes.c_ulong()\n"
+    "rx = ctypes.c_int(); ry = ctypes.c_int()\n"
+    "wx = ctypes.c_int(); wy = ctypes.c_int(); mk = ctypes.c_uint()\n"
+    "x.XQueryPointer(ctypes.c_void_p(d), ctypes.c_ulong(r), ctypes.byref(rr),\n"
+    "                ctypes.byref(cr), ctypes.byref(rx), ctypes.byref(ry),\n"
+    "                ctypes.byref(wx), ctypes.byref(wy), ctypes.byref(mk))\n"
+    "print('POINTER %d %d' % (rx.value, ry.value))\n";
+
+static int unix_sh(const char *script, int wait_ms)
+{
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    char cmd[MAX_PATH * 2], win[MAX_PATH], udir[MAX_PATH], body[MAX_PATH * 4];
+    static LONG seq;
+    LONG n = InterlockedIncrement(&seq);
+    HANDLE h;
+    DWORD wrote;
+
+    if (!game_unix_dir(udir, sizeof udir)) return 0;
+    /* The script goes in a FILE, not on the command line. Wine's start.exe splits a
+     * quoted `sh -c "..."` argument on spaces and tries to open each word as a
+     * document, which is where the "No file found" dialogs came from -- one per word.
+     * `sh <path>` is two arguments with no quoting, and the script deletes itself. */
+    snprintf(win, sizeof win, "%s\\tropico-host-%ld.sh", g_dir, (long)n);
+    snprintf(body, sizeof body, "#!/bin/sh\n%s\nrm -f \"$0\"\n", script);
+    h = CreateFileA(win, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    WriteFile(h, body, (DWORD)strlen(body), &wrote, NULL);
+    CloseHandle(h);
+
+    memset(&si, 0, sizeof si); si.cb = sizeof si;
+    si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
+    memset(&pi, 0, sizeof pi);
+
+    /* NOT start.exe. It ran the script correctly but popped one dialog per argument
+     * word first ("No file found"), which is worse than useless in front of a player.
+     * CreateProcess on the Unix binary itself skips it: Wine execs the ELF and then
+     * returns ERROR_BAD_EXE_FORMAT because it cannot produce a Windows process object
+     * for it. Measured in the s90 probe -- the touch marker appeared on disk from the
+     * call that "failed". So the error is expected and is not evidence of anything;
+     * the caller polls for the script's OUTPUT instead of trusting a return code. */
+    snprintf(cmd, sizeof cmd, "\"Z:\\bin\\sh\" \"%s/tropico-host-%ld.sh\"", udir, (long)n);
+    if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW,
+                       NULL, NULL, &si, &pi)) {
+        if (wait_ms) WaitForSingleObject(pi.hProcess, wait_ms);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    } else if (wait_ms) {
+        /* The usual path: exec happened, no handle to wait on. Give it a moment. */
+        Sleep(wait_ms > 1200 ? 1200 : wait_ms);
+    }
+    return 1;
+}
+
+/* Run xrandr --query into a file beside the game and read it back. */
+static int xrandr_query(char *buf, DWORD cap)
+{
+    char udir[MAX_PATH], script[MAX_PATH * 3], win[MAX_PATH];
+    HANDLE h;
+    DWORD got = 0;
+    int i;
+    if (!game_unix_dir(udir, sizeof udir)) return 0;
+    snprintf(win, sizeof win, "%s\\tropico-xrandr.txt", g_dir);
+    DeleteFileA(win);
+    write_host_file("tropico-pointer.py", POINTER_PY);
+    snprintf(script, sizeof script,
+             "/usr/bin/xrandr --query > '%s/tropico-xrandr.txt' 2>&1\n"
+             "/usr/bin/python3 '%s/tropico-pointer.py' >> '%s/tropico-xrandr.txt' 2>&1\n",
+             udir, udir, udir);
+    if (!unix_sh(script, 4000)) return 0;
+    /* start.exe returns before the child finishes, so the file can lag the call. */
+    for (i = 0; i < 20; i++) {
+        h = CreateFileA(win, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                        OPEN_EXISTING, 0, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            ReadFile(h, buf, cap - 1, &got, NULL);
+            CloseHandle(h);
+            if (got) break;
+        }
+        Sleep(100);
+    }
+    if (!got) return 0;
+    buf[got] = 0;
+    return 1;
+}
+
+static DWORD WINAPI heartbeat_thread(LPVOID p)
+{
+    (void)p;
+    for (;;) {
+        HANDLE h = CreateFileA(g_xr_marker_win, GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            DWORD wrote;
+            WriteFile(h, "alive\n", 6, &wrote, NULL);
+            CloseHandle(h);
+        }
+        Sleep(2000);
+    }
+}
+
+/* Everything xrandr told us about one output. */
+typedef struct { char name[64]; int primary; DWORD w, h; long x, y; } xout_t;
+
+static long g_ptr_x = -1, g_ptr_y = -1;   /* root coords, from XQueryPointer */
+
+static int xrandr_outputs(xout_t *out, int cap)
+{
+    char buf[16384], line[512];
+    const char *b;
+    size_t li = 0;
+    int n = 0;
+    if (!xrandr_query(buf, sizeof buf)) return 0;
+    for (b = buf; ; b++) {
+        if (*b && *b != '\n' && li < sizeof line - 1) { line[li++] = *b; continue; }
+        line[li] = 0; li = 0;
+        if (!strncmp(line, "POINTER ", 8)) {
+            long qx, qy;
+            if (sscanf(line + 8, "%ld %ld", &qx, &qy) == 2) { g_ptr_x = qx; g_ptr_y = qy; }
+        }
+        if (line[0] && line[0] != ' ' && line[0] != '\t' && n < cap) {
+            xout_t o;
+            const char *p = line;
+            size_t k = 0;
+            unsigned uw, uh; int ix, iy;
+            memset(&o, 0, sizeof o);
+            while (*p && *p != ' ' && k < sizeof o.name - 1) o.name[k++] = *p++;
+            o.name[k] = 0;
+            if (!strncmp(p, " connected", 10)) {
+                p += 10;
+                o.primary = (strncmp(p, " primary", 8) == 0);
+                if (o.primary) p += 8;
+                if (*p == ' ' && sscanf(p + 1, "%ux%u+%d+%d", &uw, &uh, &ix, &iy) == 4) {
+                    o.w = uw; o.h = uh; o.x = ix; o.y = iy;
+                    out[n++] = o;
+                }
+            }
+        }
+        if (!*b) break;
+    }
+    return n;
+}
+
+/* s90.2: the monitor is chosen from WHERE THE GAME WAS LAUNCHED, not from the mode
+ * in the ini.
+ *
+ * The first version let the configured mode decide, which inverts cause and effect:
+ * ask for 2560x1440 and it made the 1440p panel primary even though the player had
+ * clicked Play on the 1080p one, so the window opened on one monitor while Wine
+ * measured another -- DirectDraw #150, an error dialog before the game even starts.
+ * That is the same rule tools/tropico enforces on GOG ("launch it from the monitor
+ * you want to play on"), except here nothing of ours runs first to enforce it, so
+ * the proxy has to infer it.
+ *
+ * The pointer is the signal: Steam's Play button is under the cursor a second or two
+ * before we run. GetCursorPos gives Windows virtual-screen coordinates whose origin
+ * is the CURRENT primary, so adding that primary's xrandr position converts them
+ * into X coordinates that can be tested against every output's real rectangle. Two
+ * monitors of identical size are therefore still told apart, which matching by mode
+ * alone could not do.
+ *
+ * [Display] Monitor=<name> overrides the inference; [Display] SetPrimary=0 disables
+ * the whole step. */
+static void choose_and_apply_monitor(void)
+{
+    xout_t outs[8];
+    int n, i, chosen = -1, prim = -1;
+    char ip[MAX_PATH], want[64], want2[64], script[MAX_PATH * 4], udir[MAX_PATH];
+    POINT pt;
+    long px, py;
+
+    snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+    if (!GetPrivateProfileIntA("Display", "SetPrimary", 1, ip)) return;
+    GetPrivateProfileStringA("Display", "Monitor", "", want, sizeof want, ip);
+
+    /* Not when tools/tropico started us. That launcher already chose the monitor,
+     * made it primary and built a virtual desktop around it -- doing it again from
+     * in here means two things deciding the same setting, and the one with worse
+     * information (no launch context, a pointer that may have moved) would win by
+     * running second. The launcher exports this; nothing else sets it. */
+    if (GetEnvironmentVariableA("TROPICO_LAUNCHER", want2, sizeof want2)) {
+        logf_("  [display] launched by tools/tropico, which has already chosen the"
+              " monitor -- leaving the display alone");
+        return;
+    }
+
+    n = xrandr_outputs(outs, 8);
+    if (n <= 0) {
+        logf_("  [display] could not read the display from the host -- leaving the"
+              " monitor alone (expected outside Steam/Proton; the GOG launcher does"
+              " this job itself)");
+        return;
+    }
+    for (i = 0; i < n; i++) if (outs[i].primary) prim = i;
+    if (prim < 0) { logf_("  [display] xrandr reports no primary output -- leaving it alone"); return; }
+
+    if (n == 1) {
+        logf_("  [display] one monitor (%s, %lux%lu) -- nothing to choose",
+              outs[0].name, (unsigned long)outs[0].w, (unsigned long)outs[0].h);
+        return;
+    }
+
+    if (want[0]) {
+        for (i = 0; i < n; i++) if (!_stricmp(outs[i].name, want)) chosen = i;
+        if (chosen < 0)
+            logf_("[!] [display] Monitor=%s is not a connected output -- ignoring it", want);
+    }
+    if (chosen < 0 && (g_ptr_x >= 0 || GetCursorPos(&pt))) {
+        if (g_ptr_x >= 0) {
+            px = g_ptr_x; py = g_ptr_y;          /* X root coords: already absolute */
+        } else {
+            /* Fallback only. Wine has no pointer state this early, and its 0,0
+             * always resolves to the primary -- so refuse that answer rather than
+             * let it masquerade as a detection. */
+            if (!pt.x && !pt.y) {
+                logf_("  [display] no pointer from X and Wine says 0,0 -- refusing to"
+                      " guess a monitor from that; staying on the primary %s",
+                      outs[prim].name);
+                return;
+            }
+            px = outs[prim].x + pt.x;
+            py = outs[prim].y + pt.y;
+        }
+        for (i = 0; i < n; i++)
+            if (px >= outs[i].x && px < outs[i].x + (long)outs[i].w &&
+                py >= outs[i].y && py < outs[i].y + (long)outs[i].h) { chosen = i; break; }
+        if (chosen >= 0)
+            logf_("  [display] launched from %s (pointer at %ld,%ld in screen space)",
+                  outs[chosen].name, px, py);
+    }
+    if (chosen < 0) {
+        logf_("  [display] could not tell which monitor this was launched from --"
+              " staying on the primary %s", outs[prim].name);
+        return;
+    }
+
+    /* Adopt the launch monitor's own mode when we have art for it. When we do not,
+     * only the primary is changed and the existing picker/fallback (s85) chooses a
+     * mode that fits and switches the art to match -- rather than forcing a mode
+     * whose HUD art does not exist. */
+    if (mode_is_staged(outs[chosen].w, outs[chosen].h) &&
+        GetPrivateProfileIntA("Display", "FollowLaunchMonitor", 1, ip)) {
+        g_launch_w = outs[chosen].w;
+        g_launch_h = outs[chosen].h;
+        if (!active_artset_is(g_launch_w, g_launch_h)) {
+            int f = activate_artset(g_launch_w, g_launch_h);
+            logf_("[+] [artset] switched data\\ to the staged %lux%lu set (%d files)"
+                  " for %s", (unsigned long)g_launch_w, (unsigned long)g_launch_h,
+                  f, outs[chosen].name);
+        }
+        logf_("[+] [display] running at %s's own mode %lux%lu", outs[chosen].name,
+              (unsigned long)g_launch_w, (unsigned long)g_launch_h);
+    } else if (!mode_is_staged(outs[chosen].w, outs[chosen].h)) {
+        logf_("  [display] no art staged for %s's %lux%lu -- the picker will choose a"
+              " mode that fits and the fallback will match the art to it",
+              outs[chosen].name, (unsigned long)outs[chosen].w,
+              (unsigned long)outs[chosen].h);
+    }
+
+    if (chosen == prim) {
+        logf_("  [display] %s is already primary -- nothing to change", outs[prim].name);
+        return;
+    }
+
+    if (!game_unix_dir(udir, sizeof udir)) return;
+    snprintf(g_xr_prev, sizeof g_xr_prev, "%s", outs[prim].name);
+    snprintf(g_xr_marker_win, sizeof g_xr_marker_win, "%s\\tropico-primary.lock", g_dir);
+    snprintf(g_xr_marker_unix, sizeof g_xr_marker_unix, "%s/tropico-primary.lock", udir);
+    CloseHandle(CreateThread(NULL, 0, heartbeat_thread, NULL, 0, NULL));
+    Sleep(150);
+
+    snprintf(script, sizeof script,
+             "/usr/bin/xrandr --output %s --primary\n"
+             "( while [ -f '%s' ]; do\n"
+             "N=$(date +%%s); M=$(stat -c %%Y '%s' 2>/dev/null || echo 0)\n"
+             "[ $((N-M)) -ge 10 ] && break\n"
+             "sleep 2\n"
+             "done\n"
+             "/usr/bin/xrandr --output %s --primary\n"
+             "rm -f '%s' ) &\n",
+             outs[chosen].name, g_xr_marker_unix, g_xr_marker_unix,
+             g_xr_prev, g_xr_marker_unix);
+    if (unix_sh(script, 3000)) {
+        int k;
+        for (k = 0; k < 60; k++) {
+            if ((DWORD)GetSystemMetrics(SM_CXSCREEN) == outs[chosen].w &&
+                (DWORD)GetSystemMetrics(SM_CYSCREEN) == outs[chosen].h) break;
+            Sleep(100);
+        }
+        logf_("[+] [display] primary %s -> %s; Wine now measures %dx%d. A host"
+              " watchdog restores %s when this process stops, crash included",
+              g_xr_prev, outs[chosen].name, GetSystemMetrics(SM_CXSCREEN),
+              GetSystemMetrics(SM_CYSCREEN), g_xr_prev);
+    }
+}
+
+/* The adopted mode wins over [Resolution]: it describes the screen the player is
+ * actually looking at, and the ini describes whatever was configured last. */
+static int launch_override(mode_t *m)
+{
+    if (!g_launch_w || !g_launch_h) return 0;
+    m->w = g_launch_w; m->h = g_launch_h;
+    return 1;
+}
+
+static void unix_probe(void)
+{
+    static const char *cands[] = { "Z:\\usr\\bin\\xrandr", "Z:\\usr\\bin\\python3",
+                                   "Z:\\usr\\bin\\touch", "Z:\\bin\\sh" };
+    char unixdir[MAX_PATH], cmd[MAX_PATH * 2];
+    size_t i;
+    logf_("[*] [unix] probe: game dir as Windows sees it is '%s'", g_dir);
+    for (i = 0; i < sizeof cands / sizeof *cands; i++) {
+        DWORD at = GetFileAttributesA(cands[i]);
+        logf_("  [unix] %-22s %s", cands[i],
+              at == INVALID_FILE_ATTRIBUTES ? "NOT VISIBLE" : "visible");
+    }
+    /* Z: is the host root, so the game dir's unix path is g_dir without the drive,
+     * with the slashes turned round. If g_dir is not on Z: we cannot name it and
+     * the file-based proof is not available -- say so rather than guess a path. */
+    if ((g_dir[0] == 'Z' || g_dir[0] == 'z') && g_dir[1] == ':') {
+        const char *r = g_dir + 2;
+        size_t n = 0;
+        while (*r && n < sizeof unixdir - 1) {
+            unixdir[n++] = (*r == '\\') ? '/' : *r;
+            r++;
+        }
+        unixdir[n] = 0;
+    } else {
+        logf_("  [unix] game dir is not on Z: -- cannot derive a host path, so the"
+              " file-based proof is skipped and only exec success is measured");
+        unixdir[0] = 0;
+    }
+
+    if (unixdir[0]) {
+        snprintf(cmd, sizeof cmd,
+                 "start.exe /unix /usr/bin/touch \"%s/unix-probe-start.txt\"", unixdir);
+        run_route("start /unix", cmd);
+        snprintf(cmd, sizeof cmd,
+                 "\"Z:\\usr\\bin\\touch\" \"%s/unix-probe-direct.txt\"", unixdir);
+        run_route("direct Z:", cmd);
+        /* Redirection is a SHELL feature and `start /unix` execs the binary
+         * directly, so the first attempt handed ">" to xrandr as an argument and
+         * it exited 1. Go through sh -c, and capture stderr too: "xrandr cannot
+         * open the display" is the answer we are actually looking for. */
+        snprintf(cmd, sizeof cmd,
+                 "start.exe /unix /bin/sh -c \"/usr/bin/xrandr --query"
+                 " > '%s/unix-probe-xrandr.txt' 2>&1;"
+                 " echo DISPLAY=$DISPLAY >> '%s/unix-probe-xrandr.txt'\"",
+                 unixdir, unixdir);
+        run_route("xrandr", cmd);
+        logf_("  [unix] verdict is the FILES, not these exit codes: look for"
+              " unix-probe-*.txt beside the game.");
+    }
+}
+
+static int install_cursor_probe(void)
+{
+    void *real = NULL;
+    void *slot = hook_import("USER32.dll", "GetCursorPos", (void *)hook_GetCursorPos, &real);
+    if (!slot) return 0;
+    g_real_gcp = (GetCursorPos_t)real;
+    g_gcp_slot = (GetCursorPos_t *)slot;
+    logf_("[*] [cursor] probe armed: hooked USER32!GetCursorPos slot %p (real %p)."
+          " One line per second, 60 max.", slot, real);
+    return 1;
 }
 
 /* ------------------------------------------------------- the live-memory scan
@@ -2142,6 +2874,52 @@ static void maybe_start_cliplog(void)
  * identified by [esp] == 0x50b15b and no other image blit is touched.  ECX is
  * the image; [ecx+0x10] is its pixel width.
  */
+/* --- telemetry for the viewport fix (s88) ---------------------------------
+ *
+ * The Steam build shipped a patch that installed cleanly, logged four [+] lines,
+ * and never executed one of its own stores: the return-address filter below was a
+ * hardcoded GOG RVA, and on any other build the compare simply never matches. The
+ * log said "applied" because that is written at PATCH time; whether the stub ever
+ * FIRES is a different claim and nothing was making it.
+ *
+ * So the stub now counts. g_world_seen/g_world_lastret are recorded for every draw
+ * that passes the size gate -- i.e. every plausible main-viewport draw, whatever it
+ * returns to -- which means a filter that matches nothing still tells us the address
+ * it should have been looking for, in the same run that failed. */
+static volatile DWORD g_world_seen;      /* draws that passed the size gate      */
+static volatile DWORD g_world_lastret;   /* where the last such draw returns to  */
+static volatile DWORD g_world_fires;     /* draws the filter actually accepted   */
+static DWORD          g_world_callsite;  /* what the filter is looking for       */
+
+static DWORD WINAPI worldfix_watch_thread(LPVOID p)
+{
+    int i;
+    (void)p;
+    /* Three minutes: long enough to cover the menu, a scenario pick and a map load
+     * on a slow disk. The world is not drawn at all until a map is running, so a
+     * verdict before that would be meaningless. */
+    for (i = 0; i < 360; i++) {
+        Sleep(500);
+        if (g_world_fires) {
+            logf_("[+] [worldfix] FIRING -- %lu world draw(s) corrected",
+                  (unsigned long)g_world_fires);
+            return 0;
+        }
+    }
+    if (g_world_seen)
+        logf_("[x] [worldfix] INSTALLED BUT NEVER FIRED. %lu draw(s) passed the size"
+              " gate and the last returned to %08x, but the filter wants %08x --"
+              " so the terrain is being painted at its stock size. That address is"
+              " this build's world call site: the signature did not match it.",
+              (unsigned long)g_world_seen, (unsigned)g_world_lastret,
+              (unsigned)g_world_callsite);
+    else
+        logf_("[x] [worldfix] INSTALLED BUT NEVER FIRED, and NO draw passed the size"
+              " gate either -- so either no map was loaded during this run, or the"
+              " painter signature matched the wrong function.");
+    return 0;
+}
+
 static const BYTE DRAW_SIG[] = { 0x83,0xec,0x2c, 0xdb,0x44,0x24,0x30, 0x53,0x55,0x56 };
 
 /* force: emit the stores with no comparison at all.  The stock values are
@@ -2154,19 +2932,44 @@ static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
 {
     BYTE *at = find_unique(DRAW_SIG, sizeof DRAW_SIG, g_text, g_textlen, "world painter");
     if (!at) return 0;
-    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 128, MEM_COMMIT | MEM_RESERVE,
+    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 256, MEM_COMMIT | MEM_RESERVE,
                                       PAGE_EXECUTE_READWRITE);
     if (!stub) { logf_("[x] world painter: VirtualAlloc failed"); return 0; }
 
-    DWORD callsite = (DWORD)(SIZE_T)(g_base + 0x10b15b);
+    /* The world's call INTO the painter is indirect -- `lea ecx,[esi+0x7a]; call edi`
+     * -- so it cannot be found by scanning for a call rel32 that targets the painter,
+     * which is why this was a hardcoded RVA and why it silently did nothing on the
+     * Steam build (s88). Match the call site itself instead, wildcarding the one
+     * absolute operand in it, and read the return address out of the match. The two
+     * `push 0` are what separate this site from the two other `lea ecx,[esi+0x7a];
+     * call edi` pairs in the same function. */
+    static const BYTE CALL_SIG[] = { 0x6a,0x00, 0x6a,0x00, 0x51, 0x03,0x50,0x11, 0x52,
+                                     0xba, 0,0,0,0,
+                                     0x8d,0x4e,0x7a, 0xff,0xd7 };
+    static const BYTE CALL_MSK[] = { 1,1, 1,1, 1, 1,1,1, 1,
+                                     1, 0,0,0,0,
+                                     1,1,1, 1,1 };
+    DWORD callsite;
+    BYTE *cs = find_unique_masked(CALL_SIG, CALL_MSK, sizeof CALL_SIG,
+                                  g_text, g_textlen, "world call site");
+    if (cs) {
+        callsite = (DWORD)(SIZE_T)(cs + sizeof CALL_SIG);
+        logf_("[*] world call site derived by signature: returns to %08x",
+              (unsigned)callsite);
+    } else {
+        callsite = (DWORD)(SIZE_T)(g_base + 0x10b15b);
+        logf_("[!] world call site: signature did NOT match -- falling back to the"
+              " hardcoded GOG address %08x. On a different build this filter will"
+              " reject every draw and the fix will not fire; the [worldfix] line"
+              " later in this log says which happened.", (unsigned)callsite);
+    }
+    g_world_callsite = callsite;
     BYTE *ret_to = at + 7;
     int i = 0, fix_top, fix_gate = -1, fix_img = -1, fix_obj = -1, fix_ih = -1, fix_h = -1;
     (void)fix_img; (void)fix_obj; (void)fix_ih; (void)fix_h;
 
     stub[i++]=0x50;                                                   /* push eax          */
     stub[i++]=0x8b; stub[i++]=0x44; stub[i++]=0x24; stub[i++]=0x04;   /* mov eax,[esp+4]   */
-    stub[i++]=0x3d; memcpy(stub+i,&callsite,4); i+=4;                 /* cmp eax,callsite  */
-    stub[i++]=0x75; fix_top=i++;                                      /* jne skip          */
 
     /* Size gate.  The return address proves the CALL SITE is the world's; it does
      * not prove the VIEWPORT is the main one.  The zoomed detail preview in the
@@ -2179,6 +2982,25 @@ static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
         stub[i++]=0x81; stub[i++]=0x79; stub[i++]=0x10;
         memcpy(stub+i,&guard,4); i+=4;                                /* cmp [ecx+0x10],g  */
         stub[i++]=0x72; fix_gate=i++;                                 /* jb  skip          */
+    }
+
+    /* Telemetry, recorded BEFORE the return-address filter and only for draws big
+     * enough to be the main viewport (s88). This is what turns "the fix did not
+     * work" into "the fix was looking for %08x and this build calls from %08x",
+     * without a second run and without a debugger. */
+    {
+        DWORD a;
+        a = (DWORD)(SIZE_T)&g_world_seen;
+        stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a,4); i+=4;    /* inc [g_world_seen]   */
+        a = (DWORD)(SIZE_T)&g_world_lastret;
+        stub[i++]=0xa3;                 memcpy(stub+i,&a,4); i+=4;    /* mov [g_lastret],eax  */
+    }
+
+    stub[i++]=0x3d; memcpy(stub+i,&callsite,4); i+=4;                 /* cmp eax,callsite  */
+    stub[i++]=0x75; fix_top=i++;                                      /* jne skip          */
+    {
+        DWORD a = (DWORD)(SIZE_T)&g_world_fires;
+        stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a,4); i+=4;    /* inc [g_world_fires]  */
     }
 
     /* image pixel width: [ecx+0x10] */
@@ -2249,6 +3071,7 @@ static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
     memcpy(at + 1, &rel, 4);
     at[5] = at[6] = 0x90;
     VirtualProtect(at, 7, old, &old);
+    CloseHandle(CreateThread(NULL, 0, worldfix_watch_thread, NULL, 0, NULL));
     if (force) logf_("[+] world painter at %p: FORCED writes for the call at %08x,"
                      " gated on viewport width >= %u (stub %p)",
                      at, (unsigned)callsite, guard, stub);

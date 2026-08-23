@@ -7,17 +7,61 @@
 
 # ---------------------------------------------------------------- find the install
 # Honours TROPICO_DIR. Prints the directory, or nothing if there is no install.
+# Every Tropico install on this machine, one path per line, in a stable order.
+#
+# Returning only the FIRST match (tropico_find_dir, below) is what let a machine with
+# both editions be half-patched: the installer did GOG and never said Steam existed,
+# and --uninstall left the Steam copy patched while reporting success.
+#
+# The Steam library list is not guessable -- libraries live on whatever drives someone
+# added -- so it is read from libraryfolders.vdf rather than hardcoded. Heroic, Lutris
+# and flatpak Steam are included because those are where people who did not buy on
+# Steam actually have it.
+_tropico_candidates() {
+  for c in "/mnt/Windows/GOG Games/Tropico/app" \
+           "$HOME/GOG Games/Tropico/app" \
+           "$HOME/Games/gog/Tropico/app" \
+           "$HOME/Games/Heroic/Tropico/app" \
+           "$HOME/Games/tropico/drive_c/GOG Games/Tropico/app" \
+           "$HOME/.steam/debian-installation/steamapps/common/Tropico" \
+           "$HOME/.steam/steam/steamapps/common/Tropico" \
+           "$HOME/.local/share/Steam/steamapps/common/Tropico" \
+           "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/Tropico"
+  do
+    [ -f "$c/Tropico.EXE" ] && echo "$c"
+  done
+
+  # Steam libraries on other drives. The "path" lines in libraryfolders.vdf name each
+  # library root; the game sits under steamapps/common/Tropico inside it.
+  for v in "$HOME/.steam/debian-installation/steamapps/libraryfolders.vdf" \
+           "$HOME/.steam/steam/steamapps/libraryfolders.vdf" \
+           "$HOME/.local/share/Steam/steamapps/libraryfolders.vdf" \
+           "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/libraryfolders.vdf"
+  do
+    [ -f "$v" ] || continue
+    sed -n 's/.*"path"[^"]*"\(.*\)".*/\1/p' "$v" | while IFS= read -r lib; do
+      d="$lib/steamapps/common/Tropico"
+      [ -f "$d/Tropico.EXE" ] && echo "$d"
+    done
+  done
+}
+
+# The candidate list overlaps itself on purpose -- ~/.steam/steam is usually a symlink
+# to the real Steam root, and a library listed in libraryfolders.vdf is often one we
+# already named. Resolve each path and drop repeats, or a machine with one Steam copy
+# gets patched three times and told so three times.
+tropico_find_all() {
+  _tropico_candidates | while IFS= read -r d; do readlink -f "$d"; done | awk '!seen[$0]++'
+}
+
 tropico_find_dir() {
   if [ -n "${TROPICO_DIR:-}" ]; then
     [ -f "$TROPICO_DIR/Tropico.EXE" ] && echo "$TROPICO_DIR"
     return
   fi
-  for c in "/mnt/Windows/GOG Games/Tropico/app" \
-           "$HOME/.steam/debian-installation/steamapps/common/Tropico" \
-           "$HOME/.local/share/Steam/steamapps/common/Tropico" \
-           "$HOME/GOG Games/Tropico/app"; do
-    [ -f "$c/Tropico.EXE" ] && { echo "$c"; return; }
-  done
+  # One install: the first tropico_find_all reports. Kept for the launcher and the
+  # mode switcher, which act on a single install by design.
+  tropico_find_all | head -1
 }
 
 # ------------------------------------------------------------------- the display

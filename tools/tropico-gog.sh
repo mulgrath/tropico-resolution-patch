@@ -15,6 +15,10 @@
 # GetDeviceCaps(hdc, HORZRES) at 0x515160 and stores it in 0x60c118, then the
 # mode enumerator at 0x514d60 keeps a resolution only if width < that value.
 set -u
+
+# s90: the harness picks the monitor too -- keep the proxy from choosing a second
+# time from inside the game.
+export TROPICO_LAUNCHER=1
 DESK="${1:-1280x1024}"
 shift 2>/dev/null || true
 

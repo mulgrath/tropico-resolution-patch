@@ -252,7 +252,34 @@ Archives: `px.PK2` (1902 entries), `px2.PK2` (2223), `px3.PK2` (675), `px4.PK2` 
     display bring-up (#150), and overriding the Bink destination pitch (crash — 1280 was
     correct all along).
 
-11. **Steam build support.** Installed at
+11. **Steam build support — the renderer is SOLVED (§88), packaging is open.**
+
+    The world-painter divergence was ours, not the build's: the call-site filter was a
+    hardcoded GOG RVA and never matched, so the patch installed and never fired. Matched by
+    signature now; terrain is full width on Steam, confirmed in game 2026-08-22. The same
+    run also exposed that `known-good/binkw32.dll` shipped WITHOUT §86/§87 — see §88.2, and
+    check the artifact is newer than its source before believing any "it works" report.
+
+    **Packaging is closed too (§90).** The Play button is the only way past the DRM, so
+    `tools/tropico` cannot be in the launch path — the proxy does that job from inside
+    instead. Measured: a Windows process under Proton can execute host binaries, so it runs
+    `xrandr`, picks the monitor the player launched from (via `XQueryPointer`, because
+    `GetCursorPos` returns 0,0 that early and 0,0 always resolves to the primary), makes it
+    primary, adopts that monitor's mode and staged art, and restores the primary afterwards
+    through a host-side watchdog that survives a crash. Confirmed by alternating launches
+    from each monitor with no dialogs. `TROPICO_LAUNCHER=1` keeps it out of the GOG path.
+
+    A virtual desktop was tried first and rejected: Proton ignores `Decorated`/`Managed` for
+    the desktop window (ValveSoftware/wine#164) and has virtual-desktop placement
+    regressions (ValveSoftware/Proton#4673), so it arrived bordered and not fullscreen.
+    Native fullscreen is already correct there.
+
+    Remaining and documented, not fixed: Proton breaks Hardware 3D (§23), so Software is the
+    only correct renderer on that edition.
+
+    Original note follows.
+
+    Installed at
     `~/.steam/debian-installation/steamapps/common/Tropico` (flat layout, no `app/`).
 
     **The masked signatures work.** A 2026-08-19 log from that install shows the DRM
