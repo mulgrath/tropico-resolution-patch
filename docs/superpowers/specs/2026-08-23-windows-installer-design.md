@@ -81,6 +81,13 @@ the proxy reads from inside it is **virtualized**. Two load-bearing sites use
 |---|---|
 | `tropico_fix.c:709` | "does the configured mode fit the screen it will run on" |
 | `tropico_fix.c:470` | `deskw`/`deskh`, the fit filter inside `pick_mode_pass` |
+| **the game's own `GetDeviceCaps(NULL, HORZRES)`** | **the desktop-width gate at `0x515160` -> `[0x60c118]` (FINDINGS 2)** |
+
+The third is the one that hurts, and it is not ours: `GetDeviceCaps(hdcScreen, HORZRES)`
+is DPI-virtualized for an unaware process exactly as `GetSystemMetrics` is, and it is
+what the resolution-table gate consumes. So on a scaled display the gate filters the
+table against a width the monitor does not have — that is the tier-1 mechanism itself,
+not merely our fit-checks, reading a wrong number.
 
 On a 3840x2160 panel at 200% scaling, both read **1920x1080**. A correctly
 installed 3840x2160 patch then, at launch:
@@ -101,23 +108,44 @@ been seen.
 
 ### Why Linux is unaffected
 
-Not by design — by accident, and the accident is worth naming because it is what
-makes Windows different. On Linux the installer reads `xrandr` and the game reads
-the same X server through Wine. **One source, so the two cannot disagree.** On X11
-at 200%, scaling is a toolkit concern and `xrandr` reports the true 3840x2160,
-which is what Wine gets. Under XWayland at 200%, X clients are presented
-1920x1080 — and 1920x1080 is then genuinely the correct target, because that is what
-Wine will render into.
+**Measured, not reasoned** — `probes/dpiprobe.c` under wine-9.0 on a 1920x1080
+primary, at `HKCU\Control Panel\Desktop\LogPixels` = 96, 144 and 192:
 
-Windows breaks precisely because that shared source is gone: a DPI-aware installer
-and a DPI-unaware game read different numbers for the same panel.
+| | 96 (100%) | 144 (150%) | 192 (200%) |
+|---|---|---|---|
+| `LOGPIXELSX` | 96 | 144 | 192 |
+| `SM_CXSCREEN` | 1920x1080 | 1920x1080 | 1920x1080 |
+| `GetDeviceCaps HORZRES` | 1920x1080 | 1920x1080 | 1920x1080 |
+| `EnumDisplaySettings` | 1920x1080 | 1920x1080 | 1920x1080 |
+
+**Wine reports the DPI but does not virtualize the metrics.** The setting is plainly
+honoured — `LOGPIXELSX` tracks it — yet every geometry stays real. On Windows an
+unaware process is told `LOGPIXELSX = 96` *whatever* the scaling is; that is what
+virtualization means, and it is precisely what did not happen here.
+
+So Linux is safe for a stronger reason than a shared source: **Wine never lies, at any
+DPI setting.** The corollary is that Linux **cannot reproduce this bug**, and the
+scaled-display test must run on native Windows.
+
+(The shared-source argument still holds as a second line of defence, and still explains
+why XWayland at 200% is correct rather than merely lucky: X clients are presented
+1920x1080 there, and 1920x1080 is genuinely what Wine will render into.)
 
 ### The fix
 
 One call early in the proxy's init: `SetProcessDpiAwarenessContext`
-(`PER_MONITOR_AWARE_V2`), falling back to `SetProcessDPIAware` on older Windows.
-Every existing `GetSystemMetrics` site then returns physical pixels and the
-surrounding logic — which was expensive to get right — is untouched.
+(`PER_MONITOR_AWARE_V2`), falling back to `SetProcessDPIAware`. Every existing
+`GetSystemMetrics` site then returns physical pixels, the game's own `GetDeviceCaps`
+gate reads the real width, and the surrounding logic — which was expensive to get
+right — is untouched.
+
+**The fallback is not belt-and-braces.** Measured: `SetProcessDpiAwarenessContext`
+fails with 87 (`ERROR_INVALID_PARAMETER`) under wine-9.0, so Wine takes the
+`SetProcessDPIAware` path every time.
+
+**Confirmed safe for Linux.** In the same probe run `SetProcessDPIAware()` returns 1
+and moves not a single number at any DPI setting. Adding it therefore cannot regress
+the platform that currently works, which was the main risk of touching the C at all.
 
 `pick_mode_pass` already calls `EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS)`
 two lines above `deskw` to get the desktop aspect. That call is not virtualized, so
@@ -131,7 +159,10 @@ put the platform that currently works at risk to fix the one that does not.
 Process-wide DPI awareness leaves Wine's semantics alone.
 
 **Sequencing:** this lands *first*, as its own commit, with a before/after test at
-a scaled resolution. It is a correctness bug independent of packaging, and fixing it
+a scaled resolution **on native Windows** — the Linux probe has established that Wine
+cannot exercise the defect. The test needs only Display Settings -> Scale set to 150%
+on any monitor; the bug is about scaling, not about 4K, and a 2560x1440 panel at 150%
+reproduces it exactly (logical 1706x960). It is a correctness bug independent of packaging, and fixing it
 first means the installer port is validated against a proxy that already agrees
 with it.
 
