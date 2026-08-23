@@ -27,7 +27,7 @@ is now larger. Bigger is strictly a stronger test, and the real number is printe
 
 Usage:  probes/artgen_oracle.py [--app DIR] [--to 2560x1440] [--classes i16]
 """
-import argparse, importlib.util, os, struct, subprocess, sys, time
+import argparse, importlib.util, os, re, struct, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -169,6 +169,72 @@ def report_diff(a, b):
     print('  %d of %d shared sprites differ' % (n, len(ka & kb)))
 
 
+def names_oracle(app, work):
+    """Step 4: archive reading and name harvesting.
+
+    TWO diffs, and the second alone would be too weak. The resolved listing drops any
+    name with no `.i16`, so resolution is a FILTER -- a spurious extra name never
+    reaches the output and a diff of the listing would not see it. The harvested set
+    is diffed first for that reason.
+    """
+    import subprocess as sp
+    probe = os.path.join(work, 'artgen_names')
+    sp.run(['cc', '-O2', '-Wall', '-Wextra', '-o', probe,
+            os.path.join(HERE, 'artgen_names.c')], check=True)
+    data, exe = os.path.join(app, 'data'), os.path.join(app, 'Tropico.EXE')
+
+    idx = pk2.load_all(data)
+    if not idx:
+        sys.exit('no archives under %s' % data)
+
+    # ---- the harvested set, before resolution -------------------------------
+    names = set(pk2.imm_names(exe))
+    for arc in sorted(set(e['archive'] for e in idx.values())):
+        blob = open(arc, 'rb').read()
+        for e in pk2.read_index(arc):
+            d = blob[e['offset']: e['offset'] + e['size']]
+            if len(d) < 4 or struct.unpack_from('<I', d, 0)[0] != 0x7d0:
+                continue
+            for m in re.finditer(rb'[A-Za-z0-9_\-]{1,20}\.imm', d):
+                names.add(m.group(0).decode())
+    names |= art.numeric_family(names, idx)
+    py_harvest = sorted(names)
+    c_harvest = sp.run([probe, data, exe, '--dump-names'],
+                       capture_output=True, text=True, check=True).stdout.split()
+
+    ok = True
+    if py_harvest == c_harvest:
+        print('  harvested names IDENTICAL: %d  (brNN: %d)'
+              % (len(c_harvest), sum(1 for n in c_harvest if re.match(r'^br\d+\.imm$', n))))
+    else:
+        ok = False
+        sp_only = set(py_harvest) - set(c_harvest)
+        sc_only = set(c_harvest) - set(py_harvest)
+        print('  harvested names DIFFER: %d only in Python %s, %d only in C %s'
+              % (len(sp_only), sorted(sp_only)[:5], len(sc_only), sorted(sc_only)[:5]))
+
+    # ---- the resolved listing, order included -------------------------------
+    resolved = art.asset_names(exe, idx)
+    extra = art.asset_names(exe, idx, src_ext='i06', missing_only=True)
+    have = set(n for n, _ in resolved)
+    resolved = resolved + [(n, e) for n, e in extra if n not in have]
+    py_lines = ['%s\t%s\t%d\t%d' % (n, os.path.basename(e['archive']),
+                                      e['offset'], e['size']) for n, e in resolved]
+    c_lines = sp.run([probe, data, exe, '--with-menu'],
+                     capture_output=True, text=True, check=True).stdout.splitlines()
+    if py_lines == c_lines:
+        print('  resolved listing IDENTICAL: %d assets, same order, same entries'
+              % len(c_lines))
+    else:
+        ok = False
+        for i, (a, b) in enumerate(zip(py_lines, c_lines)):
+            if a != b:
+                print('  first difference at line %d:\n    py %s\n    c  %s' % (i, a, b))
+                break
+        print('  %d vs %d lines' % (len(py_lines), len(c_lines)))
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -185,6 +251,8 @@ def main():
                     help='uniform scale for font assets (default 1.0 = left stock, '
                          'which is also the case that proves the filter exact at 1:1)')
     ap.add_argument('--font-filter', choices=('box', 'nn'), default='box')
+    ap.add_argument('--names', action='store_true',
+                    help='run the step-4 name/archive oracle instead of the codec one')
     ap.add_argument('--keep', action='store_true', help='keep the corpus directory')
     a = ap.parse_args()
 
@@ -193,6 +261,11 @@ def main():
     classes = tuple(a.classes.split(','))
     work = a.work or os.path.join(os.environ.get('TMPDIR', '/tmp'), 'artgen-oracle')
     corpus = os.path.join(work, 'corpus')
+
+    if a.names:
+        os.makedirs(work, exist_ok=True)
+        print('names + archives, from %s' % a.app)
+        return 0 if names_oracle(a.app, work) else 1
 
     print('corpus: %s classes from %s' % (','.join(classes), a.app))
     names = extract_corpus(a.app, classes, corpus)

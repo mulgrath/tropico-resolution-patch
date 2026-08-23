@@ -6965,3 +6965,57 @@ font scale: **0.288 s** for 5,164 sprites and 269,784 rows. The full five-class 
 is 0.451 s native and 0.711 s 32-bit, against **27.7 s** of Python — 39x and 62x
 respectively. The font path is slower per sprite than the raw codec, as expected, and
 still nowhere near the 3 s gate.
+
+## 95. Archive reading and name harvesting in C — 280 names and 268 assets, identical
+
+Step 4. `probes/artgen_names.c` ports the PK2 index read, the name hash, and all three
+name sources; `probes/artgen_oracle.py --names` diffs it against
+`tools/tropico-pk2.py` and `tropico-artset.py`.
+
+### Two diffs, because one of them is too weak alone
+
+Resolution — turning a harvested `foo.imm` into the archive entry for `foo.i16` — is a
+**filter**: a name with no `.i16` is silently dropped. So a spurious extra name never
+reaches the resolved listing, and diffing only that listing would not see it. The
+harvested set is therefore diffed *before* resolution, and the listing after.
+
+| | |
+|---|---|
+| harvested names | **280 / 280 identical**, of which **183 are `brNN`** |
+| resolved listing | **268 / 268 identical** — same names, same order, same archive, same offset, same size |
+
+The three sources each contribute what §48.2 and §90 say they should: 51 from the exe,
+98 after the `.WIN` records inside the archives, 280 after the numeric families. Order
+matters and is reproduced: the seven `--with-menu` assets are appended *after* the sorted
+main list rather than merged into it, so the final listing is deliberately not globally
+sorted.
+
+`brNN` = 183 is the number that matters. `br00` is the only one written down anywhere;
+the other 182 are built at runtime and are exactly what §90 found missing. A port that
+silently harvested 98 names would still produce a working-looking art set with an
+unpainted crescent down every build-menu portrait.
+
+### Three things the port had to get exactly right
+
+* **Entry offsets are relative to the data region** (§19), not absolute. Reading them as
+  absolute shifts every blob by `data_start` and yields plausible garbage.
+* **The game's own `toupper`**, at `0x4eb270`, which also upcases bytes `>= 0xF0`. A
+  library `toupper` is not the same function, and a lowercase variant of the hash scores
+  zero matches.
+* **The `{1,20}` cap in the `.imm` scanner is not a length limit, it is a slide.** A run
+  longer than 20 characters does not fail to match — Python's regex moves its start
+  forward and matches the *last* 20. Taking the whole run would invent names. Matches
+  are also non-overlapping, so a second `.imm` cannot borrow characters an earlier match
+  consumed. Both reimplemented rather than approximated.
+
+### Speed, and one 32-bit wrinkle
+
+**0.339 s** for everything: four archive indices, a 1.06 GB walk checking every entry's
+leading `u32` for a `.WIN` record, the exe scan, 280 name-hash family probes, and
+resolution. Almost all of it is the gigabyte.
+
+The 32-bit Windows build produced identical output — the hash relies on `unsigned`
+wraparound at 32 bits and that survives — **after stripping CR**. mingw's stdio opens
+stdout in text mode and translates `\n` to `\r\n`, so the first diff showed all 268 lines
+differing for no reason at all. Only affects this probe's text listing; the generator
+writes binary. Noted because ten seconds of it looked like a catastrophic port failure.
