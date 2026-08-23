@@ -29,8 +29,17 @@
  *   The axes are independent: x/w follow screen width, y/h follow screen height,
  *   against a 1600x1200 source.
  *
- * Build:  cc -O2 -o artgen_probe artgen_probe.c -lm
+ * Build:  cc -O2 -msse2 -mfpmath=sse -o artgen_probe artgen_probe.c -lm
  * Run:    artgen_probe <corpus-dir> <manifest> <out.blob> <srcW> <srcH> <dstW> <dstH>
+ *                      [fontScale] [box|nn]
+ *
+ * -msse2 -mfpmath=sse IS NOT OPTIONAL ON 32-BIT, and it is the target: the proxy is a
+ * 32-bit Windows DLL. Without it gcc emits x87, which keeps intermediates at 80 bits,
+ * so `acc += a * line[x]` in box_resample rounds differently than the SSE2 doubles the
+ * oracle runs on. Measured: the 32-bit build diverged from the 64-bit one at byte
+ * 73,767,001 of a 130 MB corpus -- one sprite in 25,820 -- and the flags made them
+ * identical. The integer codec is immune, which is why this only appeared once the
+ * font path landed. See FINDINGS 94.
  *
  * The whole corpus is read into memory BEFORE the clock starts and the output is
  * written after it stops, so the number reported is compute alone -- which is the
@@ -344,6 +353,175 @@ static int rescale_sprite(const cont_t *c, const sprite_t *s, int nw, int nh, bu
     return 0;
 }
 
+/* ------------------------------------------------------------- the font path
+ *
+ * FONTS ARE DIFFERENT ON TWO INDEPENDENT COUNTS, both measured (FINDINGS 63/65/86):
+ *
+ * 1. Every pixel in a font container is alpha-run class -- 922150 of 922150 across
+ *    all 17 assets -- against 99% palettised literals for the chrome. An alpha is a
+ *    NUMBER, so it can be averaged and still mean something. A palette index cannot:
+ *    averaging two indices yields an unrelated colour, which is why the chrome must
+ *    stay nearest-neighbour and the fonts may be box-filtered.
+ * 2. PopTop scaled their own fonts UNIFORMLY, never per-axis. So a font sprite takes
+ *    one scale on both axes, where the chrome takes the screen's own two.
+ *
+ * THE ALPHA CONVENTION, read out of the blend at the end of FUN_00538ba0:
+ *
+ *     result = (255 - a) * dst + a * src
+ *
+ * with a == 0 handled separately, writing the constant colour OUTRIGHT. So a stored
+ * byte of 0 means FULLY OPAQUE -- it is a sentinel for 256, not transparency.
+ * Transparency is a pixel being ABSENT, covered by a skip opcode. Averaging the raw
+ * bytes would therefore turn solid text into holes, which is what `opacity` and
+ * `to_alpha` exist to prevent.
+ */
+
+static int opacity(const cell_t *c)
+{
+    if (c->kind == C_NONE) return 0;
+    return c->a == 0 ? 255 : c->a;      /* a stored 0 means fully opaque */
+}
+
+static cell_t to_alpha(int op)
+{
+    cell_t c;
+    c.kind = C_NONE; c.a = 0; c.b = 0;
+    if (op <= 0) return c;              /* absent -> a skip opcode, never alpha 0 */
+    c.kind = C_ALPHA;
+    c.a = (unsigned char)(op >= 255 ? 0 : op);
+    return c;
+}
+
+/* True when every pixel in the container is alpha-run class. */
+static int is_font(const cont_t *c)
+{
+    long seen = 0;
+    for (unsigned i = 0; i < c->count; i++) {
+        const sprite_t *s = &c->sprites[i];
+        if (s->fmt != 2) continue;
+        size_t p = s->data_offset;
+        for (unsigned r = 0; r < s->h; r++) {
+            int hl; unsigned L;
+            row_bounds(c->d, p, &hl, &L);
+            size_t q = p + hl, end = p + L;
+            while (q < end) {
+                unsigned op = c->d[q];
+                size_t next = q + 1;
+                int adv = 0;
+                if (op == 0x00) { q = next; continue; }
+                else if (op < 0x80) { adv = (int)op; next += op; }
+                else if (op < 0xa0) { unsigned n = op & 7;  if (!n) n = c->d[next++]; adv = (int)n; }
+                else if (op < 0xb0) { unsigned n = op & 15; if (!n) n = c->d[next++]; adv = (int)n; next += n; }
+                else if (op < 0xc0) { unsigned n = op & 15; if (!n) n = c->d[next++]; adv = (int)n; next += (size_t)n*2; }
+                else { q = next; continue; }        /* 0xc0 and skips are not pixels */
+                if (!(op >= 0xa0 && op < 0xb0)) return 0;
+                seen += adv;
+                q = next;
+            }
+            p += L;
+        }
+    }
+    return seen > 0;
+}
+
+/* Area-weighted box filter over opacity. The correct antialiaser, and what a
+ * DOWNscale needs.
+ *
+ * THE FLOATING POINT HERE IS LOAD-BEARING AND MUST MATCH THE PYTHON BIT FOR BIT.
+ * The oracle is byte-identity, so the accumulation ORDER (y outer ascending, x inner
+ * ascending), the use of double throughout, and the ties-to-even rounding at the end
+ * are all part of the contract rather than incidental. Reassociating the sum or
+ * rounding with (int)(v+0.5) would produce output that is visually identical and
+ * fails the diff. */
+static void box_resample(const unsigned char *grid, int w, int h, int nw, int nh,
+                         cell_t *out)
+{
+    for (int r = 0; r < nh; r++) {
+        double y0 = (double)(r * h) / (double)nh;
+        double y1 = (double)((r + 1) * h) / (double)nh;
+        int ystart = (int)y0;
+        int yend = (int)ceil(y1); if (yend > h) yend = h;
+        for (int c = 0; c < nw; c++) {
+            double x0 = (double)(c * w) / (double)nw;
+            double x1 = (double)((c + 1) * w) / (double)nw;
+            int xstart = (int)x0;
+            int xend = (int)ceil(x1); if (xend > w) xend = w;
+            double acc = 0.0, area = 0.0;
+            for (int y = ystart; y < yend; y++) {
+                double wy = ((y + 1) < y1 ? (y + 1) : y1) - ((double)y > y0 ? (double)y : y0);
+                if (wy <= 0) continue;
+                const unsigned char *line = grid + (size_t)y * w;
+                for (int x = xstart; x < xend; x++) {
+                    double wx = ((x + 1) < x1 ? (x + 1) : x1) - ((double)x > x0 ? (double)x : x0);
+                    if (wx <= 0) continue;
+                    double a = wy * wx;
+                    area += a;
+                    acc += a * line[x];
+                }
+            }
+            out[(size_t)r * nw + c] = to_alpha(area != 0.0 ? (int)nearbyint(acc / area) : 0);
+        }
+    }
+}
+
+/* Nearest-neighbour over opacity, emitted through the same alpha path so only the
+ * FILTER differs. Right for an UPscale: at 4/3 the box filter spreads every stem
+ * across a fractional pixel and reads soft, where nn keeps stems at full opacity.
+ * At exactly 2.0 the two are byte-identical -- each destination cell falls wholly
+ * inside one source pixel -- so 4K is a lossless pixel double either way. */
+static void nn_resample(const unsigned char *grid, int w, int h, int nw, int nh,
+                        cell_t *out)
+{
+    static int *cx; static size_t cxcap;
+    static int *cy; static size_t cycap;
+    cx = (int *)grow(cx, &cxcap, (size_t)nw, sizeof(int));
+    cy = (int *)grow(cy, &cycap, (size_t)nh, sizeof(int));
+    pick(w, nw, cx);
+    pick(h, nh, cy);
+    for (int r = 0; r < nh; r++) {
+        const unsigned char *line = grid + (size_t)cy[r] * w;
+        for (int c = 0; c < nw; c++)
+            out[(size_t)r * nw + c] = to_alpha(line[cx[c]]);
+    }
+}
+
+/* Uniformly scaled, and only valid because every pixel is alpha class.
+ *
+ * Note the terminator rule differs from rescale_sprite: the FINAL row here always
+ * closes with nothing, never with a carried source terminator. The rows are
+ * synthesised by the filter, so there is no source row to carry one from. */
+static int rescale_font_sprite(const cont_t *c, const sprite_t *s, int nw, int nh,
+                               int use_nn, buf_t *out)
+{
+    int w = (int)s->w, h = (int)s->h;
+
+    static unsigned char *grid; static size_t gridcap;
+    static cell_t *dst; static size_t dstcap2;
+    static cell_t *row; static size_t rowcap;
+    grid = (unsigned char *)grow(grid, &gridcap, (size_t)w * h, 1);
+    dst  = (cell_t *)grow(dst, &dstcap2, (size_t)nw * nh, sizeof(cell_t));
+    row  = (cell_t *)grow(row, &rowcap, (size_t)w, sizeof(cell_t));
+
+    size_t p = s->data_offset;
+    for (int r = 0; r < h; r++) {
+        unsigned L; int term;
+        if (decode_row(c->d, p, w, row, &L, &term) < 0) return -1;
+        unsigned char *line = grid + (size_t)r * w;
+        for (int x = 0; x < w; x++) line[x] = (unsigned char)opacity(&row[x]);
+        p += L;
+        if (p > c->len) return -1;
+    }
+    if (p >= c->len || c->d[p] != 0xC0) return -1;
+
+    if (use_nn) nn_resample(grid, w, h, nw, nh, dst);
+    else        box_resample(grid, w, h, nw, nh, dst);
+
+    for (int r = 0; r < nh; r++)
+        if (emit_row(dst + (size_t)r * nw, nw, r == nh - 1 ? -1 : 0x00, out) < 0) return -1;
+    buf_u8(out, 0xC0);
+    return 0;
+}
+
 /* --------------------------------------------------------------------- driver */
 
 static unsigned char *slurp(const char *path, size_t *len)
@@ -366,15 +544,19 @@ typedef struct { char *name; unsigned char *d; size_t len; } asset_t;
 
 int main(int argc, char **argv)
 {
-    if (argc != 8) {
-        fprintf(stderr, "usage: %s <corpus-dir> <manifest> <out.blob> <srcW> <srcH> <dstW> <dstH>\n",
-                argv[0]);
+    if (argc != 8 && argc != 10) {
+        fprintf(stderr, "usage: %s <corpus-dir> <manifest> <out.blob> <srcW> <srcH> <dstW> <dstH>"
+                        " [fontScale] [box|nn]\n", argv[0]);
         return 2;
     }
     const char *dir = argv[1], *manifest = argv[2], *outpath = argv[3];
     int from_w = atoi(argv[4]), from_h = atoi(argv[5]);
     int to_w = atoi(argv[6]), to_h = atoi(argv[7]);
     double xs = (double)to_w / (double)from_w, ys = (double)to_h / (double)from_h;
+    /* Fonts default to 1.0 -- left stock, byte-identical to PopTop's own, which is
+     * also the case that proves the filter exact at 1:1. */
+    double font_scale = (argc == 10) ? atof(argv[8]) : 1.0;
+    int use_nn = (argc == 10) && strcmp(argv[9], "nn") == 0;
 
     /* --- load, off the clock ------------------------------------------------ */
     size_t mlen; unsigned char *m = slurp(manifest, &mlen);
@@ -424,16 +606,25 @@ int main(int argc, char **argv)
         buf_u32(&out, 0);
         unsigned emitted = 0;
 
+        /* A font takes ONE uniform scale on both axes; the chrome takes the
+         * screen's own two. Decided per CONTAINER, exactly as the Python does --
+         * a container is a font or it is not, never a mix. */
+        int font = is_font(&c);
+        double axs = font ? font_scale : xs;
+        double ays = font ? font_scale : ys;
+
         for (unsigned k = 0; k < c.count; k++) {
             sprite_t *s = &c.sprites[k];
             if (s->fmt != 2 || s->w == 0 || s->h == 0) continue;
-            int nw = py_round((double)s->w * xs); if (nw < 1) nw = 1;
-            int nh = py_round((double)s->h * ys); if (nh < 1) nh = 1;
+            int nw = py_round((double)s->w * axs); if (nw < 1) nw = 1;
+            int nh = py_round((double)s->h * ays); if (nh < 1) nh = 1;
             buf_u32(&out, k);
             size_t len_at = out.n;
             buf_u32(&out, 0);
             size_t start = out.n;
-            if (rescale_sprite(&c, s, nw, nh, &out) < 0) {
+            int rc = font ? rescale_font_sprite(&c, s, nw, nh, use_nn, &out)
+                          : rescale_sprite(&c, s, nw, nh, &out);
+            if (rc < 0) {
                 fprintf(stderr, "FAIL %s sprite %u (%ux%u -> %dx%d)\n",
                         assets[i].name, k, s->w, s->h, nw, nh);
                 failures++;

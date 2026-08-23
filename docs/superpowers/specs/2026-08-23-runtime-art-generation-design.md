@@ -253,6 +253,15 @@ against a 3 s gate.
 
 Step 3 of §8 is unblocked.
 
+**Step 3 landed the same day (FINDINGS 94).** `is_font`, `opacity`/`to_alpha`,
+`box_resample`, `nn_resample` and `rescale_font_sprite` are ported and byte-identical
+across font scales 0.9 / 1.0 / 1.333333 / 2.0 and both filters, on the full 25,820-sprite
+corpus. §86's box-equals-nn-at-2.0 claim was confirmed in both implementations as a free
+side-oracle. The 32-bit Windows binary needs **`-msse2 -mfpmath=sse`** or x87's 80-bit
+intermediates diverge from the oracle at one sprite in 25,820 — recorded in
+`proxy/build.sh` for when the generator lands there. Remaining: §4's archive reading and
+name harvesting.
+
 
 ## 8. Sequence
 

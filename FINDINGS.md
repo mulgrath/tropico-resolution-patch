@@ -6897,3 +6897,71 @@ piece of it. But two things follow that the spec should say:
 No resampling, no name harvesting, no archive walking: the corpus arrives as loose
 container files and a manifest, so a probe failure is a codec failure and cannot be
 anything else. That scope is §7's and it is why the result is worth what it is.
+
+## 94. The font path ports byte-exact — and x87 nearly broke the oracle on the only platform that matters
+
+Step 3 of the runtime-art-generation sequence: `is_font`, `opacity`/`to_alpha`,
+`box_resample`, `nn_resample` and `rescale_font_sprite` ported to C, diffed against
+`tools/tropico-artset.py`'s own functions through `probes/artgen_oracle.py`.
+
+### Byte-identical everywhere it was asked
+
+| corpus | font scale | filter | result |
+|---|---|---|---|
+| i16, 5,164 sprites | 1.0 | box | identical |
+| i16 | 1.333333 (1440p) | box | identical |
+| i16 | 1.333333 | nn | identical |
+| i16 | 2.0 (2160p) | box | identical |
+| i16 | 2.0 | nn | identical |
+| i16 | 0.9 | box | identical |
+| **all five classes, 25,820 sprites, 917,298 rows** | **1.333333** | **box** | **identical** |
+
+Scale 1.0 matters more than it looks: it runs the whole grid through `box_resample` at
+1:1 and gets PopTop's bytes back, which is the filter proving itself exact before any
+fractional case is trusted.
+
+**Two free oracles taken while the harness was open.** §86 claims box and
+nearest-neighbour are byte-identical at exactly 2.0, because each destination cell falls
+wholly inside one source pixel. Confirmed, in **both** implementations. And at 4/3 the
+two filters produce different bytes — worth checking, because if they had agreed there
+the 2.0 result would have proved nothing about the filters being distinct.
+
+### The trap, which was not the one predicted
+
+§93 expected terminators to be the risk. They were not — the risk was floating point,
+and it appeared only on the platform the code is actually for.
+
+The 32-bit Windows build **diverged from the 64-bit Linux build at byte 73,767,001** of
+a 130 MB corpus: one sprite in 25,820. Cause: on 32-bit x86 gcc emits **x87** by default,
+which holds intermediates at **80 bits**. `box_resample` accumulates
+
+```c
+acc += a * line[x];
+```
+
+over a rectangle of source pixels, and an 80-bit running sum rounds differently from the
+64-bit doubles the Python oracle uses. One `nearbyint` lands on the other side of a tie
+and one alpha byte changes.
+
+Fix: **`-msse2 -mfpmath=sse`**. Identical output immediately.
+
+Three things worth keeping about this:
+
+* **It is invisible without a byte oracle.** One alpha byte out of 129 MB is not a
+  visual defect, and no amount of looking at the art would have found it. This is the
+  argument for byte-identity as the acceptance test, made concrete.
+* **The integer codec is immune**, which is why §93 passed 32-bit cleanly and this did
+  not. The exposure arrived exactly with the first floating-point code.
+* **The proxy is a 32-bit Windows DLL**, so the affected configuration is the target,
+  not a curiosity. `proxy/build.sh` now carries a comment saying to add the flags when
+  the generator lands there. They are *not* added yet: nothing currently in the proxy
+  depends on float precision, and adding them would change the shipped binary for no
+  present benefit. Verified — the DLL still builds to `20849b9d…`.
+
+### Speed, on the real target
+
+The 32-bit Windows binary, on the i16 corpus that feeds a full set, at the true 1440p
+font scale: **0.288 s** for 5,164 sprites and 269,784 rows. The full five-class corpus
+is 0.451 s native and 0.711 s 32-bit, against **27.7 s** of Python — 39x and 62x
+respectively. The font path is slower per sprite than the raw codec, as expected, and
+still nowhere near the 3 s gate.

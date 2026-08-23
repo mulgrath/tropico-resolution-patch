@@ -78,13 +78,15 @@ def extract_corpus(app, classes, dest):
     return names
 
 
-def py_run(dest, names, from_w, from_h, to_w, to_h, out_path):
-    """The oracle. Deliberately calls art.rescale_sprite -- the SAME function the
-    generator uses -- rather than a reimplementation, so there is no second Python
-    to keep in step."""
+def py_run(dest, names, from_w, from_h, to_w, to_h, out_path,
+           font_scale=1.0, font_filter='box'):
+    """The oracle. Deliberately calls art.rescale_sprite / art.rescale_font_sprite
+    and art.is_font -- the SAME functions the generator uses -- rather than a
+    reimplementation, so there is no second Python to keep in step."""
     loaded = [(n, open(os.path.join(dest, n), 'rb').read()) for n in names]
 
     xs, ys = to_w / from_w, to_h / from_h
+    filt = art.nn_resample if font_filter == 'nn' else art.box_resample
     out = bytearray()
     n_sprites = n_rows = skipped = 0
     fails = []
@@ -103,13 +105,18 @@ def py_run(dest, names, from_w, from_h, to_w, to_h, out_path):
         count_at = len(out)
         out += struct.pack('<I', 0)
         emitted = 0
+        # Per CONTAINER, exactly as art.rescale does it: a font takes one uniform
+        # scale, the chrome takes the screen's own two.
+        font = art.is_font(d, r)
+        axs, ays = (font_scale, font_scale) if font else (xs, ys)
         for s in r['sprites']:
             if s['fmt'] != 2 or s['w'] == 0 or s['h'] == 0:
                 continue
-            nw = max(1, int(round(s['w'] * xs)))
-            nh = max(1, int(round(s['h'] * ys)))
+            nw = max(1, int(round(s['w'] * axs)))
+            nh = max(1, int(round(s['h'] * ays)))
             try:
-                payload = art.rescale_sprite(d, s, nw, nh)
+                payload = (art.rescale_font_sprite(d, s, nw, nh, filt=filt) if font
+                           else art.rescale_sprite(d, s, nw, nh))
             except Exception as ex:
                 fails.append((name, s['index'], repr(ex)))
                 continue
@@ -174,6 +181,10 @@ def main():
     ap.add_argument('--full-set-python', type=float, default=30.2,
                     help='measured wall clock of the full Python 2560x1440 run, for '
                          'the extrapolation (spec §1)')
+    ap.add_argument('--font-scale', type=float, default=1.0,
+                    help='uniform scale for font assets (default 1.0 = left stock, '
+                         'which is also the case that proves the filter exact at 1:1)')
+    ap.add_argument('--font-filter', choices=('box', 'nn'), default='box')
     ap.add_argument('--keep', action='store_true', help='keep the corpus directory')
     a = ap.parse_args()
 
@@ -189,14 +200,20 @@ def main():
 
     probe = os.path.join(work, 'artgen_probe')
     src = os.path.join(HERE, 'artgen_probe.c')
-    subprocess.run(['cc', '-O2', '-Wall', '-Wextra', '-o', probe, src, '-lm'], check=True)
+    # -msse2 -mfpmath=sse: a no-op on x86-64, where SSE2 is already the default, but
+    # written here so the flag travels with the source. On 32-bit it is what stops gcc
+    # emitting x87 and keeping box_resample's intermediates at 80 bits -- which is a
+    # real divergence from this oracle, not a theoretical one (FINDINGS 94).
+    subprocess.run(['cc', '-O2', '-Wall', '-Wextra', '-msse2', '-mfpmath=sse',
+                    '-o', probe, src, '-lm'], check=True)
 
     py_blob = os.path.join(work, 'python.blob')
     c_blob = os.path.join(work, 'c.blob')
 
     print('\n--- Python (tools/tropico-artset.py rescale_sprite) ---')
     psecs, nsp, nrows, skipped, fails = py_run(
-        corpus, names, from_w, from_h, to_w, to_h, py_blob)
+        corpus, names, from_w, from_h, to_w, to_h, py_blob,
+        font_scale=a.font_scale, font_filter=a.font_filter)
     print('py  %d assets (%d skipped), %d sprites, %d rows'
           % (len(names) - skipped, skipped, nsp, nrows))
     print('py  compute %.3f s   (%.2f us/sprite, %.3f us/row)'
@@ -207,7 +224,8 @@ def main():
     print('\n--- C (probes/artgen_probe.c) ---')
     t0 = time.perf_counter()
     rc = subprocess.run([probe, corpus, os.path.join(corpus, 'MANIFEST'), c_blob,
-                         str(from_w), str(from_h), str(to_w), str(to_h)])
+                         str(from_w), str(from_h), str(to_w), str(to_h),
+                         repr(a.font_scale), a.font_filter])
     wall = time.perf_counter() - t0
     print('C   process wall %.3f s (includes reading the corpus and writing the blob)' % wall)
 
