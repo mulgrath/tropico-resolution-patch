@@ -129,7 +129,7 @@ glob — a glob would sweep up art the game ships loose), and removes the deskto
 | HUD and UI | a real art set generated at your resolution — the engine cannot scale art, so it is derived from your own files |
 | Main menu and intro | full resolution instead of a 640x480 box in the corner, including when you return to the menu from a map |
 | Scenario map previews | correct magnification instead of tiling and colour noise |
-| Hardware 3D | restored — the VRAM check rejected modern cards by reading a signed compare |
+| Hardware 3D | **refused**, deliberately — it is correct only on GOG under system wine, smears under Proton and crashes on native Windows, and picking it used to brick the install (`FINDINGS.md` §91). Asking for it now gets the game's own "not available on this computer" message. `[Hardware] Enable=1` offers it anyway |
 | Startup movie | optional every-launch playback (stock plays it once, ever) |
 
 ## Known limits
@@ -142,9 +142,14 @@ glob — a glob would sweep up art the game ships loose), and removes the deskto
   the launcher does for GOG, the proxy does from inside instead: it picks the monitor you
   launched from, makes it primary for the run, adopts that monitor's mode and art set, and
   hands your primary back afterwards -- including if the game crashes (`FINDINGS.md` §90).
-- **Steam runs under Proton, where Hardware 3D smears** at every resolution, including
-  stock modes on a stock exe (`FINDINGS.md` §23). That is Proton's DirectDraw translation,
-  not this patch. Use Software 3D there; GOG under system wine has a working Hardware mode.
+- **Hardware 3D is not offered.** It renders correctly on exactly one of the three
+  runtimes this game meets — GOG under system wine. Under Proton it smears at every
+  resolution, stock modes on a stock exe included (`FINDINGS.md` §23), and on native
+  Windows it crashes on map entry. Worse, the choice persists to `TROPICO.CFG` and F2 is
+  then unreachable to undo it, so a single click could brick the install (§91). The patch
+  now refuses it through the engine's own "Hardware 3D is not available on this computer"
+  message. The software renderer is what the game ships to; a modern CPU runs it without
+  noticing. `[Hardware] Enable=1` in `tropico-fix.ini` restores the old behaviour.
 - Fonts are left exactly as PopTop shipped them, deliberately (`FINDINGS.md` §63.5).
 
 ## Layout

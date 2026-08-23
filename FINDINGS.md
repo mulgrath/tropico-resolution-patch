@@ -6616,3 +6616,101 @@ primary back afterwards. No dialogs. `TROPICO_LAUNCHER=1`, exported by `tools/tr
 `tools/tropico-gog.sh`, disables the whole step so the GOG launcher stays the only thing
 choosing a monitor on that path.
 
+## 91. Hardware 3D is refused, through the engine's own message — MEASURED + DECIDED
+
+### The evidence that closed it
+
+Three runtimes, three different outcomes, all measured:
+
+| runtime | Hardware 3D |
+|---|---|
+| GOG build, system wine 9.0 | correct (§23) |
+| Steam build, Proton | smears at **every** resolution, stock slots included, on an unpatched exe (§23) |
+| GOG build, **native Windows 11**, RX 7900 XT | **crashes on map entry** (2026-08-23) |
+
+The native-Windows run is new. The rest of that session was a complete success — the proxy
+applied 16 of 16 patches with nothing changed for Windows, at 2560x1440 exclusive fullscreen —
+so hardware is the only casualty, and it is a casualty on two runtimes out of
+three.
+
+**It also bricks the install.** The choice persists to `TROPICO.CFG` `[+0x10]`, file offset
+**0x23a**, and the mode-set path reads that field *directly*:
+
+```asm
+0052f165  mov edx,ds:0x612fec
+0052f16b  mov eax,[edx+0x10]        ; the renderer selector, CFG 0x23a
+0052f16e  test eax,eax
+0052f170  je  0052f17f              ; 0 -> the full software surface bring-up
+0052f172  xor edi,edi
+0052f174  mov ds:0x60c191,edi       ; !=0 -> NULL the software framebuffer base
+0052f17a  jmp 0052fa0a              ;        and skip software mode-set entirely
+```
+
+So every map load takes the hardware path, crashes, and F2 — the only way to choose the
+renderer back — is unreachable. Corroborated by three CFG samples: the stock `__support`
+copy is 0, a working Steam/Linux copy is 0, and the crashing copy is 1.
+
+Same shape as the §79 Fullscreen checkbox: a persisted F2 setting that disables the route to
+un-persist it.
+
+### Why REVERTING §16 was rejected
+
+The obvious move is to put the signed `fild` back and let the stock gate refuse hardware
+again. It was considered and it is wrong twice over:
+
+1. **The stock gate is not a block, it is an accident.** It refuses only when
+   `GetAvailableVidMem`'s `dwTotal` happens to have its high bit set — guaranteed under Wine,
+   which reports a fixed `0xFF816FFF`, and unknowable under the Win10/11 ddraw shim. If that
+   DWORD comes back as a positive value above 8.5 MB, the *stock* exe offers hardware on the
+   very machine we are trying to protect. Deterministic patch traded for a driver-dependent
+   coin flip.
+2. **It does not come alone.** The §16 fix also corrects the second signed test at `0x4f92f8`
+   (a texture/detail budget reading the same global). Nothing establishes that one as
+   hardware-only, so a revert risks the *software* renderer on the one platform where
+   everything currently works.
+
+### The fix, in two places
+
+Owner's decision, 2026-08-23: stop offering Hardware 3D. It existed to spare a 2001 CPU a job
+a modern one does without noticing, and it changes the visuals little enough that §14 already
+recorded a preference for the software renderer.
+
+**1. The gate branch becomes unconditional.** One byte of §16's own 25-byte replacement:
+`jbe` (`0x76`) -> `jmp` (`0xeb`), same displacement, other 24 bytes identical. `EnumDevices`
+is never called, `0x52d340` never writes a `d1 == 1` descriptor, and the best-match search at
+`0x5151c0` fails for any hardware request — so the engine raises **its own `Tropico.lng`
+string 1721, "Hardware 3D is not available on this computer"**. That message is true, and it
+is the game's designed refusal rather than one this patch invented.
+
+**2. The live field is healed.** The gate alone would not have saved the install that prompted
+this, because `0x52f165` reads `[+0x10]` directly rather than through the descriptor array.
+Five bytes for five, at `0x52f16b`:
+
+```asm
+83 62 10 00   and DWORD PTR [edx+0x10],0    ; zeroes the field AND sets ZF
+90            nop
+74 0d         je  0052f17f                  ; unchanged, now always taken
+```
+
+`and` with zero does both jobs in one instruction, so the `je` stays exactly where it was with
+its displacement untouched, and `eax` — no longer loaded — is redefined by the `xor eax,eax`
+at the branch target, so nothing downstream notices. The engine writes the healed field back
+the next time it saves `TROPICO.CFG`, which means **a bricked config repairs itself and this
+patch never writes that file** (README's promise that `TROPICO.CFG` is never written
+stands).
+
+Signature-anchored like everything else, and the settings operand is bounds-checked against
+`.data` before the replacement stores through it. Verified against the GOG build offline:
+**exactly one match** in `.text`, at `0x52f165`, with `settings = 0x612fec` and
+`swbase = 0x60c191` as documented above.
+
+`[Hardware] Enable=1` restores the old behaviour — hardware offered, no heal — for anyone on
+wine who wants it back.
+
+### Not yet measured
+
+Whether the *stock* exe crashes the same way on native Windows with hardware forced. If it
+does, this is purely a runtime defect and §16 is exonerated — it exposed a broken path rather
+than creating one. If the stock exe refuses hardware there instead, then `GetAvailableVidMem`
+returns something positive on Windows and the stock gate blocks by luck. Either result argues
+for the deterministic refusal above; the second just makes the case louder.

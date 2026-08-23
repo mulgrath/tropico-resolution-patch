@@ -49,9 +49,12 @@ game archives are never modified at any point.
 Steam's "Verify integrity of game files" replaces the file this patch installs, so the
 patch is simply gone. Nothing is broken and nothing is lost — run `./install.sh` again.
 
-**The game looks smeared in 3D on Steam.** Press F2 and choose **Software** rather than
-Hardware. Proton's graphics translation breaks Hardware mode in this game even without
-this patch. The GOG version's Hardware mode works fine.
+**"Hardware 3D is not available on this computer" when I pick it in F2.** That is
+deliberate. Hardware 3D renders correctly on almost no modern setup — it smears under
+Steam's graphics layer and crashes outright on Windows — and because the game remembers
+the choice, picking it could leave you unable to load a map *or* get back to the settings
+screen. The software renderer is what you are already playing on, and a modern processor
+runs it without effort.
 
 **"DirectDraw error #150" on a second monitor.** Start the game from the monitor you
 want to play on, rather than moving it there afterwards.

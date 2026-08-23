@@ -236,6 +236,29 @@ static const BYTE BUDGET_SIG[]  = {0x81,0x3d,0,0,0,0, 0x00,0x00,0xd0,0x00, 0x7d}
 static const BYTE BUDGET_MASK[] = {   1,   1,0,0,0,0,    1,   1,   1,   1,    1};
 #define BUDGET_PATCH_OFF 10
 
+/* FINDINGS section 91: the renderer branch on the mode-set path.
+ *   mov edx,[settings] / mov eax,[edx+0x10] / test eax,eax / je <software path>
+ *   xor edi,edi / mov [swbase],edi
+ * `[settings+0x10]` is the renderer selector -- TROPICO.CFG file offset 0x23a,
+ * 0 = software. Non-zero NULLs the software framebuffer base and skips the entire
+ * software bring-up, which is the hardware path and the thing that crashes off
+ * Wine. The trailing store is what makes the site unique: it is the only place
+ * that NULLs that base on the strength of this field.
+ *
+ * The five bytes of the load-and-test are replaced by `and [edx+0x10],0` plus a
+ * nop. That ZEROES THE LIVE FIELD and sets ZF in one instruction, so the `je`
+ * that follows -- left exactly where it was, displacement untouched -- is now
+ * always taken. The engine writes the healed field back the next time it saves
+ * TROPICO.CFG, so a bricked config repairs itself without this patch ever
+ * touching the file. */
+static const BYTE RND_SIG[]  = {0x8b,0x15,0,0,0,0,
+                                0x8b,0x42,0x10, 0x85,0xc0, 0x74,0,
+                                0x33,0xff, 0x89,0x3d,0,0,0,0};
+static const BYTE RND_MASK[] = {   1,   1,0,0,0,0,
+                                   1,   1,   1,    1,   1,    1,0,
+                                   1,   1,    1,   1,0,0,0,0};
+#define RND_PATCH_OFF 6
+
 /* FINDINGS section 8: the code compare-chain, slot 4's arm. No absolute operands. */
 static const BYTE CHAIN_SIG[] = {0x81,0xf9,0x40,0x06,0x00,0x00, 0x75,0x16,
                                  0x81,0xfa,0xb0,0x04,0x00,0x00};
@@ -573,6 +596,76 @@ static const BYTE VCLAMP_MASK[] = {
 #define VCLAMP_H1 41
 #define VCLAMP_H2 51
 
+/* --------------------------------------------- s91: refuse Hardware 3D, gracefully
+ *
+ * Hardware 3D renders correctly on exactly one of the three runtimes this game
+ * meets: the GOG build under system wine. It smears at every resolution under
+ * Proton (FINDINGS 23) and it crashes on map entry on native Windows -- and that
+ * crash BRICKS the install, because the choice persists to TROPICO.CFG and F2 is
+ * then unreachable to undo it. The owner's decision (2026-08-23) is to stop
+ * offering it: the hardware path was there to spare a 2001 CPU, and a modern one
+ * runs the software renderer without noticing.
+ *
+ * REVERTING the section 16 fix is NOT the way to do that, and it was considered.
+ * The stock gate is a SIGNED `fild` of whatever GetAvailableVidMem reports against
+ * 8.5 MB, so it refuses only when that DWORD happens to have its high bit set --
+ * true under Wine, which reports a fixed 0xFF816FFF, and unknowable anywhere else.
+ * A revert would also drag back the second signed test at the texture budget,
+ * which reads the same global and is not established as hardware-only. That trades
+ * a deterministic patch for a driver-dependent coin flip and risks the software
+ * renderer on the one platform where everything works.
+ *
+ * So: keep both fixes and make the refusal explicit, in two places.
+ *
+ *   1. The gate branch is made UNCONDITIONAL (`jbe` -> `jmp`, one byte of our own
+ *      replacement, so the 25-byte layout section 16 verified is otherwise
+ *      untouched). IDirect3D7::EnumDevices is never called, the callback never
+ *      writes a `d1 == 1` descriptor, and the best-match search fails for any
+ *      hardware request -- so the engine raises its OWN Tropico.lng string 1721,
+ *      "Hardware 3D is not available on this computer". That message is true, and
+ *      it is the game's designed refusal rather than one this patch invented.
+ *
+ *   2. That alone would not have saved the install that prompted this. The
+ *      mode-set path reads `[settings+0x10]` DIRECTLY, not through the descriptor
+ *      array, so a CFG that already says hardware still takes the hardware branch
+ *      and still crashes. patch_block_hardware() zeroes that field in place.
+ *
+ * `[Hardware] Enable=1` restores the old behaviour -- hardware offered, no heal --
+ * for anyone on wine who wants it back. */
+static int patch_block_hardware(void)
+{
+    /* and dword [edx+0x10],0  /  nop   -- five bytes for five, `je` left in place */
+    static const BYTE FIX[] = {0x83,0x62,0x10,0x00, 0x90};
+    BYTE *p = find_unique_masked(RND_SIG, RND_MASK, sizeof RND_SIG,
+                                 g_text, g_textlen, "renderer");
+    DWORD settings, lo, hi;
+    if (!p) {
+        logf_("[x] [hw] renderer branch not found -- a TROPICO.CFG that already selects"
+              " Hardware 3D will still take the hardware path. Remedy: zero byte 0x23a"
+              " of app\\data2\\TROPICO.CFG");
+        return 0;
+    }
+    /* The operand must be the settings object, which lives in .data. Checked
+     * because the replacement stores THROUGH it: a wrong site would zero four
+     * bytes of something unrelated. */
+    settings = rd32(p + 2);
+    lo = (DWORD)(ULONG_PTR)g_data;
+    hi = lo + (DWORD)g_datalen;
+    if (settings < lo || settings >= hi) {
+        logf_("[x] [hw] settings operand 0x%08lx is outside .data (0x%08lx..0x%08lx)"
+              " -- wrong site, refusing", settings, lo, hi);
+        return 0;
+    }
+    if (!poke(p + RND_PATCH_OFF, FIX, sizeof FIX)) {
+        logf_("[x] [hw] renderer branch: VirtualProtect failed");
+        return 0;
+    }
+    logf_("[+] [hw] renderer branch at %p -> `and [settings+0x10],0` (settings 0x%08lx):"
+          " the software path is now unconditional, and a CFG that selected Hardware 3D"
+          " heals itself when the game next saves it", p + RND_PATCH_OFF, settings);
+    return 1;
+}
+
 /* ----------------------------------------------------------------- the patcher */
 
 static LONG g_done = 0;
@@ -647,6 +740,12 @@ static void apply_patches(void)
      * displacement from the original rather than hardcoding it -- an earlier build
      * hardcoded 0x23 and landed inside a call instruction. */
     DWORD vidmem = 0;
+    int hw_enable;
+    {
+        char iph[MAX_PATH];
+        snprintf(iph, sizeof iph, "%s\\tropico-fix.ini", g_dir);
+        hw_enable = GetPrivateProfileIntA("Hardware", "Enable", 0, iph);
+    }
     p = find_unique_masked(VRAM_SIG, VRAM_MASK, sizeof VRAM_SIG, g_text, g_textlen, "vram");
     if (p) {
         vidmem       = rd32(p + 2);      /* fild  dword [vidmem]  */
@@ -666,11 +765,24 @@ static void apply_patches(void)
             fix[k++] = 0xa1; memcpy(fix + k, &vidmem, 4); k += 4;          /* mov eax,[vidmem]   */
             fix[k++] = 0x89; fix[k++] = 0x1d; memcpy(fix + k, &store, 4); k += 4; /* mov [store],ebx */
             fix[k++] = 0x3d; { DWORD t = 0x880000; memcpy(fix + k, &t, 4); } k += 4; /* cmp eax,8.5MB */
-            fix[k++] = 0x76; fix[k++] = (BYTE)newrel;                       /* jbe (UNSIGNED)     */
+            /* s91: one byte decides whether the compare is a compare at all. `jbe`
+             * keeps the section 16 behaviour (unsigned, hardware offered when the
+             * card really is too small); `jmp` skips EnumDevices unconditionally,
+             * which is how Hardware 3D is refused through the engine's own string
+             * 1721 rather than through anything invented here. The other 24 bytes
+             * are identical either way, so the verified layout does not fork. */
+            fix[k++] = hw_enable ? 0x76 : 0xeb; fix[k++] = (BYTE)newrel;   /* jbe / jmp */
             while (k < 25) fix[k++] = 0x90;
             if (poke(p, fix, sizeof fix)) {
-                logf_("[+] VRAM compare made unsigned at %p (vidmem global 0x%08lx, jbe rel8 %d)",
-                      p, vidmem, newrel); ok++;
+                if (hw_enable)
+                    logf_("[+] VRAM compare made unsigned at %p (vidmem global 0x%08lx, jbe rel8 %d)"
+                          " -- [Hardware] Enable=1, so Hardware 3D is OFFERED", p, vidmem, newrel);
+                else
+                    logf_("[+] Hardware 3D refused at %p: EnumDevices skipped unconditionally"
+                          " (jmp rel8 %d), so no hardware descriptor is ever written and the game"
+                          " gives its own \"not available on this computer\" message."
+                          " [Hardware] Enable=1 to offer it anyway", p, newrel);
+                ok++;
             } else { logf_("[x] vram: VirtualProtect failed"); fail++; }
         }
     } else { logf_("[-] vram: signature not found"); fail++; }
@@ -690,6 +802,11 @@ static void apply_patches(void)
             else { logf_("[x] budget: VirtualProtect failed"); fail++; }
         }
     } else { logf_("[-] budget: signature not found"); fail++; }
+
+    /* --- 3.2 heal a CFG that already selected Hardware 3D (s91) -------------
+     * Only when we are refusing hardware. With Enable=1 the field must be left
+     * alone, or the player's choice would be silently overridden. */
+    if (!hw_enable) { if (patch_block_hardware()) ok++; else fail++; }
 
     /* --- 3.5 the monitor, BEFORE the mode is chosen (s90) -------------------
      *
