@@ -187,5 +187,13 @@ Developed on Pop!_OS 24.04 under XWayland, against GOG 2.1.0.14 and Steam app 33
 ## Licence
 
 MIT, for the code here — see `LICENSE`. Tropico belongs to its rights holders (PopTop
-Software, Kalypso Media); no game code, art, sound or data is in this repository or in any
-release built from it. The UI art is generated on your machine from the copy you own.
+Software, Kalypso Media); no game code, art, sound or data is in the working tree or in any
+release built from it — `tools/make-release.sh` builds from an allowlist and then scans the
+result for game formats before writing it. The UI art is generated on your machine from the
+copy you own.
+
+One exception, stated because a promise with a silent exception is not a promise: history
+before `HEAD` still contains `logs/hudbar.i16.backup.bin`, an 879 KB stock HUD-bar blob
+committed in `f46ce5e` as a rescue backup during the px.PK2 experiments. It was removed once
+those were resolved and px.PK2 was restored to stock, but removing a file does not remove it
+from the commits that added it. It is absent from every release.
