@@ -112,6 +112,7 @@ restore_primary() {
 # monitor without clicking anything -- so focus stays behind on the first -- still
 # opens the game under the mouse. An earlier version asked _NET_ACTIVE_WINDOW on the
 # theory that placement follows focus; it does not, and that made this case worse.
+WANT_MONITOR_EXPLICIT="$MONITOR"
 if [ -z "$MONITOR" ]; then
   MONITOR="$(tropico_launch_output || true)"
 fi
@@ -119,6 +120,16 @@ if [ -n "$MONITOR" ]; then
   tropico_outputs | awk -v o="$MONITOR" '$1==o{f=1} END{exit !f}' \
     || fail "'$MONITOR' is not a connected monitor. Run 'tropico --list' to see them."
   CUR="$(tropico_outputs | awk '$3=="primary"{print $1; exit}')"
+  # SAY WHICH MONITOR, AND WHY. This used to print only when a switch was needed, so
+  # the commonest confusing case was silent: run it with the mouse on the other screen
+  # and the game comes up at that screen's resolution with nothing explaining why.
+  # Reported as a bug, and it was not one -- it was this line missing.
+  if [ -z "$WANT_MONITOR_EXPLICIT" ]; then
+    say "== running on $MONITOR, where your mouse pointer is"
+    say "   (use --monitor NAME to choose a different one)"
+  else
+    say "== running on $MONITOR (--monitor)"
+  fi
   if [ "$CUR" != "$MONITOR" ]; then
     trap restore_primary EXIT INT TERM HUP
     RESTORE_PRIMARY="$CUR"

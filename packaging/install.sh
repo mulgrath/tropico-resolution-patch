@@ -157,6 +157,11 @@ if [ "$STEAM" = 0 ]; then
     echo "StartupWMClass=Tropico"
     echo "Categories=Game;StrategyGame;"
   } > "$APPS/tropico-patch.desktop"
+  # Some desktops only notice a new .desktop after their index is rebuilt, so the file
+  # appears correct on disk while the menu shows nothing. Best-effort: the entry works
+  # either way once the session refreshes.
+  command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS" 2>/dev/null || true
+  command -v gtk-update-icon-cache   >/dev/null 2>&1 && gtk-update-icon-cache -tq "$ICONS" 2>/dev/null || true
   echo "   - added a Tropico entry to your applications menu$([ -n "$ICON" ] && echo " with icon")"
 fi
 
