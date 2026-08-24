@@ -120,22 +120,20 @@ primary on exit. Ship it always, use it for GOG.
 Whether a folder is a Steam install is still a path test (`*steamapps*`), which works fine
 per-folder.
 
-### 4.2 The desktop entry now needs a per-install name
+### 4.2 The desktop entry, and not over-designing it
 
-**A consequence worth catching before it is written.** The entry lives in
-`$HOME/.local/share/applications/` and is shared, while the installer runs per folder.
-That exact mismatch already produced one bug today: uninstalling a Steam install silently
-removed the applications-menu entry belonging to a working GOG install.
+One entry, `tropico-patch.desktop`, for GOG installs only.
 
-The old fix was "remove it only when no other patched install still needs it" — which
-required the discovery machinery this design deletes. So the fix has to change shape:
-**name the entry after the install it points at**, e.g. `tropico-patch-<hash of path>.desktop`.
-Two GOG installs then get two entries, each removed by its own uninstaller, and no script
-has to know about any folder but its own.
+An earlier draft named it after a hash of the install path so that two GOG installs could
+each have their own. **Dropped — that is designing for a case that essentially never
+happens.** Someone owning two copies of a 2001 game on two stores, both on Linux, both
+patched, is rare enough that carrying a scheme for it costs more than it saves.
 
-Without this, two installs mean one entry, last writer wins, and uninstalling either takes
-it away from both.
-
+What survives is one line that makes the rare case harmless rather than wrong:
+**uninstall removes the entry only if its `Exec=` points at this folder.** No discovery, no
+hashing, and it is exactly right whether there is one install or two. Without it we would
+reintroduce today's bug -- uninstalling one install silently taking the menu entry from
+another.
 
 ## 5. Neither installer should choose a resolution
 
@@ -160,9 +158,11 @@ cannot use is worth saying at install time, but it should not stop the install.
 2. **Restore `binkw32.dll`** from `binkw32_orig.dll`, but **refuse if that backup is itself
    the proxy** — restoring it would leave a proxy forwarding to a proxy, the game would not
    start, and the uninstaller would have reported success.
-3. **Leave `binkw32_orig.dll` in place.** It is the only known-good copy of the real Bink
-   on disk; deleting it to look tidy means a failed copy in step 2 leaves the user with
-   nothing.
+3. **Verify the restore, then delete `binkw32_orig.dll`.** Order matters and it is the
+   whole safety argument: while the restore is unverified the backup is the only
+   known-good copy of the real Bink on disk, so it cannot be deleted first. Once
+   `binkw32.dll` is confirmed to be the right file, the backup is redundant and leaving it
+   behind is just litter in someone's game folder.
 4. **Delete generated art BY MANIFEST**, never by wildcard. A `del data\*.i16` would also
    take the artwork the game ships loose, which is not recoverable without reinstalling.
    Then delete the manifests.
@@ -171,7 +171,15 @@ cannot use is worth saying at install time, but it should not stop the install.
 7. **Linux only:** the desktop entry and icon — but only when no other patched non-Steam
    install still needs them. They live in `$HOME` and are shared, while the script runs
    once per install.
-8. **Report** that `TROPICO.CFG`, saves and `px*.PK2` were never touched.
+8. **Remove the patch's own files** — `tropico-patch/`, `install`, `play`, the README —
+   and the uninstaller itself, **last**, once everything above has succeeded. A user who
+   wants the patch back extracts the archive again; that is one step, and it is better
+   than leaving a folder of scripts behind for someone to wonder about.
+
+   Self-deletion is ordinary on Linux (`rm -- "$0"`) and needs the standard
+   `(goto) 2>nul & del "%~f0"` idiom on Windows, which is obscure enough to deserve a
+   comment where it is used.
+9. **Report** that `TROPICO.CFG`, saves and `px*.PK2` were never touched.
 
 
 ## 7. The one step that can destroy something
@@ -223,30 +231,22 @@ It sits under "If something goes wrong", so the three-line surface is unchanged:
 
 ## 9. Decisions taken, 2026-08-23
 
-1. **No registry discovery on Windows.** Not worth the effort for an advisory. If
-   `install.bat` is not sitting in a game folder it refuses and explains where the archive
-   has to go.
-2. **`install.bat` refuses rather than searches.** Simpler, and it matches the three-line
-   contract: line 1 already says where to unzip.
-3. **Linux adopts the same model.** Extract into the game folder; act on that folder only;
-   uninstall is a local affair. This deletes `_tropico_candidates`, `tropico_find_all`,
-   `tropico_find_dir`, the `libraryfolders.vdf` parsing and the per-install re-exec loop —
-   about 40 of the 174 lines of `tropico-common.sh`, plus the multi-install reporting in
-   the installer.
+1. **No discovery on either platform.** Neither installer searches. The script acts on its
+   own directory; if that is not a game folder it refuses and says where the archive has to
+   go. Line 1 of the user surface already says where to unzip.
+2. **No design effort for someone owning both editions.** It is a genuinely rare case --
+   the one instance we know of is the author, who bought the second copy specifically to
+   develop against. Two installs means extracting the archive twice and uninstalling
+   twice, which is understandable without being told. Nothing beyond the one-line
+   desktop-entry check in §4.2 is spent on it.
 
-   What is given up: patching every copy on the machine in one go. That was justified by
-   uninstall — removing the patch from one copy while another stayed patched, and
-   reporting success. Per-folder installs make that symmetric instead: two installs mean
-   the archive was extracted twice, so it is uninstalled twice, and neither script can
-   make a claim about a folder it cannot see.
-4. **The launcher is GOG-only in use, shipped always** (§4.1).
-5. **No desktop entry for Steam installs** — already true, and now the only remaining
-   platform-conditional behaviour on Linux.
+   Deleted by this: `_tropico_candidates`, `tropico_find_all`, `tropico_find_dir`, the
+   `libraryfolders.vdf` parsing, the per-install re-exec loop and the multi-install
+   reporting -- about 40 of the 174 lines of `tropico-common.sh`, plus a chunk of the
+   installer. `TROPICO_DIR` goes with them: with the payload living beside the game there
+   is nothing sensible for it to point at.
+3. **The launcher is GOG-only in use, shipped always** (§4.1).
+4. **One desktop entry, GOG only, removed only if it points here** (§4.2).
+5. **Uninstall removes everything, including itself** (§6.8), after verifying the restore.
 
-### Still open
-
-* The desktop entry's per-install naming scheme (§4.2) — the *need* is settled, the
-  spelling is not.
-* Whether `uninstall` should also remove the `tropico-patch/` folder and the three scripts,
-  or leave them for the user to delete. Windows currently says "delete them whenever you
-  like"; leaving them means re-running `install` is possible without re-extracting.
+Everything in this document is now decided. Nothing is left open.
