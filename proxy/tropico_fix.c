@@ -148,7 +148,17 @@ static int g_cur_fix;                    /* s89, armed from [Cursor] Fix     */
 static int g_cur_msg;                    /* s89, armed from [Cursor] MsgProbe */
 static void install_msg_probe(void);      /* s89, defined with the probe below */
 static void unix_probe(void);             /* s90, defined with the probe below */
-static void choose_and_apply_monitor(void); /* s90, the monitor for this run  */
+/* s90/s99, and the split between them is the whole point: choose_monitor() only
+ * READS the display, which is safe from DllMain; apply_monitor() CHANGES it and
+ * waits for Wine to agree, which is not. See apply_monitor() for the measurement. */
+/* What choose_monitor() decided, kept because apply_monitor() runs much later and
+ * the xrandr output list it was read from is long out of scope by then. */
+static char  g_mon_to[64], g_mon_from[64];
+static DWORD g_mon_to_w, g_mon_to_h;
+static int   g_mon_pending;
+
+static void choose_monitor(void);
+static void apply_monitor(void);
 
 static BYTE *find_unique(const BYTE *pat, SIZE_T len, BYTE *start, SIZE_T size, const char *what)
 {
@@ -830,7 +840,10 @@ static void apply_patches(void)
      * is decided too late: with a 1080p primary a 1440p request is already rejected
      * and fallen back. This runs first, picks the monitor from where the player
      * launched, makes it primary, and waits for Wine to see it. */
-    choose_and_apply_monitor();
+    /* The choice was made in DllMain so the art could be built against it before
+     * the game indexed data\. Only the change to the display waited for here. */
+    choose_monitor();
+    apply_monitor();
 
     /* --- 4. slot 4, in BOTH tables ----------------------------------------- *
      * FINDINGS s8: patching the data table alone is not enough. A parallel
@@ -1880,11 +1893,14 @@ static int xrandr_outputs(xout_t *out, int cap)
  *
  * [Display] Monitor=<name> overrides the inference; [Display] SetPrimary=0 disables
  * the whole step. */
-static void choose_and_apply_monitor(void)
+static void choose_monitor(void)
 {
+    static int done;
+    if (done) return;               /* called from DllMain, and again from the patch pass */
+    done = 1;
     xout_t outs[8];
     int n, i, chosen = -1, prim = -1;
-    char ip[MAX_PATH], want[64], want2[64], script[MAX_PATH * 4], udir[MAX_PATH];
+    char ip[MAX_PATH], want[64], want2[64];
     POINT pt;
     long px, py;
 
@@ -1970,8 +1986,62 @@ static void choose_and_apply_monitor(void)
         return;
     }
 
+    /* RECORD IT; DO NOT DO IT. Everything above this line only reads the display,
+     * and reading is safe from DllMain -- measured on Steam, where the pointer was
+     * found on DP-3, its 2560x1440 adopted and the whole art set generated from
+     * there without trouble. Changing the primary from DllMain is a different
+     * matter, and it fails: see apply_monitor(). */
+    snprintf(g_mon_to,   sizeof g_mon_to,   "%s", outs[chosen].name);
+    snprintf(g_mon_from, sizeof g_mon_from, "%s", outs[prim].name);
+    g_mon_to_w = outs[chosen].w;
+    g_mon_to_h = outs[chosen].h;
+    g_mon_pending = 1;
+    logf_("  [display] %s needs to become primary (currently %s) -- held until the"
+          " patch pass, where the change can actually take effect", g_mon_to, g_mon_from);
+}
+
+/* ------------------------------------------------------ s99 apply_monitor
+ *
+ * WHY THIS IS NOT DONE WHERE IT IS DECIDED.
+ *
+ * Measured on the Steam edition, with the whole of choose_and_apply_monitor()
+ * running from DllMain. The reading half worked perfectly:
+ *
+ *     [display] launched from DP-3 (pointer at 3142,702 in screen space)
+ *     [+] [display] running at DP-3's own mode 2560x1440
+ *     [+] artgen: generated 267 assets for 2560x1440 ... 1333 ms
+ *
+ * and then the writing half did not:
+ *
+ *     [+] [display] primary HDMI-A-5 -> DP-3; Wine now measures 1920x1080
+ *
+ * xrandr ran and the host primary really did move. What never happened is Wine
+ * noticing: the loop below polls SM_CXSCREEN for six seconds and it expired
+ * still reporting the old primary's size. The process then asked for a 2560x1440
+ * mode on a desktop it believed was 1920x1080, which renders NOTHING -- the intro
+ * audio plays over a black screen and it looks exactly like a crash (FINDINGS 75).
+ *
+ * The reason is that a display change is noticed by work this process cannot do
+ * while it holds the loader lock: the heartbeat thread below cannot run its
+ * DLL_THREAD_ATTACH until DllMain returns, and nothing services the change
+ * notification in the meantime. So the poll cannot succeed there, however long it
+ * waits -- it is not a timing value that wants raising.
+ *
+ * Called from apply_patches, which is where it has always worked. Note the one
+ * path where that is still inside DllMain: the unwrapped GOG build patches
+ * immediately rather than deferring to GetDeviceCaps. That path is reached only
+ * when the game is started WITHOUT tools/tropico, and the launcher exists
+ * precisely because it does this job better -- before the process exists at all,
+ * with a fresh wineserver behind it. It is not a new fault; it predates the split.
+ */
+static void apply_monitor(void)
+{
+    char script[MAX_PATH * 4], udir[MAX_PATH];
+    if (!g_mon_pending) return;
+    g_mon_pending = 0;
+
     if (!game_unix_dir(udir, sizeof udir)) return;
-    snprintf(g_xr_prev, sizeof g_xr_prev, "%s", outs[prim].name);
+    snprintf(g_xr_prev, sizeof g_xr_prev, "%s", g_mon_from);
     snprintf(g_xr_marker_win, sizeof g_xr_marker_win, "%s\\tropico-primary.lock", g_dir);
     snprintf(g_xr_marker_unix, sizeof g_xr_marker_unix, "%s/tropico-primary.lock", udir);
     CloseHandle(CreateThread(NULL, 0, heartbeat_thread, NULL, 0, NULL));
@@ -1986,18 +2056,18 @@ static void choose_and_apply_monitor(void)
              "done\n"
              "/usr/bin/xrandr --output %s --primary\n"
              "rm -f '%s' ) &\n",
-             outs[chosen].name, g_xr_marker_unix, g_xr_marker_unix,
+             g_mon_to, g_xr_marker_unix, g_xr_marker_unix,
              g_xr_prev, g_xr_marker_unix);
     if (unix_sh(script, 3000)) {
         int k;
         for (k = 0; k < 60; k++) {
-            if ((DWORD)GetSystemMetrics(SM_CXSCREEN) == outs[chosen].w &&
-                (DWORD)GetSystemMetrics(SM_CYSCREEN) == outs[chosen].h) break;
+            if ((DWORD)GetSystemMetrics(SM_CXSCREEN) == g_mon_to_w &&
+                (DWORD)GetSystemMetrics(SM_CYSCREEN) == g_mon_to_h) break;
             Sleep(100);
         }
         logf_("[+] [display] primary %s -> %s; Wine now measures %dx%d. A host"
               " watchdog restores %s when this process stops, crash included",
-              g_xr_prev, outs[chosen].name, GetSystemMetrics(SM_CXSCREEN),
+              g_xr_prev, g_mon_to, GetSystemMetrics(SM_CXSCREEN),
               GetSystemMetrics(SM_CYSCREEN), g_xr_prev);
     }
 }
@@ -5727,6 +5797,33 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     /* s99: before anything else patches or defers, and before the exe's entry
      * point runs, so the numbering starts at the game's genuinely first open. */
     maybe_start_fileorder();
+
+    /* ART BEFORE THE GAME'S ENTRY POINT, WHICH IS THE ONLY MOMENT EARLY ENOUGH.
+     *
+     * The Steam edition indexes data\ before the proxy's patch pass can run --
+     * SteamStub keeps .text encrypted, so patching defers to the first
+     * GetDeviceCaps, and art generated there arrives after the index. The symptom
+     * was a menu dying on "Error opening pack file item 'setuplb.i16'" for a file
+     * that was present, valid and byte-identical to GOG's (FINDINGS 98).
+     *
+     * Generating here fixes that and is measured to work: 267 assets in 1333 ms,
+     * from DllMain, with no index error afterwards.
+     *
+     * ONLY on the launch monitor's own mode, though. That is the one answer that
+     * does not depend on what Wine currently measures -- and whenever a primary
+     * switch is still pending, Wine's measurement is stale here by construction.
+     * The ini and the picker both validate against SM_CXSCREEN, so they have to
+     * wait for apply_monitor(); their art is built in the patch pass as before. */
+    {
+        mode_t am;
+        choose_monitor();
+        if (launch_override(&am)) {
+            char ip[MAX_PATH];
+            snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+            g_artgen_enabled = GetPrivateProfileIntA("Art", "Generate", 1, ip);
+            ensure_art_for_mode(am.w, am.h);
+        }
+    }
 
     /* TROPICO_FIX_DEFER=1 forces the deferred path on an unwrapped build. This
      * exists to test the hook-and-patch mechanism itself without needing the
