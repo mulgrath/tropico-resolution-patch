@@ -46,14 +46,23 @@ archive extracts *into* the game folder and Windows filenames are case-insensiti
 top-level `binkw32.dll` would overwrite the real Bink **before any code runs** — and
 `readme.txt` already exists there too.
 
-### Linux
+### Linux — the same model, decided 2026-08-23
 
 ```
-install.sh  uninstall.sh  play  README.md  LICENSE
-lib/known-good/   binkw32.dll  tropico-fix.ini
-lib/tools/        tropico  tropico-common.sh  tropico-install.sh  tropico-setmode.sh
-                  tropico-launchpoint.py  tropico-fullscreen.py
+install.sh
+uninstall.sh
+play
+README.md
+tropico-patch/
+  binkw32.dll  tropico-fix.ini  LICENSE
+  tropico  tropico-common.sh  tropico-setmode.sh
+  tropico-launchpoint.py  tropico-fullscreen.py
 ```
+
+Extracted **into the game folder**, exactly like Windows, and acting on that folder only.
+Linux filenames are case-sensitive so the collision risk is smaller than Windows', but the
+same `tropico-patch/` subfolder is used for symmetry and because there is no reason for the
+two platforms to be shaped differently.
 
 Linux ships more **because it also ships a launcher**. Wine has to be told which monitor
 to run on and given a virtual desktop of the right size, and the primary has to be put
@@ -91,11 +100,41 @@ Steps 6 and 7 are one line each. Step 4 is a copy. The work is steps 2 and 3.
 
 | | Linux | Windows |
 |---|---|---|
-| finding the game | searches ~12 known paths plus Steam's `libraryfolders.vdf`, and acts on **every** install found | the archive is already in the folder; the script's own directory is the answer |
-| several installs | yes — patches all of them, because patching one and reporting success while another stays unpatched is the worse failure | one folder per copy of the archive. Registry lookup only to *advise* that another install exists |
-| desktop entry | writes one, for non-Steam installs, removed on uninstall only when no other patched install still needs it | none — the game is started normally, or from Steam |
-| launcher | ships one | none |
+| finding the game | **the script's own directory.** No discovery. | the script's own directory. No discovery. |
+| wrong directory | refuse, and say where it belongs | refuse, and say where it belongs |
+| several installs | extract into each; each is independent | extract into each; each is independent |
+| desktop entry | for **GOG only** — §4.2 | none |
+| launcher | ships one, used for **GOG only** — §4.1 | none |
 | `python3` | needed by the launcher | not needed at all |
+
+### 4.1 The launcher is a GOG concern
+
+Steam already has a launcher: Steam. Its Play button starts the game, the proxy detects
+the monitor it was launched from, makes it primary, and puts it back afterwards — all
+verified on the Steam edition. Nothing in `tools/tropico` is needed there.
+
+GOG on Linux has nothing in front of the game, so the launcher earns its place: it chooses
+the monitor, flips the xrandr primary, sizes the Wine virtual desktop, and restores the
+primary on exit. Ship it always, use it for GOG.
+
+Whether a folder is a Steam install is still a path test (`*steamapps*`), which works fine
+per-folder.
+
+### 4.2 The desktop entry now needs a per-install name
+
+**A consequence worth catching before it is written.** The entry lives in
+`$HOME/.local/share/applications/` and is shared, while the installer runs per folder.
+That exact mismatch already produced one bug today: uninstalling a Steam install silently
+removed the applications-menu entry belonging to a working GOG install.
+
+The old fix was "remove it only when no other patched install still needs it" — which
+required the discovery machinery this design deletes. So the fix has to change shape:
+**name the entry after the install it points at**, e.g. `tropico-patch-<hash of path>.desktop`.
+Two GOG installs then get two entries, each removed by its own uninstaller, and no script
+has to know about any folder but its own.
+
+Without this, two installs mean one entry, last writer wins, and uninstalling either takes
+it away from both.
 
 
 ## 5. Neither installer should choose a resolution
@@ -182,13 +221,32 @@ It sits under "If something goes wrong", so the three-line surface is unchanged:
     3. Play
 
 
-## 9. Open decisions
+## 9. Decisions taken, 2026-08-23
 
-1. **Does the Windows side keep registry discovery at all?** The archive is in the folder,
-   so it is only ever an advisory: *"there is another Tropico at X; this patch was applied
-   here only."* Useful, or noise?
-2. **Should `install.bat` refuse to run from outside a game folder**, or offer to search?
-   Refusing is simpler and matches the three-line contract.
-3. **Does Linux keep patching every install by default?** It is the safer behaviour for
-   uninstall and has been in place a while, but it is the one place the two platforms
-   behave differently for the user rather than for the OS.
+1. **No registry discovery on Windows.** Not worth the effort for an advisory. If
+   `install.bat` is not sitting in a game folder it refuses and explains where the archive
+   has to go.
+2. **`install.bat` refuses rather than searches.** Simpler, and it matches the three-line
+   contract: line 1 already says where to unzip.
+3. **Linux adopts the same model.** Extract into the game folder; act on that folder only;
+   uninstall is a local affair. This deletes `_tropico_candidates`, `tropico_find_all`,
+   `tropico_find_dir`, the `libraryfolders.vdf` parsing and the per-install re-exec loop —
+   about 40 of the 174 lines of `tropico-common.sh`, plus the multi-install reporting in
+   the installer.
+
+   What is given up: patching every copy on the machine in one go. That was justified by
+   uninstall — removing the patch from one copy while another stayed patched, and
+   reporting success. Per-folder installs make that symmetric instead: two installs mean
+   the archive was extracted twice, so it is uninstalled twice, and neither script can
+   make a claim about a folder it cannot see.
+4. **The launcher is GOG-only in use, shipped always** (§4.1).
+5. **No desktop entry for Steam installs** — already true, and now the only remaining
+   platform-conditional behaviour on Linux.
+
+### Still open
+
+* The desktop entry's per-install naming scheme (§4.2) — the *need* is settled, the
+  spelling is not.
+* Whether `uninstall` should also remove the `tropico-patch/` folder and the three scripts,
+  or leave them for the user to delete. Windows currently says "delete them whenever you
+  like"; leaving them means re-running `install` is possible without re-extracting.
