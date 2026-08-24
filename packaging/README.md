@@ -59,7 +59,10 @@ runs it without effort.
 **"DirectDraw error #150" on a second monitor.** Start the game from the monitor you
 want to play on, rather than moving it there afterwards.
 
-**Changing resolution later:** `./set-resolution.sh 2560 1440`, or `--list` to see what
+**Changing resolution later:** you usually do not have to. The patch reads the display
+every time it starts and builds artwork to match, so plugging in a different monitor or
+changing your resolution is handled by launching the game. To pin a resolution anyway,
+`lib/tools/tropico-setmode.sh 2560 1440`; `--list` shows what
 is ready to switch to.
 
 ---

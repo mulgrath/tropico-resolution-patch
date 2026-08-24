@@ -37,8 +37,8 @@ lists them before it starts. `--uninstall` removes the patch from all of them fo
 reason: removing it from one and reporting success, while another copy stayed patched, is
 the worse failure. Set `TROPICO_DIR=/path/to/Tropico` to act on exactly one.
 
-Art sets are staged per install, so the second copy costs the generation time only for
-modes that are not already staged there.
+Artwork is built at launch from that install's own archives, so a second copy costs
+nothing extra at install time.
 
 ```bash
 tools/tropico            # play
@@ -78,10 +78,10 @@ applications-menu entry always uses whatever is primary at the time.
 ### Other commands
 
 ```bash
-tools/tropico --list              # monitors, modes, and which art sets are staged
+tools/tropico --list              # monitors, modes, and what art is installed
 tools/tropico --monitor DP-3      # override the monitor for one launch
 tools/tropico --log               # capture a trace for a bug report
-tools/tropico-setmode.sh 2560 1440  # change resolution (0.7 s if already staged)
+tools/tropico-setmode.sh 2560 1440  # pin a resolution (art is rebuilt on the next launch)
 tools/tropico-install.sh --uninstall
 ```
 
@@ -108,7 +108,8 @@ the patch is simply gone — with nothing of ours left running to tell you. The 
 to its stock resolution with the generated art still sitting unused on disk.
 
 It is not broken and nothing is lost. Re-run `tools/tropico-install.sh`; it is idempotent,
-and the art sets it already staged are reused, so it takes seconds rather than a minute.
+and the artwork is rebuilt at the next launch, in about a second, so there is nothing
+to wait for at install time.
 
 ## Uninstall
 
@@ -155,7 +156,7 @@ glob — a glob would sweep up art the game ships loose), and removes the deskto
 ## Layout
 
 - `tools/tropico` — **the launcher.** What players run
-- `tools/tropico-install.sh`, `tools/tropico-setmode.sh` — install, and switch resolution
+- `tools/tropico-install.sh`, `tools/tropico-setmode.sh` — install, and pin a resolution
 - `tools/tropico-gog.sh` — **the test harness, not the launcher.** It defaults to a Wine
   virtual desktop and exposes a dozen research knobs; `TESTING.md` depends on all of it
 - `proxy/` — the `binkw32.dll` proxy: every runtime patch lives here

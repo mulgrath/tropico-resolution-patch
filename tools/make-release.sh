@@ -41,11 +41,11 @@ mkdir -p "$OUT/$NAME/lib" "$OUT/$NAME/source"
 # development history, and putting them in front of someone who just wants the game at
 # 1080p is noise. They stay in the repository, which the README points at.
 #
-#   install.sh  uninstall.sh  play  set-resolution.sh  README.md  LICENSE
+#   install.sh  uninstall.sh  play  README.md  LICENSE
 #   lib/tools/        the scripts that do the work
 #   lib/known-good/   the proxy and the ini template
 #   source/           the C the shipped DLL is built from, and its build script
-for w in install.sh uninstall.sh play set-resolution.sh; do
+for w in install.sh uninstall.sh play; do
   cp "$ROOT/packaging/$w" "$OUT/$NAME/$w"
   chmod +x "$OUT/$NAME/$w"
 done
