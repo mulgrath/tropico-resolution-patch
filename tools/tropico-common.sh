@@ -101,6 +101,33 @@ tropico_validate_mode() {
 }
 
 
+# Name the mode in tropico-fix.ini. The proxy reads this as its ini override, so it is
+# what actually decides the resolution -- the Wine virtual desktop the launcher creates
+# only decides how much room the game has to do it in.
+#
+# THOSE TWO MUST AGREE. When they do not, the symptom is silent and looks like a
+# different bug entirely: a 2560x1440 desktop with a 1920x1080 ini opens fullscreen at
+# 1440p and then paints a 1080p game inside it, which reads as "it shrank to a window".
+# Measured 2026-08-23, and it is why this lives in one function instead of being
+# open-coded wherever a mode is chosen.
+#
+# Deliberately does NOT touch data/ARTSET-MODE.txt. The proxy regenerates when the
+# marker disagrees with the mode, so leaving it alone means the art is rebuilt exactly
+# when it needs to be and not on every launch.
+tropico_set_ini_mode() {
+  _gd="$1"; _w="$2"; _h="$3"
+  _ini="$_gd/tropico-fix.ini"
+  [ -f "$_ini" ] || return 1
+  _tmp="$(mktemp)"
+  awk -v w="$_w" -v h="$_h" '
+    /^Width=/  { print "Width=" w;  next }
+    /^Height=/ { print "Height=" h; next }
+    { print }' "$_ini" > "$_tmp"
+  cat "$_tmp" > "$_ini"
+  rm -f "$_tmp"
+}
+
+
 # Connected outputs, one "NAME WxH primary|-" per line.
 tropico_outputs() {
   xrandr --query 2>/dev/null | awk '

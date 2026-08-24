@@ -851,6 +851,23 @@ static void apply_patches(void)
          * mode we ended up with, the art for it is generated below. The fallback path
          * and the normal path became the same path. */
 
+        /* A MODE SMALLER THAN THE SCREEN IT IS RUNNING IN. Legitimate on a real
+         * desktop -- someone may want 1080p on a 1440p monitor -- but inside the
+         * borderless Wine desktop tools/tropico creates, it is always a mistake, and
+         * the symptom is one nobody reads as a mode mismatch: the desktop opens
+         * fullscreen at the larger size and the game paints the smaller one inside it,
+         * which looks like the game "shrinking to a window". Measured 2026-08-23 after
+         * step 6 dropped the launcher's ini write. One line, so it never costs a
+         * session again. */
+        {
+            int dw = GetSystemMetrics(SM_CXSCREEN), dh = GetSystemMetrics(SM_CYSCREEN);
+            if (dw && dh && ((DWORD)dw > m.w || (DWORD)dh > m.h))
+                logf_("  [*] the mode (%lux%lu) is SMALLER than the screen it is running"
+                      " in (%dx%d) -- expect the game to paint inside a larger fullscreen"
+                      " backdrop. If that is not what you wanted, tropico-fix.ini and the"
+                      " display disagree.", m.w, m.h, dw, dh);
+        }
+
         /* The mode is final here. Make the art match it before the game reads any --
          * the menu is the first thing that does, and it opens after this. */
         ensure_art_for_mode(m.w, m.h);

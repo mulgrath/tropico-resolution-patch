@@ -149,6 +149,14 @@ if ! tropico_validate_mode "${WANT%x*}" "${WANT#*x}" 2>/dev/null; then
   fail "$WANT cannot be used by this patch: $(tropico_validate_mode "${WANT%x*}" "${WANT#*x}" 2>&1 >/dev/null || true)"
 fi
 
+# NAME THE MODE IN THE INI. This is not optional and it is not bookkeeping: the proxy
+# takes its resolution from the ini, so a stale one means the game paints at the old
+# size inside a virtual desktop sized for the new one -- fullscreen at 1440p with a
+# 1080p game in the middle of it. Step 6 deleted the tropico-setmode.sh call that used
+# to do this as a side effect of staging art, and took this with it by accident.
+tropico_set_ini_mode "$GAMEDIR" "${WANT%x*}" "${WANT#*x}" \
+  || fail "Could not write tropico-fix.ini in $GAMEDIR. Is the patch installed there?"
+
 # THE ART IS NO LONGER THIS SCRIPT'S JOB. It used to run tropico-setmode.sh here,
 # which generated the set in Python (~13 s) into artsets\<WxH>\ and then copied it
 # into data/ -- 132 MB written twice at 4K, before the game had even started.

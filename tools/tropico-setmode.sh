@@ -47,13 +47,7 @@ W="${1:-}"; H="${2:-}"
 tropico_validate_mode "$W" "$H" || exit 1
 [ -f "$INI" ] || { echo "!! no tropico-fix.ini in $GAMEDIR -- run the installer first." >&2; exit 1; }
 
-TMP="$(mktemp)"
-awk -v w="$W" -v h="$H" '
-  /^Width=/  { print "Width=" w;  next }
-  /^Height=/ { print "Height=" h; next }
-  { print }' "$INI" > "$TMP"
-cat "$TMP" > "$INI"
-rm -f "$TMP"
+tropico_set_ini_mode "$GAMEDIR" "$W" "$H"
 
 # Ask for a rebuild. Cheap to be unconditional: if the art already matches, the proxy
 # spends about a second putting back what was there, and if it does not, this is the
