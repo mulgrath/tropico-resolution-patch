@@ -40,26 +40,48 @@ tropico_game_dir() {
   echo "$_d"
 }
 
+# Find the game FROM WHERE WE ARE. Bounded and local: this walks up a few levels and
+# looks in `app/` at each, and that is all. It is not the machine-wide discovery that
+# was deleted -- no Steam library parsing, no candidate path list, nothing outside our
+# own neighbourhood.
+#
+# WHY IT HAS TO EXIST. "Extract into your Tropico folder" is ambiguous on GOG, where the
+# folder named Tropico is NOT the folder holding Tropico.EXE -- the game sits in an `app`
+# subfolder. And GUI extractors add a folder of their own, so an archive dropped in and
+# double-clicked lands two levels below where it meant to be. Observed, on a real
+# attempt: the archive went to Tropico/, the extractor made Tropico/<name>/, the tarball
+# added another <name>/, and install.sh was three levels from Tropico.EXE.
+#
+# Needing to read an error message to get step one right means step one is wrong. So
+# instead of refusing, look in the handful of places the answer can actually be.
+tropico_find_nearby() {
+  _base="$(cd "${1:-$PWD}" && pwd)"
+  _try="$_base"
+  _i=0
+  while [ "$_i" -le 3 ]; do
+    tropico_game_dir "$_try"       2>/dev/null && return 0
+    tropico_game_dir "$_try/app"   2>/dev/null && return 0
+    [ "$_try" = "/" ] && break
+    _try="$(dirname "$_try")"
+    _i=$((_i + 1))
+  done
+  return 1
+}
+
 # The message every entry point gives when it is not where it needs to be. One place,
 # so install, uninstall and the launcher cannot drift into describing it differently.
 tropico_wrong_folder_msg() {
   cat >&2 <<'MSG'
-!! This is not a Tropico folder.
+!! Could not find Tropico near this folder.
 
-   The patch has to sit in the same folder as Tropico.EXE -- extract the archive
-   THERE and run it from THERE. It looks like this when it is right:
+   The patch looks for Tropico.EXE here, in an "app" subfolder, and a few levels
+   up -- so extracting the archive anywhere inside your Tropico folder is enough.
+   It found nothing, which usually means it was extracted somewhere else entirely,
+   such as Downloads.
 
-       Tropico/
-         Tropico.EXE
-         data/
-         install.sh        <- you are here
-         uninstall.sh
-         play
-         tropico-patch/
-
-   Common causes: the archive was extracted to Downloads and the files copied in
-   by hand, or it was extracted one level up. GOG installs usually keep the game
-   in an "app" subfolder -- Tropico.EXE has to be beside these scripts.
+   Move the extracted folder into your Tropico folder and run it again. The game
+   directory is the one containing Tropico.EXE and data/ -- on GOG that is usually
+   an "app" subfolder.
 MSG
 }
 

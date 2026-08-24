@@ -15,10 +15,32 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/tropico-patch"
 . "$SRC/tropico-common.sh"
 
-GAMEDIR="$(tropico_game_dir "$HERE" || true)"
+GAMEDIR="$(tropico_find_nearby "$HERE" || true)"
 if [ -z "$GAMEDIR" ]; then
   tropico_wrong_folder_msg
   exit 1
+fi
+
+# If we were run from somewhere near the game rather than inside it -- which is the
+# normal case, because GUI extractors add a folder of their own and GOG keeps the game
+# in an `app` subfolder -- move the payload in first, then carry on from there.
+#
+# The end state is identical either way: the launcher has to sit beside the game so it
+# can find it, and the applications-menu entry points at the game folder's ./play.
+# `source/` is deliberately NOT copied; it is there so the DLL can be rebuilt and
+# compared, and it has no business cluttering someone's game folder.
+if [ "$GAMEDIR" != "$HERE" ]; then
+  echo
+  echo "== Found Tropico at $GAMEDIR"
+  echo "   (this was run from $HERE)"
+  cp -r "$SRC" "$GAMEDIR/tropico-patch"
+  for f in install.sh uninstall.sh play README.md; do
+    [ -f "$HERE/$f" ] && cp "$HERE/$f" "$GAMEDIR/$f"
+  done
+  chmod +x "$GAMEDIR/install.sh" "$GAMEDIR/uninstall.sh" "$GAMEDIR/play" 2>/dev/null || true
+  echo "   - copied the patch into the game folder"
+  # Re-run from there, so everything below sees one consistent idea of where it is.
+  exec "$GAMEDIR/install.sh"
 fi
 
 # Steam is a path fact, not a setting. It changes exactly two things: no

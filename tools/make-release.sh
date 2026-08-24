@@ -58,6 +58,7 @@ for w in install.sh uninstall.sh play; do
 done
 cp "$ROOT/packaging/README.md" "$OUT/$NAME/README.md"
 cp "$ROOT/LICENSE"             "$OUT/$NAME/tropico-patch/LICENSE"
+echo "$VER" > "$OUT/$NAME/tropico-patch/VERSION"
 
 # ---------------------------------------------------------------- what ships
 # AN EXPLICIT LIST, not a glob over tools/. The repository holds twenty-odd
@@ -135,7 +136,18 @@ if [ -n "$BAD" ]; then
   exit 1
 fi
 
-tar -C "$OUT" -czf "$OUT/$NAME.tar.gz" "$NAME"
+# FLAT: no top-level directory inside the archive.
+#
+# A tarball normally wraps its contents in one versioned folder, and that is wrong here.
+# GUI extractors add a folder of their own, so an archive that also carries one produces
+# TWO nested folders of the same name -- observed on a real attempt, with install.sh
+# ending up three levels from Tropico.EXE. Flat means the extractor's own folder is the
+# only one, and its contents are already the right shape.
+#
+# The usual objection to a flat archive is scattering files when extracted in the wrong
+# place. That does not apply: every GUI extractor makes a folder for a flat archive
+# precisely to avoid it, and install.sh now finds the game from wherever it lands.
+tar -C "$OUT/$NAME" -czf "$OUT/$NAME.tar.gz" .
 rm -rf "$OUT/$NAME"
 ( cd "$OUT" && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
 
