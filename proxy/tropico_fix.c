@@ -33,6 +33,7 @@
 
 #include <windows.h>
 #include <stdio.h>
+#include "artgen.h"
 #include <tlhelp32.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -582,6 +583,49 @@ static int pick_mode_pass(mode_t *out, int staged_only)
 
 /* Prefer a mode whose art is staged; fall back to the stock-art caps if none is.
  * Only the fallback path ever gets here -- see ini_override(). */
+/* ------------------------------------------------ s96: runtime art generation
+ *
+ * The art set is generated HERE, at launch, from the user's own archives -- not
+ * staged ahead of time by an installer that had to guess which resolution the game
+ * would end up at. That guess is what the staging subsystem existed to make, and
+ * what measurement showed was unnecessary: the whole set is ~0.9 s in C against
+ * ~13 s in Python, so it stops being a step that has to be scheduled.
+ *
+ * WHY THIS IS INERT ON LINUX. tools/tropico stages a set and writes
+ * data\ARTSET-MODE.txt before the game starts, so the marker matches the mode we
+ * just picked and this returns immediately. Runtime generation is for the platform
+ * with no launcher -- Windows, and Steam's Play button, where nothing runs before
+ * the process does.
+ *
+ * The cache key is the MODE ALONE. font_scale is derived from it as H/1080
+ * (FINDINGS 86), so two runs at one resolution cannot disagree about the art.
+ */
+static void artgen_log(const char *s) { logf_("%s", s); }
+
+static void ensure_art_for_mode(DWORD w, DWORD h)
+{
+    char ip[MAX_PATH];
+    snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+    if (!GetPrivateProfileIntA("Art", "Generate", 1, ip)) {
+        logf_("  [artgen] [Art] Generate=0 -- data\\ left exactly as it is");
+        return;
+    }
+    double fs = (double)h / 1080.0;
+    if (ag_set_is_current(g_dir, (int)w, (int)h, fs)) {
+        logf_("  [artgen] data\\ already holds the %lux%lu set -- nothing to do", w, h);
+        return;
+    }
+    int nn = GetPrivateProfileIntA("Art", "FontNearest", 0, ip) != 0;
+    logf_("  [artgen] data\\ does not match %lux%lu -- generating from your archives", w, h);
+    DWORD t0 = GetTickCount();
+    int n = ag_generate_set(g_dir, (int)w, (int)h, fs, nn, artgen_log);
+    if (n > 0)
+        logf_("  [artgen] %d assets in %lu ms", n, GetTickCount() - t0);
+    else
+        logf_("  [artgen] generation did not complete -- the game will run with"
+              " whatever art is already in data\\, which may not match the mode");
+}
+
 static int pick_mode(mode_t *out)
 {
     if (g_staged_fallback && pick_mode_pass(out, 1)) {
@@ -906,6 +950,10 @@ static void apply_patches(void)
                           m.w, m.h, n);
             }
         }
+        /* The mode is final here. Make the art match it before the game reads any --
+         * the menu is the first thing that does, and it opens after this. */
+        ensure_art_for_mode(m.w, m.h);
+
         BYTE *chain = find_unique(CHAIN_SIG, sizeof CHAIN_SIG, g_text, g_textlen, "chain");
         if (chain) {
             DWORD wh[2] = { m.w, m.h };

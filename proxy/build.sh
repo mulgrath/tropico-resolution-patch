@@ -27,8 +27,12 @@ OUT="${1:-binkw32.dll}"
 # at one sprite in 25,820 until the flags were added (FINDINGS 94). Not added yet
 # because nothing here depends on float precision, and adding it now would change the
 # shipped binary for no present benefit.
-i686-w64-mingw32-gcc -shared -O2 -Wall -Wextra \
-    -o "$OUT" tropico_fix.c binkw32.def \
+# artgen.c is the ART GENERATOR, and it is the SAME FILE the probes link. -msse2
+# -mfpmath=sse is required, not cosmetic: this is a 32-bit target, gcc emits x87 by
+# default, and x87's 80-bit intermediates change box_resample's rounding enough to
+# break byte-identity against the Python oracle (FINDINGS 94).
+i686-w64-mingw32-gcc -shared -O2 -Wall -Wextra -msse2 -mfpmath=sse \
+    -o "$OUT" tropico_fix.c artgen.c binkw32.def \
     -static-libgcc \
     -lgdi32 -luser32 -lkernel32 \
     -Wl,--enable-stdcall-fixup \

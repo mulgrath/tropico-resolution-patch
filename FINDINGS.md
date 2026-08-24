@@ -7019,3 +7019,87 @@ wraparound at 32 bits and that survives — **after stripping CR**. mingw's stdi
 stdout in text mode and translates `\n` to `\r\n`, so the first diff showed all 268 lines
 differing for no reason at all. Only affects this probe's text listing; the generator
 writes binary. Noted because ten seconds of it looked like a catastrophic port failure.
+
+## 96. Art generation moves into the proxy — the container writer, and one shared implementation
+
+Step 5. The generator now runs at launch, in-process, from the user's own archives.
+
+### The architecture decision that came first
+
+`proxy/artgen.c` is the **single implementation**. The probes `#include` it; the proxy
+compiles it. Including a `.c` is unusual and it is deliberate: the codec's internals are
+static, and exporting them merely to test them would widen the generator's surface for
+no reason. What it buys is that every byte-identity claim in §93/94/95 is a claim about
+**the file the game runs**, not about a fork of it that was true when it was copied.
+
+Both earlier oracles were re-run after the move and still pass — 25,820 sprites and
+280 names / 268 assets, unchanged.
+
+### The container writer, which nothing had covered
+
+The probes only ever emitted sprite *payloads*, because that is all the codec produces.
+A container is payloads **plus** a header, a 15-byte table record per sprite with two
+length fields at +7 and +11, a 13-byte block header carrying the scaled geometry, and
+seven region-end offsets at `0x23` that all become the final file size. So it got its own
+oracle at the file level.
+
+| | |
+|---|---|
+| full 2560x1440 set vs the Python's files | **267 / 267 byte-identical**, 61,921,611 bytes |
+| **identity: regenerate at 1600x1200, compare to PopTop's own archived bytes** | **260 / 260 identical**, 1 skipped |
+
+The identity run is the sharp one: it reproduces the shipped containers exactly, structure
+included, so nothing in the header, the table or the region offsets is being guessed.
+61,921,611 is also the byte count the design's §1 recorded for a full set, arrived at
+independently.
+
+**Speed, end to end** — archives read, 267 assets generated, 62 MB written:
+**0.878 s**, against **13.0 s** for the same Python run.
+
+### Why this is inert on Linux
+
+`ensure_art_for_mode()` runs once the mode is final and before the menu — the first
+thing that reads UI art. It compares the mode against `data\ARTSET-MODE.txt` and returns
+immediately when they agree.
+
+`tools/tropico` stages a set and writes that marker before the game starts, so on Linux
+the marker always agrees and nothing is generated. Verified against both live installs:
+
+```
+GOG    marker=1920x1080  asking for 1920x1080 -> CURRENT (no generation)
+Steam  marker=1920x1080  asking for 1920x1080 -> CURRENT (no generation)
+GOG    marker=1920x1080  asking for 3840x2160 -> STALE  (would generate)
+```
+
+That third line is the case that used to fail: a mode nothing had staged fell back to
+the stock art caps. It now generates instead.
+
+**The cache key is the mode alone.** The staged world needed a separate font-scale stamp
+beside each set (§86) because the scale was a command-line option two runs could disagree
+about. Here it cannot be — the generator derives `font_scale` as `H/1080` from the mode —
+so one key suffices and there is no stamp to go stale.
+
+**The marker is written last, and only on success.** An interrupted run leaves a marker
+that does not match, so the next launch regenerates rather than trusting a half-written
+set. Same reasoning as `tropico-setmode.sh` staging into `.tmp` and renaming when complete.
+
+The manifest is written as generation proceeds, because uninstall removes generated art
+**by manifest and never by glob** — a glob over `*.i16` would also sweep up anything the
+game ships loose.
+
+`[Art] Generate=0` disables it entirely; `[Art] FontNearest=1` selects the other filter.
+
+### The build flag is now load-bearing in the proxy
+
+`proxy/build.sh` gained `-msse2 -mfpmath=sse`, no longer as a comment. The proxy is a
+32-bit target, gcc emits x87, and x87's 80-bit intermediates change `box_resample`'s
+rounding (§94). The build is still reproducible — two builds of the same source give
+`e6607326…` twice.
+
+### Not yet done
+
+Step 6: the installer still stages `artsets\` per monitor and the picker still consults
+`mode_is_staged`. Both are now redundant on any install where generation is enabled, and
+both are scheduled for deletion. Nothing has been removed yet, deliberately — that keeps
+this step a pure addition, and keeps the Linux path exactly as it was for the run that
+verifies it.

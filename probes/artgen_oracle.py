@@ -179,8 +179,10 @@ def names_oracle(app, work):
     """
     import subprocess as sp
     probe = os.path.join(work, 'artgen_names')
-    sp.run(['cc', '-O2', '-Wall', '-Wextra', '-o', probe,
-            os.path.join(HERE, 'artgen_names.c')], check=True)
+    # -lm and the SSE2 flags: this driver now includes proxy/artgen.c whole, so it
+    # pulls in the codec's floating point even though the name harvest has none.
+    sp.run(['cc', '-O2', '-Wall', '-Wextra', '-msse2', '-mfpmath=sse', '-o', probe,
+            os.path.join(HERE, 'artgen_names.c'), '-lm'], check=True)
     data, exe = os.path.join(app, 'data'), os.path.join(app, 'Tropico.EXE')
 
     idx = pk2.load_all(data)
