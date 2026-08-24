@@ -8,14 +8,21 @@
 set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SRC="$HERE/tropico-patch"
+. "$HERE/tropico-patch/tropico-common.sh"
 
-GAMEDIR="$HERE"
-if [ ! -f "$GAMEDIR/Tropico.EXE" ]; then
-  echo "!! Tropico.EXE is not in this folder, so the patch was not installed here." >&2
-  echo "   Nothing was changed." >&2
+# THE SAME SEARCH install.sh AND THE LAUNCHER USE. Run from the game folder this finds
+# itself immediately; run from the extracted archive sitting next to it -- which is
+# where people actually are, because that is where they ran install.sh from -- it finds
+# the game a level or two up. Requiring the user to be in exactly the right folder to
+# UNDO something is a worse trap than requiring it to install.
+GAMEDIR="$(tropico_find_nearby "$HERE" || true)"
+if [ -z "$GAMEDIR" ]; then
+  tropico_wrong_folder_msg
   exit 1
 fi
+# Everything below acts on the GAME folder, never on $HERE -- the two are different
+# whenever this is run from the extracted archive, and the archive is the user's to keep.
+SRC="$GAMEDIR/tropico-patch"
 
 has_mark() { [ -f "$1" ] && grep -qa "tropico_fix (binkw32 proxy)" "$1" 2>/dev/null; }
 
@@ -85,7 +92,7 @@ echo "   - removed tropico-fix.ini and the logs"
 # runs per folder -- removing it unconditionally is how uninstalling one install once
 # took the menu entry away from a different, working one.
 DESK="$HOME/.local/share/applications/tropico-patch.desktop"
-if [ -f "$DESK" ] && grep -qF "Exec=$HERE/play" "$DESK" 2>/dev/null; then
+if [ -f "$DESK" ] && grep -qF "Exec=$GAMEDIR/play" "$DESK" 2>/dev/null; then
   rm -f "$DESK" "$HOME/.local/share/icons/tropico-patch.png"
   echo "   - removed the applications-menu entry"
 fi
@@ -94,12 +101,21 @@ fi
 # Everything the archive brought, except this script. It does NOT delete itself:
 # self-deleting scripts are a recognised malware behaviour and antivirus heuristics
 # look for them, which is a silly thing to spend on saving someone one `rm`.
-rm -rf "$SRC" "$HERE/source"
-rm -f "$HERE/install.sh" "$HERE/play" "$HERE/README.md"
+rm -rf "$SRC" "$GAMEDIR/source"
+rm -f "$GAMEDIR/install.sh" "$GAMEDIR/play" "$GAMEDIR/README.md"
+# The game folder's own uninstall.sh goes too -- unless it is the script running right
+# now. A script that is not us is just a leftover file, and leaving it behind would
+# have the game folder still looking patched after a successful uninstall.
+[ "$GAMEDIR" = "$HERE" ] || rm -f "$GAMEDIR/uninstall.sh"
 
 echo
 echo "== Done. The game is back to how it was."
 echo
 echo "   Your saved games, TROPICO.CFG and the px*.PK2 archives were never touched."
-echo "   You can delete uninstall.sh now; it is the only file left."
+if [ "$GAMEDIR" = "$HERE" ]; then
+  echo "   You can delete uninstall.sh now; it is the only file left."
+else
+  echo "   The game folder is clean. The extracted archive you ran this from is"
+  echo "   still where you left it -- delete it whenever you like."
+fi
 echo
