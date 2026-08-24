@@ -17,9 +17,16 @@ set -eu
 SELF="$(cd "$(dirname "$0")" && pwd)"
 . "$SELF/tropico-common.sh"
 
-# Our parent is the game folder -- this lives in tropico-patch/.
-GAMEDIR="$(cd "$SELF/.." && pwd)"
-[ -f "$GAMEDIR/Tropico.EXE" ] || { tropico_wrong_folder_msg; exit 1; }
+# THE SAME SEARCH install.sh USES, and for the same reason. Normally our parent IS the
+# game folder -- this script lives in tropico-patch/, which install.sh puts beside
+# Tropico.EXE. But the extracted archive keeps a copy of this whole folder, so ./play
+# also gets run from wherever the user unpacked it, where the parent is not the game.
+# Looking one folder up and finding nothing is not a good enough answer there.
+GAMEDIR="$(tropico_find_nearby "$SELF" || true)"
+if [ -z "$GAMEDIR" ]; then
+  tropico_wrong_folder_msg
+  exit 1
+fi
 INI="$GAMEDIR/tropico-fix.ini"
 
 if [ "${1:-}" = "--list" ]; then
