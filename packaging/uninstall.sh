@@ -84,8 +84,27 @@ rm -f "$GAMEDIR/data/ARTSET-MODE.txt"
 rm -rf "$GAMEDIR/artsets"
 
 # ------------------------------------------------------------------ leftovers
-rm -f "$GAMEDIR/tropico-fix.ini" "$GAMEDIR/tropico-fix.log" "$GAMEDIR/tropico-launcher.log"
-echo "   - removed tropico-fix.ini and the logs"
+# EVERYTHING THE PATCH WRITES BESIDE THE GAME, not just the obvious two. Each of
+# these is scratch the proxy or the launcher creates at run time, so none of them
+# exist in a fresh install and all of them were being left behind:
+#
+#   tropico-fix.ini        the config, written by install.sh
+#   tropico-fix.log        the proxy's log, rewritten every launch
+#   tropico-launcher.log   the launcher's, so a menu-started run has an account
+#   tropico-trace.log      only from `tropico --log`
+#   tropico-xrandr.txt     the proxy's copy of the display layout it read
+#   tropico-pointer.py     dropped on the host so xrandr_query can find the pointer
+#   tropico-primary.lock   the heartbeat the primary-restoring watchdog watches
+#   unix-probe-*.txt       from the [Unix] probe, which is off unless asked for
+rm -f "$GAMEDIR/tropico-fix.ini" \
+      "$GAMEDIR/tropico-fix.log" \
+      "$GAMEDIR/tropico-launcher.log" \
+      "$GAMEDIR/tropico-trace.log" \
+      "$GAMEDIR/tropico-xrandr.txt" \
+      "$GAMEDIR/tropico-pointer.py" \
+      "$GAMEDIR/tropico-primary.lock"
+rm -f "$GAMEDIR"/unix-probe-*.txt
+echo "   - removed tropico-fix.ini, the logs and the run-time scratch files"
 
 # ---------------------------------------------------------------- menu entry
 # Only if it points HERE. The entry lives in $HOME and is shared, while this script
@@ -108,12 +127,30 @@ rm -f "$GAMEDIR/install.sh" "$GAMEDIR/play" "$GAMEDIR/README.md"
 # have the game folder still looking patched after a successful uninstall.
 [ "$GAMEDIR" = "$HERE" ] || rm -f "$GAMEDIR/uninstall.sh"
 
+# ------------------------------------------------------------- did we get it all?
+# The list above is written by hand and the proxy grows new scratch files from time
+# to time; this project's recurring bug is fixing one entry point at a time and
+# letting the others drift. So SAY what is left rather than guess at deleting it --
+# a name we did not predict is a bug report, and a file we should not touch stays
+# untouched either way.
+LEFT="$(find "$GAMEDIR" -maxdepth 1 \( -name 'tropico-*' -o -name 'unix-probe-*' \) 2>/dev/null | sort)"
+if [ -n "$LEFT" ]; then
+  echo
+  echo "!! These are still in the game folder and the uninstaller did not expect them:"
+  printf '%s\n' "$LEFT" | sed 's|^|     |'
+  echo "   Nothing was done to them. They are safe to delete, and worth reporting."
+fi
+
 echo
 echo "== Done. The game is back to how it was."
 echo
 echo "   Your saved games, TROPICO.CFG and the px*.PK2 archives were never touched."
 if [ "$GAMEDIR" = "$HERE" ]; then
-  echo "   You can delete uninstall.sh now; it is the only file left."
+  if [ -n "$LEFT" ]; then
+    echo "   You can delete uninstall.sh now, along with the file(s) listed above."
+  else
+    echo "   You can delete uninstall.sh now; it is the only file left."
+  fi
 else
   echo "   The game folder is clean. The extracted archive you ran this from is"
   echo "   still where you left it -- delete it whenever you like."

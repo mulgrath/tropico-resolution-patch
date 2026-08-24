@@ -144,6 +144,23 @@ if [ "$STEAM" = 0 ]; then
     fi
   fi
   mkdir -p "$APPS"
+  # SAY SO IF WE ARE TAKING THE ENTRY OFF SOMEONE ELSE. There is one shared
+  # tropico-patch.desktop in $HOME and this script runs per game folder, so
+  # installing over a second copy of the game silently repoints the menu at the
+  # new one -- and the old install then looks broken for no visible reason.
+  #
+  # uninstall.sh has always been careful here: it refuses to remove an entry
+  # pointing somewhere other than the folder being uninstalled. Installing had no
+  # matching care, which is the same asymmetry that has bitten this project before
+  # -- one entry point fixed, its opposite left alone. Not fixed by refusing, which
+  # would be worse: overwriting IS what someone reinstalling wants. Just said out
+  # loud, so the surprise is not silent.
+  PREV="$APPS/tropico-patch.desktop"
+  if [ -f "$PREV" ] && ! grep -qF "Exec=$HERE/play" "$PREV" 2>/dev/null; then
+    PREVDIR="$(sed -n 's|^Exec=\(.*\)/play$|\1|p' "$PREV" | head -1)"
+    echo "   - NOTE: the applications-menu entry pointed at ${PREVDIR:-another folder};"
+    echo "           it now starts this one. That install still works from its ./play."
+  fi
   {
     echo "[Desktop Entry]"
     echo "Type=Application"
