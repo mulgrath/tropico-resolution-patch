@@ -7331,3 +7331,39 @@ patches immediately rather than deferring to `GetDeviceCaps`, and reaches
 game *without* `tools/tropico`, and the launcher exists because it does this job
 properly — before the process exists, with a fresh wineserver behind it. Pre-existing,
 not introduced by the split.
+
+### 99a. What the split did and did not buy the GOG build
+
+Addendum, same day. The commit message for `cae0573` said the launches that bypass
+`tools/tropico` — Lutris, Heroic, a bare `wine Tropico.EXE` — "took the broken path
+until now", which reads as *fixed*. It is not, and the overstatement is worth correcting
+in place rather than leaving for someone to trip over.
+
+What the split really bought, measured: `apply_monitor()` runs outside `DllMain`, Wine
+sees the change (`primary HDMI-A-5 -> DP-3; Wine now measures 2560x1440`), the mode is
+validated against the right monitor, 17 patches applied, 0 failed, primary restored on
+exit. The loader-lock fault on that path is genuinely gone.
+
+The game then quit anyway. Silently — clean exit, nothing on stderr, no unhandled
+exception, no DirectDraw error — after creating its 600x400 startup window and before
+`BinkOpen` was ever reached. **There was a second blocker underneath the first.**
+
+It is the virtual desktop. Bare `wine Tropico.EXE` fails; the same launch wrapped in
+`wine explorer /desktop=Tropico,2560x1440` plays. So FINDINGS 76 is doing more work than
+"placement stops being a correctness problem": without it the game declines to start at
+all on a multi-monitor root window, whatever the primary is set to. Making the launch
+monitor primary is NECESSARY AND NOT SUFFICIENT.
+
+**Decision: the bare-exe path is not supported and is not a goal.** GOG is played
+through `tools/tropico`, reached from the applications-menu entry the installer writes;
+Steam is played from Steam's Play button. Both are one click. The wrapped command that
+does work is not something to put in front of a person, and supporting a third path
+would mean the proxy reproducing the launcher's virtual desktop, borderless registry
+write and fullscreen helper from inside a process that has already started — which it
+cannot do, because those are all launch-time decisions.
+
+`cae0573` is kept regardless. It removed a real fault, it costs nothing on the launcher
+path (nothing is ever pending there, so the branch is unreachable), and it makes the two
+editions take the same route when a monitor does need switching.
+
+Do not re-run this experiment expecting a different answer.
