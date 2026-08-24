@@ -171,14 +171,25 @@ cannot use is worth saying at install time, but it should not stop the install.
 7. **Linux only:** the desktop entry and icon — but only when no other patched non-Steam
    install still needs them. They live in `$HOME` and are shared, while the script runs
    once per install.
-8. **Remove the patch's own files** — `tropico-patch/`, `install`, `play`, the README —
-   and the uninstaller itself, **last**, once everything above has succeeded. A user who
-   wants the patch back extracts the archive again; that is one step, and it is better
-   than leaving a folder of scripts behind for someone to wonder about.
+8. **Remove the patch's own files** — `tropico-patch/`, `install`, `play`, the README.
+   A user who wants the patch back extracts the archive again, which is one step.
 
-   Self-deletion is ordinary on Linux (`rm -- "$0"`) and needs the standard
-   `(goto) 2>nul & del "%~f0"` idiom on Windows, which is obscure enough to deserve a
-   comment where it is used.
+   **The uninstaller does NOT delete itself.** An earlier draft had it do so with the
+   `(goto) 2>nul & del "%~f0"` idiom. Rejected: **self-deleting scripts are a recognised
+   malware behaviour** — droppers remove themselves to destroy evidence, it is a
+   catalogued technique, and antivirus heuristics look for it. That is precisely the
+   budget the choice of batch over PowerShell was protecting (§ the options note), so
+   spending it to avoid leaving one file behind is a bad trade. `rm -- "$0"` carries no
+   such stigma on Linux, but the two platforms behaving differently here is worse than
+   both being dull.
+
+   So: everything else goes, and the last line of output says the uninstaller itself can
+   now be deleted. One file of litter, and nothing that looks like it is covering its
+   tracks.
+
+   Note this is a different question from `binkw32_orig.dll` in step 3, which *is*
+   deleted. That file is ours, it is provably redundant once the restore is verified, and
+   removing it is tidiness rather than concealment.
 9. **Report** that `TROPICO.CFG`, saves and `px*.PK2` were never touched.
 
 
