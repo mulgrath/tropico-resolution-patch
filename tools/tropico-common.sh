@@ -1,6 +1,6 @@
 # Shared helpers for the Tropico patch scripts. Sourced, never run.
 #
-# Kept in one place because tropico-install.sh, tropico-setmode.sh and
+# Kept in one place because install.sh, tropico-setmode.sh and
 # tropico-gog.sh must agree on three things exactly: where the game is, what
 # mode the display is in, and which modes are legal to patch into slot 4. Three
 # copies of that logic is three chances to drift.
@@ -16,58 +16,53 @@
 # The Steam library list is not guessable -- libraries live on whatever drives someone
 # added -- so it is read from libraryfolders.vdf rather than hardcoded. Heroic, Lutris
 # and flatpak Steam are included because those are where people who did not buy on
-# Steam actually have it.
-_tropico_candidates() {
-  for c in "/mnt/Windows/GOG Games/Tropico/app" \
-           "$HOME/GOG Games/Tropico/app" \
-           "$HOME/Games/gog/Tropico/app" \
-           "$HOME/Games/Heroic/Tropico/app" \
-           "$HOME/Games/tropico/drive_c/GOG Games/Tropico/app" \
-           "$HOME/.steam/debian-installation/steamapps/common/Tropico" \
-           "$HOME/.steam/steam/steamapps/common/Tropico" \
-           "$HOME/.local/share/Steam/steamapps/common/Tropico" \
-           "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/Tropico"
-  do
-    [ -f "$c/Tropico.EXE" ] && echo "$c"
-  done
 
-  # Steam libraries on other drives. The "path" lines in libraryfolders.vdf name each
-  # library root; the game sits under steamapps/common/Tropico inside it.
-  for v in "$HOME/.steam/debian-installation/steamapps/libraryfolders.vdf" \
-           "$HOME/.steam/steam/steamapps/libraryfolders.vdf" \
-           "$HOME/.local/share/Steam/steamapps/libraryfolders.vdf" \
-           "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/libraryfolders.vdf"
-  do
-    [ -f "$v" ] || continue
-    sed -n 's/.*"path"[^"]*"\(.*\)".*/\1/p' "$v" | while IFS= read -r lib; do
-      d="$lib/steamapps/common/Tropico"
-      [ -f "$d/Tropico.EXE" ] && echo "$d"
-    done
-  done
+# ---------------------------------------------------------------- where we are
+# THE GAME FOLDER IS THE FOLDER WE ARE IN. There is no search.
+#
+# Until 2026-08-23 this file carried ~40 lines that hunted for installs: a dozen
+# candidate paths for GOG, Heroic, Lutris and flatpak Steam, plus parsing
+# libraryfolders.vdf for Steam libraries on other drives, plus a loop that ran the
+# installer once per install found. All of it is gone.
+#
+# The release now extracts INTO the game folder, exactly like the Windows package, so
+# the answer is the directory the script is sitting in. That also makes uninstall a
+# local affair: a script can only make claims about the folder it can see, which is a
+# better property than the one the search was there to provide.
+#
+# Someone owning both the GOG and Steam editions extracts the archive twice. That case
+# is rare enough -- the only known instance is this project's author, who bought the
+# second copy to develop against -- that spending design on it costs more than it saves.
+tropico_game_dir() {
+  _d="${1:-$PWD}"
+  [ -f "$_d/Tropico.EXE" ] || return 1
+  [ -d "$_d/data" ]        || return 1
+  echo "$_d"
 }
 
-# The candidate list overlaps itself on purpose -- ~/.steam/steam is usually a symlink
-# to the real Steam root, and a library listed in libraryfolders.vdf is often one we
-# already named. Resolve each path and drop repeats, or a machine with one Steam copy
-# gets patched three times and told so three times.
-tropico_find_all() {
-  _tropico_candidates | while IFS= read -r d; do readlink -f "$d"; done | awk '!seen[$0]++'
+# The message every entry point gives when it is not where it needs to be. One place,
+# so install, uninstall and the launcher cannot drift into describing it differently.
+tropico_wrong_folder_msg() {
+  cat >&2 <<'MSG'
+!! This is not a Tropico folder.
+
+   The patch has to sit in the same folder as Tropico.EXE -- extract the archive
+   THERE and run it from THERE. It looks like this when it is right:
+
+       Tropico/
+         Tropico.EXE
+         data/
+         install.sh        <- you are here
+         uninstall.sh
+         play
+         tropico-patch/
+
+   Common causes: the archive was extracted to Downloads and the files copied in
+   by hand, or it was extracted one level up. GOG installs usually keep the game
+   in an "app" subfolder -- Tropico.EXE has to be beside these scripts.
+MSG
 }
 
-tropico_find_dir() {
-  if [ -n "${TROPICO_DIR:-}" ]; then
-    [ -f "$TROPICO_DIR/Tropico.EXE" ] && echo "$TROPICO_DIR"
-    return
-  fi
-  # One install: the first tropico_find_all reports. Kept for the launcher and the
-  # mode switcher, which act on a single install by design.
-  tropico_find_all | head -1
-}
-
-# ------------------------------------------------------------------- the display
-# The mode of the primary output, as WxH. Wine measures ONLY the primary
-# (FINDINGS 18), so the primary is the only monitor whose mode the game can be
-# in -- which makes it the right thing to generate art for.
 tropico_primary_mode() {
   command -v xrandr >/dev/null 2>&1 || return 1
   xrandr --query 2>/dev/null | awk '

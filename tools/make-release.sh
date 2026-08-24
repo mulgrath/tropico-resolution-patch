@@ -34,23 +34,30 @@ if [ "$ROOT/proxy/tropico_fix.c" -nt "$ROOT/known-good/binkw32.dll" ]; then
 fi
 
 rm -rf "$OUT/$NAME" "$OUT/$NAME.tar.gz" "$OUT/$NAME.tar.gz.sha256"
-mkdir -p "$OUT/$NAME/lib" "$OUT/$NAME/source"
+mkdir -p "$OUT/$NAME/tropico-patch" "$OUT/$NAME/source"
 
-# LAYOUT. What a player runs sits at the top; the machinery is out of the way in lib/.
+# LAYOUT. THE ARCHIVE IS EXTRACTED INTO THE GAME FOLDER, so every filename here has to
+# be one the game does not already use. Only the three entry points and the README sit
+# at the top; everything else goes in tropico-patch/.
+#
+# That is not tidiness, it is the difference between working and destroying the game:
+# a top-level binkw32.dll would overwrite the real Bink AT EXTRACTION TIME, before any
+# script exists to guard it. (Linux filenames are case-sensitive so readme.txt is safe
+# here, but the Windows package shares this layout and there it is not.)
+#
 # A release is not a checkout: FINDINGS/ROADMAP/TESTING and the experiment scripts are
 # development history, and putting them in front of someone who just wants the game at
 # 1080p is noise. They stay in the repository, which the README points at.
 #
-#   install.sh  uninstall.sh  play  README.md  LICENSE
-#   lib/tools/        the scripts that do the work
-#   lib/known-good/   the proxy and the ini template
+#   install.sh  uninstall.sh  play  README.md
+#   tropico-patch/    the proxy, the ini template, the launcher and its helpers
 #   source/           the C the shipped DLL is built from, and its build script
 for w in install.sh uninstall.sh play; do
   cp "$ROOT/packaging/$w" "$OUT/$NAME/$w"
   chmod +x "$OUT/$NAME/$w"
 done
 cp "$ROOT/packaging/README.md" "$OUT/$NAME/README.md"
-cp "$ROOT/LICENSE"             "$OUT/$NAME/LICENSE"
+cp "$ROOT/LICENSE"             "$OUT/$NAME/tropico-patch/LICENSE"
 
 # ---------------------------------------------------------------- what ships
 # AN EXPLICIT LIST, not a glob over tools/. The repository holds twenty-odd
@@ -68,7 +75,6 @@ cp "$ROOT/LICENSE"             "$OUT/$NAME/LICENSE"
 # Every entry below earns its place:
 #   tropico              the launcher: picks the monitor, sets the mode, restores
 #   tropico-common.sh    discovery, mode validation, the ini writer
-#   tropico-install.sh   install / uninstall
 #   tropico-setmode.sh   pin a resolution
 #   tropico-launchpoint.py   which monitor the game was launched from. NOT optional:
 #                            without it the launcher cannot choose a monitor at all
@@ -78,7 +84,6 @@ cp "$ROOT/LICENSE"             "$OUT/$NAME/LICENSE"
 #   known-good/tropico-fix.ini  the config template
 SHIP="tools/tropico
 tools/tropico-common.sh
-tools/tropico-install.sh
 tools/tropico-setmode.sh
 tools/tropico-launchpoint.py
 tools/tropico-fullscreen.py
@@ -97,12 +102,15 @@ printf '%s\n' "$SHIP" | while IFS= read -r f; do
 done || exit 1
 
 printf '%s\n' "$SHIP" | while IFS= read -r f; do
-  mkdir -p "$OUT/$NAME/lib/$(dirname "$f")"
-  cp "$f" "$OUT/$NAME/lib/$f"
+  # EVERYTHING LANDS IN tropico-patch/, flat. The archive extracts into the game
+  # folder, so nothing of ours may sit at the top level except the three entry
+  # points and the README -- and none of those can collide with a game file.
+  mkdir -p "$OUT/$NAME/tropico-patch"
+  cp "$f" "$OUT/$NAME/tropico-patch/$(basename "$f")"
 done
 # The built proxy comes from the working tree, not the index: the committed copy can
 # lag, and a release must carry the binary that matches the source beside it.
-cp "$ROOT/known-good/binkw32.dll" "$OUT/$NAME/lib/known-good/binkw32.dll"
+cp "$ROOT/known-good/binkw32.dll" "$OUT/$NAME/tropico-patch/binkw32.dll"
 
 # Source of the one binary we ship, so it can be rebuilt and compared.
 #

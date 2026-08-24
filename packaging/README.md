@@ -62,7 +62,7 @@ want to play on, rather than moving it there afterwards.
 **Changing resolution later:** you usually do not have to. The patch reads the display
 every time it starts and builds artwork to match, so plugging in a different monitor or
 changing your resolution is handled by launching the game. To pin a resolution anyway,
-`lib/tools/tropico-setmode.sh 2560 1440`; `--list` shows what
+`./tropico-patch/tropico-setmode.sh 2560 1440`; `--list` shows what
 is ready to switch to.
 
 ---
@@ -75,4 +75,4 @@ Everything is reversible with `./uninstall.sh`.
 
 MIT licensed — see `LICENSE`. Tropico belongs to PopTop Software and Kalypso Media; no
 game code, art or data is included here. The full reverse-engineering notes, the source
-for everything in `lib/`, and the issue tracker are in the project repository.
+for everything in `tropico-patch/`, and the issue tracker are in the project repository.

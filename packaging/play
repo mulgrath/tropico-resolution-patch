@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Play the GOG version. (The Steam version is started from Steam's Play button: its
-# copy protection only unlocks for a process Steam itself started.)
+# Play the GOG version.
+#
+# The Steam version is started from Steam's Play button instead: its copy protection
+# only unlocks for a process Steam itself started, and the patch does its own monitor
+# selection there, so nothing is missing.
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
-exec "$HERE/lib/tools/tropico" "$@"
+exec "$HERE/tropico-patch/tropico" "$@"

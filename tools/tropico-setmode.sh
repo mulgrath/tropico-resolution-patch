@@ -17,8 +17,9 @@ set -eu
 SELF="$(cd "$(dirname "$0")" && pwd)"
 . "$SELF/tropico-common.sh"
 
-GAMEDIR="$(tropico_find_dir)"
-[ -n "$GAMEDIR" ] || { echo "!! could not find a Tropico install. Set TROPICO_DIR." >&2; exit 1; }
+# Our parent is the game folder -- this lives in tropico-patch/.
+GAMEDIR="$(cd "$SELF/.." && pwd)"
+[ -f "$GAMEDIR/Tropico.EXE" ] || { tropico_wrong_folder_msg; exit 1; }
 INI="$GAMEDIR/tropico-fix.ini"
 
 if [ "${1:-}" = "--list" ]; then

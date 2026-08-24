@@ -68,9 +68,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-GAMEDIR="$(tropico_find_dir)"
-if [ -z "$GAMEDIR" ]; then
-  fail "Could not find Tropico. Set TROPICO_DIR to the folder holding Tropico.EXE."
+# The game folder is the one ABOVE us: this script lives in tropico-patch/, which the
+# archive extracts into the game folder beside Tropico.EXE. No searching.
+GAMEDIR="$(cd "$SELF/.." && pwd)"
+if [ ! -f "$GAMEDIR/Tropico.EXE" ]; then
+  tropico_wrong_folder_msg
+  exit 1
 fi
 LOGF="$GAMEDIR/tropico-launcher.log"
 : > "$LOGF" 2>/dev/null || LOGF=""
