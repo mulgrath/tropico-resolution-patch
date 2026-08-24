@@ -136,10 +136,25 @@ tropico_set_ini_mode() {
   _ini="$_gd/tropico-fix.ini"
   [ -f "$_ini" ] || return 1
   _tmp="$(mktemp)"
+  # Drop any existing Width=/Height= -- commented out or not -- and write a fresh
+  # pair directly under [Resolution].
+  #
+  # The previous version matched /^Width=/ only, which was fine while the template
+  # shipped the keys uncommented and became a silent no-op the moment it did not:
+  # it rewrote nothing, changed nothing, and STILL RETURNED SUCCESS. That is the
+  # step-6 bug exactly -- a 1080p game inside a 1440p desktop, with nothing in any
+  # log to say the mode had never been written.
   awk -v w="$_w" -v h="$_h" '
-    /^Width=/  { print "Width=" w;  next }
-    /^Height=/ { print "Height=" h; next }
-    { print }' "$_ini" > "$_tmp"
+    /^[[:space:]]*[;#]?[[:space:]]*Width=/  { next }
+    /^[[:space:]]*[;#]?[[:space:]]*Height=/ { next }
+    { print }
+    /^\[Resolution\]/ { print "Width=" w; print "Height=" h }' "$_ini" > "$_tmp"
+  # PROVE IT, in the bytes. This function failing quietly is invisible until the
+  # game is already on screen at the wrong size, so do not trust the rewrite --
+  # check it. A missing [Resolution] section lands here, and should.
+  if ! grep -q "^Width=$_w\$" "$_tmp" || ! grep -q "^Height=$_h\$" "$_tmp"; then
+    rm -f "$_tmp"; return 1
+  fi
   cat "$_tmp" > "$_ini"
   rm -f "$_tmp"
 }
