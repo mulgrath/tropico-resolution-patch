@@ -7268,3 +7268,66 @@ The runtime-generation design assumed "the proxy runs before the game reads any 
 named the `GetDeviceCaps` hook as evidence. That was true of the GOG build and false of
 the Steam one, and no oracle could have caught it — every byte was right. It took
 running the game on the edition with the different startup path.
+
+## 99. Reading the display from DllMain works; changing it does not
+
+FINDINGS 98 established that the art has to be built before the game indexes `data\`,
+which on the Steam edition means before the executable's entry point — so from
+`DllMain`. The obvious next move was to run the whole monitor-and-mode decision there,
+and it produced a worse bug than the one it fixed: intro audio over a black screen.
+
+The log separates the two halves cleanly. The reading half worked:
+
+```
+  [display] launched from DP-3 (pointer at 3142,702 in screen space)
+[+] [display] running at DP-3's own mode 2560x1440
+[+] artgen: generated 267 assets for 2560x1440 (font scale 1.333333, box), 1 skipped
+```
+
+That is `xrandr` shelled out to via `start.exe`, a pointer position resolved against the
+output geometry, and 267 assets written — all from `DllMain`, under the loader lock, in
+1.3 s, with no pack-file error afterwards. **So spawning a process and doing heavy file
+I/O from `DllMain` under Wine is fine in practice**, contrary to the first diagnosis
+here, which blamed the loader lock for all of it and was too broad by half.
+
+The writing half did not work:
+
+```
+[+] [display] primary HDMI-A-5 -> DP-3; Wine now measures 1920x1080
+```
+
+`xrandr --output DP-3 --primary` ran and the host primary really did move — verified
+independently. What never happened is **Wine noticing**. The six-second `SM_CXSCREEN`
+poll expired still reporting the old primary's size, so the game was handed a 2560x1440
+mode for a desktop it believed was 1920x1080, and a mode larger than its desktop renders
+nothing at all (FINDINGS 75). It looks exactly like a crash and is not one.
+
+A display change is noticed by work the process cannot do while it holds the loader
+lock: the heartbeat thread cannot run its `DLL_THREAD_ATTACH` until `DllMain` returns,
+and nothing services the change notification meanwhile. **The poll cannot succeed there
+however long it waits.** It is not a timeout that wants raising, and raising it was the
+tempting wrong move.
+
+So the split is on exactly that line, and the line is read-versus-write, not
+xrandr-versus-Win32:
+
+| | runs in | does |
+|---|---|---|
+| `choose_monitor()` | `DllMain` | reads xrandr, the pointer, the ini; records what would need changing |
+| `apply_monitor()` | patch pass | makes the change and waits for Wine to agree |
+
+`DllMain` then generates art for the launch monitor's own mode **and only that mode**.
+That is the one answer independent of what Wine currently measures, and with a switch
+pending Wine's measurement is stale there by construction. The ini and the mode picker
+both validate against `SM_CXSCREEN`, so they keep their old timing.
+
+Verified on Steam, 2560x1440 on a 1920x1080 primary: `Wine now measures 2560x1440`,
+`slot 4 -> 2560x1440`, 17 patches applied, 0 failed, no pack-file error, primary
+restored on exit.
+
+**One path still applies the monitor from inside `DllMain`:** the unwrapped GOG build
+patches immediately rather than deferring to `GetDeviceCaps`, and reaches
+`apply_monitor()` while still holding the lock. It is only reachable by starting the
+game *without* `tools/tropico`, and the launcher exists because it does this job
+properly — before the process exists, with a fresh wineserver behind it. Pre-existing,
+not introduced by the split.
