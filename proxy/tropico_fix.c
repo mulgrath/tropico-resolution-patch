@@ -614,6 +614,19 @@ static int decide_mode(mode_t *out)
         snprintf(ip3, sizeof ip3, "%s\\tropico-fix.ini", g_dir);
         /* Read before the picker runs -- it is the picker's behaviour this changes. */
         g_artgen_enabled = GetPrivateProfileIntA("Art", "Generate", 1, ip3);
+        /* THE MONITOR FIRST, AND THIS ORDERING IS THE WHOLE POINT.
+         *
+         * launch_override() does not choose anything -- it only reports g_launch_w/h,
+         * which choose_and_apply_monitor() sets. Moving the decision to DllMain without
+         * moving this left those at zero, so the launch monitor was invisible and the
+         * ini's mode won: measured on Steam, a 2560x1440 monitor ran at 1920x1080 with
+         * art generated to match, and the "mode is SMALLER than the screen" warning
+         * fired exactly as it was written to.
+         *
+         * It also has to precede the picker for the original reason: the picker
+         * validates a mode against the desktop Wine measures, which is the primary, so
+         * a 1440p request against a 1080p primary is rejected before the switch. */
+        choose_and_apply_monitor();
         check_ini_fits();
         g_mode_ok = (launch_override(&g_decided_mode)
                      || ini_override(&g_decided_mode)
@@ -884,7 +897,9 @@ static void apply_patches(void)
      * is decided too late: with a 1080p primary a 1440p request is already rejected
      * and fallen back. This runs first, picks the monitor from where the player
      * launched, makes it primary, and waits for Wine to see it. */
-    choose_and_apply_monitor();
+    /* choose_and_apply_monitor() used to be called here. It now runs inside
+     * decide_mode(), which runs from DllMain -- before the game's entry point, so the
+     * art can be built before data\ is indexed (FINDINGS 98). */
 
     /* --- 4. slot 4, in BOTH tables ----------------------------------------- *
      * FINDINGS s8: patching the data table alone is not enough. A parallel
@@ -1922,6 +1937,13 @@ static int xrandr_outputs(xout_t *out, int cap)
  * the whole step. */
 static void choose_and_apply_monitor(void)
 {
+    /* ONCE. This changes which monitor is primary and waits for Wine to notice, so a
+     * second call is neither free nor harmless. decide_mode() calls it; the old call
+     * site in apply_patches is gone. */
+    static int done;
+    if (done) return;
+    done = 1;
+
     xout_t outs[8];
     int n, i, chosen = -1, prim = -1;
     char ip[MAX_PATH], want[64], want2[64], script[MAX_PATH * 4], udir[MAX_PATH];

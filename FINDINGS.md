@@ -7235,6 +7235,33 @@ load reports `already holds the ... set -- nothing to do`, so the cache still wo
 module, which there is the host, so the `.imm` names come only from the archives'
 `.WIN` records. In the game it is `Tropico.EXE` and the count is 267.)
 
+### The follow-on bug, and what it says about moving code
+
+Moving the decision to `DllMain` produced a second failure immediately, and it is worth
+recording because it is the classic shape of a partial move.
+
+`launch_override()` does not choose anything. It reports `g_launch_w/h`, which
+`choose_and_apply_monitor()` sets -- and that was still being called from
+`apply_patches`. So at `DllMain` those were zero, the launch monitor was invisible, and
+the ini's mode won: on Steam a 2560x1440 monitor ran at **1920x1080**, with art
+correctly generated to match the wrong answer. Confirmed by the owner in the game's own
+F2 video menu.
+
+The `[*] the mode is SMALLER than the screen it is running in` line, added when the
+launcher had the same disagreement, fired exactly as intended -- one line in a log
+turning "it looks fine" into a specific, checkable claim. It is the only reason this was
+caught before shipping rather than after.
+
+`choose_and_apply_monitor()` now runs inside `decide_mode()`, once, before
+`launch_override()` -- which also preserves the ordering it already needed for its own
+reason: the picker validates against the desktop Wine measures, so a 1440p request is
+rejected against a 1080p primary unless the switch happens first.
+
+**Open for the native-Windows test (step 8):** this puts `ChangeDisplaySettingsEx` in
+`DllMain`, under the loader lock. It works under Wine and Proton. Windows is stricter
+about what may be called there, and this is now the heaviest thing the proxy does before
+the entry point.
+
 ### What this says about the design
 
 The runtime-generation design assumed "the proxy runs before the game reads any art" and
