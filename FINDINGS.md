@@ -7176,3 +7176,68 @@ launch at a new resolution shows a second of black where it used to show twenty 
 of terminal output. It happens before the intro and before the menu, so it should read as
 loading — but it is a real change, and if it reads as a hang instead, the launcher is the
 place to say so.
+
+## 98. The art has to exist before the game starts, and on Steam it did not
+
+The Steam edition, first launch at a new resolution: the intro played correctly at
+2560x1440 and the menu then died with
+
+```
+Error opening pack file item 'setuplb.i16'
+```
+
+`setuplb.i16` was on disk, 11,559 bytes, valid container magic, listed in
+`ARTSET-MANIFEST.txt`, and **byte-identical to the copy working on the GOG install**.
+Launching a second time worked. Nothing about the file was wrong; only its timing.
+
+### The mechanism
+
+The two editions patch at different moments, and until now generation inherited that.
+
+| | when the proxy runs | |
+|---|---|---|
+| GOG | `DllMain` | before the executable's entry point |
+| Steam | first `GetDeviceCaps` | during video setup, well after startup |
+
+SteamStub keeps `.text` encrypted until the entry wrapper decrypts it, so the proxy has
+no choice but to defer *patching* — scanning earlier reads ciphertext (§ the file header).
+Generation sat inside `apply_patches` and was carried along with it. By the time the art
+appeared, the game had already indexed `data\`, and a file that is not in the index
+cannot be opened however correct it is.
+
+The intro is Bink and does not go through that lookup, which is why it played fine and
+made the failure look like a menu bug rather than an ordering one.
+
+### The fix
+
+**Nothing in deciding the mode needs the game's code to be readable.** The monitor, the
+ini and the display's mode list are all outside the executable. Only patching needs
+decrypted `.text`.
+
+So the two are separated: `decide_mode()` and `ensure_art_for_mode()` now run from
+`DllMain` on **both** editions, and only patching still defers. `decide_mode()` caches,
+because `launch_override` can change which monitor is primary and doing that twice is
+not free; `apply_patches` reuses the answer.
+
+Verified on the deferred path with the DLL loaded by a bare host process — the same
+shape as Steam, since `.text` is unreadable there too:
+
+```
+  [artgen] data\ does not match 1920x1080 -- generating from your archives
+  [artgen] 233 assets in 1183 ms
+[*] .text not readable at load time (DRM-wrapped?) -- deferring to GetDeviceCaps
+```
+
+Generation now finishes before the line that says patching is being put off. A second
+load reports `already holds the ... set -- nothing to do`, so the cache still works.
+
+(233 rather than 267 in that harness is correct: `ag_exe_path` returns the running
+module, which there is the host, so the `.imm` names come only from the archives'
+`.WIN` records. In the game it is `Tropico.EXE` and the count is 267.)
+
+### What this says about the design
+
+The runtime-generation design assumed "the proxy runs before the game reads any art" and
+named the `GetDeviceCaps` hook as evidence. That was true of the GOG build and false of
+the Steam one, and no oracle could have caught it — every byte was right. It took
+running the game on the edition with the different startup path.
