@@ -714,6 +714,24 @@ static void apply_patches(void)
         return;
     }
     DWORD table_va = (DWORD)(ULONG_PTR)tbl;
+
+    /* --- 0.5 the monitor, BEFORE ANYTHING READS THE DISPLAY (s90/s99) -------
+     *
+     * The choice itself was made in DllMain, so the art could be built against it
+     * before the game indexed data\ (FINDINGS 98). Only the CHANGE waited for
+     * here, because a display change made from DllMain is never noticed by the
+     * process that made it (FINDINGS 99).
+     *
+     * It goes at the TOP of the patch pass, not next to the mode picker where it
+     * used to sit. Three things below read SM_CXSCREEN -- the "desktop as Wine
+     * sees it" line, the configured-mode-fits check, and the picker -- and every
+     * one of them wants the display the game will actually run on, not the one the
+     * desktop was idling in. With the switch further down, the fits check could
+     * reject a perfectly good 1440p mode for not fitting a 1080p primary that was
+     * about to stop being the primary. */
+    choose_monitor();
+    apply_monitor();
+
     /* What Wine believes the screen is, logged UNCONDITIONALLY. Everything the
      * patch computes is relative to this, and when it is stale -- a wineserver that
      * outlived an xrandr change caches the old geometry into the prefix -- the
@@ -832,18 +850,6 @@ static void apply_patches(void)
      * Only when we are refusing hardware. With Enable=1 the field must be left
      * alone, or the player's choice would be silently overridden. */
     if (!hw_enable) { if (patch_block_hardware()) ok++; else fail++; }
-
-    /* --- 3.5 the monitor, BEFORE the mode is chosen (s90) -------------------
-     *
-     * Ordering is the whole point. The picker below validates a mode against the
-     * desktop WINE MEASURES -- the primary monitor -- so anything decided after it
-     * is decided too late: with a 1080p primary a 1440p request is already rejected
-     * and fallen back. This runs first, picks the monitor from where the player
-     * launched, makes it primary, and waits for Wine to see it. */
-    /* The choice was made in DllMain so the art could be built against it before
-     * the game indexed data\. Only the change to the display waited for here. */
-    choose_monitor();
-    apply_monitor();
 
     /* --- 4. slot 4, in BOTH tables ----------------------------------------- *
      * FINDINGS s8: patching the data table alone is not enough. A parallel
@@ -5834,12 +5840,39 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     int force_defer = (defer[0] == '1');
     if (force_defer) logf_("[*] TROPICO_FIX_DEFER=1 -- forcing the deferred path");
 
-    if (!force_defer && locate_sections()
+    /* A PENDING DISPLAY CHANGE FORCES THE DEFERRED PATH -- even on an unwrapped
+     * build whose .text could be patched this instant.
+     *
+     * The unwrapped GOG build patches from here, inside DllMain, which is fine
+     * until something has to change the display: apply_monitor() cannot work
+     * there (FINDINGS 99), and neither can the mode validation that follows it,
+     * because it would be measuring the monitor we are about to stop using.
+     *
+     * Started through tools/tropico this never arises -- the launcher chose the
+     * monitor and made it primary before the process existed, so nothing is ever
+     * pending and this branch is unreachable. It exists for the launches that
+     * bypass the launcher: Lutris, Heroic, a bare `wine Tropico.EXE`. Those took
+     * the broken path until now.
+     *
+     * The cost is that this path starts depending on the GetDeviceCaps hook
+     * firing, which is measured on Steam but not on GOG. It only applies where
+     * the alternative is a black screen, so it is the better of the two. */
+    if (g_mon_pending)
+        logf_("[*] a primary-monitor change is pending -- deferring the patch pass so it"
+              " runs outside DllMain, where the display can actually change (FINDINGS 99)");
+
+    if (!force_defer && !g_mon_pending && locate_sections()
         && find_unique(CHAIN_SIG, sizeof CHAIN_SIG, g_text, g_textlen, "chain-probe")) {
         logf_("[*] .text is readable at load time (unwrapped build) -- patching now");
         apply_patches();
     } else {
-        logf_("[*] .text not readable at load time (DRM-wrapped?) -- deferring to GetDeviceCaps");
+        /* Say which reason, because they are different faults. On the GOG build
+         * .text is perfectly readable and the defer is ours, by choice. */
+        if (g_mon_pending)
+            logf_("[*] deferring to GetDeviceCaps because of the pending monitor change"
+                  " above -- .text readability is not the reason here");
+        else
+            logf_("[*] .text not readable at load time (DRM-wrapped?) -- deferring to GetDeviceCaps");
         if (!install_iat_hook())
             logf_("[x] could not hook GetDeviceCaps -- NOTHING WILL BE PATCHED");
     }
