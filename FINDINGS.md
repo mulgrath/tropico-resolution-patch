@@ -7103,3 +7103,76 @@ Step 6: the installer still stages `artsets\` per monitor and the picker still c
 both are scheduled for deletion. Nothing has been removed yet, deliberately — that keeps
 this step a pure addition, and keeps the Linux path exactly as it was for the run that
 verifies it.
+
+## 97. Step 6: the staging subsystem is deleted, and the installer stops guessing
+
+The measurement that justified this arrived from a real run rather than a bench. A 4K
+launch on Linux took **~20 s**, and both logs said exactly where it went:
+
+```
+tropico-launcher.log:  == switching artwork to 3840x2160     <- Python, then two 132 MB copies
+tropico-fix.log:       [artgen] data\ already holds the 3840x2160 set -- nothing to do
+```
+
+The C generator did nothing, correctly — the launcher had already produced the set the
+slow way before the game started. The same work, in the proxy, measured at that mode:
+**1.087 s**, written once, straight into `data\`.
+
+| | before | after |
+|---|---|---|
+| first launch at a new mode | ~20 s | **1.09 s** |
+| `install.sh` | 23.5 s | **0.063 s** |
+| `artsets\` on disk | **226 MB** (35 + 60 + 132) | 0 |
+| installer's interpreter dependency | python3 | **none** |
+
+### What went
+
+**From the proxy:** `staged_dir`, `active_artset_is`, `mode_is_staged`,
+`activate_artset`, `g_staged_fallback`, and the two-pass picker they fed. All of it
+existed to answer one question — *does art exist at this size?* — whose answer used to
+depend on what an installer had guessed about a display it could not see. The generator
+makes the answer unconditionally yes, so the machinery for asking has nothing to do.
+
+Three consequences worth naming, because each removed a real defect rather than just
+code:
+
+* **The stock-art caps are gone from the picker** when generation is on. They were a
+  rough proxy for "does art exist at this size" and they rejected 2560x1440 outright
+  (`h > 1200`). They are preserved verbatim under `[Art] Generate=0`, where they are once
+  again the truth.
+* **The launch-monitor block no longer asks whether art is staged.** It used to adopt a
+  monitor's own mode *only if* someone had staged art for it — which is precisely why a
+  monitor nobody predicted got a different monitor's resolution.
+* **The fallback path and the normal path became the same path.** §85's art-switch
+  existed because a fallback mode was guaranteed not to match the staged art. There is
+  nothing to switch when the art is built after the mode is chosen.
+
+**From the tools:** `tropico-setmode.sh` shrank from an art stager to an ini writer that
+clears the marker; `tropico-set-resolution.sh` and `packaging/set-resolution.sh` are
+deleted; `tools/tropico` and `tropico-gog.sh` lost their art-switch blocks; the installer
+lost per-monitor staging, the mode *list* it staged for, the Python that generated the
+stock-class menu assets, and its `python3` dependency check.
+
+### What moved rather than went
+
+The seven `.i06`-only menu assets (§69.5) still have to be synthesised into i08/i10/i12,
+or the menu dies with `Error opening pack file item 'setuplb.i16'` at any non-stock
+resolution. That moved **into the generator**, folded into the same pass so the 1 GB
+archive walk happens once, and keyed on its own manifest because it is mode-independent.
+Verified: all **21 byte-identical** to the Python the installer used to run.
+
+### Verification after the deletions
+
+Every oracle re-run against the reduced code: harvested names 280/280, resolved listing
+268/268, codec 5,164 sprites identical at the 1440p font scale, and a full generated set
+still 267/267 byte-identical to `tools/tropico-artset.py`. Uninstall and reinstall of
+both editions clean; `--list` and the mode switch work; the proxy builds and the build is
+still reproducible.
+
+### The one behavioural change a user can see
+
+The second now lands *inside* the game's startup rather than in front of it. A first
+launch at a new resolution shows a second of black where it used to show twenty seconds
+of terminal output. It happens before the intro and before the menu, so it should read as
+loading — but it is a real change, and if it reads as a hang instead, the launcher is the
+place to say so.

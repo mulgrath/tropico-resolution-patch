@@ -149,13 +149,15 @@ if ! tropico_validate_mode "${WANT%x*}" "${WANT#*x}" 2>/dev/null; then
   fail "$WANT cannot be used by this patch: $(tropico_validate_mode "${WANT%x*}" "${WANT#*x}" 2>&1 >/dev/null || true)"
 fi
 
-# Match the art set to the size the game is about to run at. Staged sets make this
-# a fraction of a second; an unstaged one is generated once and then staged.
-HAVE="$(cat "$GAMEDIR/data/ARTSET-MODE.txt" 2>/dev/null || true)"
-if [ -n "$HAVE" ] && [ "$WANT" != "$HAVE" ]; then
-  say "== switching artwork to $WANT"
-  "$SELF/tropico-setmode.sh" "${WANT%x*}" "${WANT#*x}" >/dev/null
-fi
+# THE ART IS NO LONGER THIS SCRIPT'S JOB. It used to run tropico-setmode.sh here,
+# which generated the set in Python (~13 s) into artsets\<WxH>\ and then copied it
+# into data/ -- 132 MB written twice at 4K, before the game had even started.
+#
+# The proxy now generates it in C once it has measured the display for real, in about
+# a second, straight into data/. Measured at 3840x2160: 20 s of launcher became 1.09 s
+# in-process (FINDINGS 97). So the first launch at a new resolution spends a second
+# inside the game rather than twenty in front of it, and this script is left with the
+# job only it can do: choosing the monitor and putting the primary back.
 
 case "$GAMEDIR" in
   *steamapps*) TAG="steam" ;;

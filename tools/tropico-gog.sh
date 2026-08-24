@@ -101,26 +101,11 @@ echo "== prefix : $WINEPREFIX"
 #
 # Art is authored per resolution and the engine will not scale it (FINDINGS
 # 11/50/60/61), so running at a mode whose art is not installed gives a correct
-# world and a broken HUD -- the section 12 symptom, which is expensive to
-# recognise from a screenshot and trivial to prevent here. Staged sets make the
-# swap a 0.2 s copy, so it is done silently; an unstaged one would cost 30 s, so
-# that is offered rather than taken.
-if [ -z "${TROPICO_NOSWAP:-}" ] && [ -f "$GAMEDIR/data/ARTSET-MODE.txt" ]; then
-  . "$(cd "$(dirname "$0")" && pwd)/tropico-common.sh"
-  WANT="$(tropico_primary_mode || true)"
-  HAVE="$(cat "$GAMEDIR/data/ARTSET-MODE.txt" 2>/dev/null || true)"
-  if [ -n "$WANT" ] && [ -n "$HAVE" ] && [ "$WANT" != "$HAVE" ]; then
-    if [ -d "$GAMEDIR/artsets/$WANT" ]; then
-      echo "== display is $WANT but the $HAVE art is installed -- swapping =="
-      "$(cd "$(dirname "$0")" && pwd)/tropico-setmode.sh" "${WANT%x*}" "${WANT#*x}"
-    else
-      echo "!! display is $WANT but the installed art is for $HAVE, and $WANT is not staged." >&2
-      echo "   The world will render correctly and the HUD will not. To fix (about 30 s):" >&2
-      echo "       $(dirname "$0")/tropico-setmode.sh ${WANT%x*} ${WANT#*x}" >&2
-      echo "   Set TROPICO_NOSWAP=1 to silence this." >&2
-    fi
-  fi
-fi
+
+# THE ART SWAP THAT USED TO LIVE HERE IS GONE. It compared the display against
+# data/ARTSET-MODE.txt and either copied a staged set in or printed a 30 s warning.
+# The proxy now measures the display itself and generates matching art before the menu
+# opens, so there is nothing to compare and nothing to warn about (FINDINGS 96/97).
 
 if [ -n "${TROPICO_NODESK:-}" ]; then
   # No Wine virtual desktop: the game talks to the real display. Measured 2026-08-19 --

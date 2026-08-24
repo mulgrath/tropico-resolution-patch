@@ -983,6 +983,61 @@ int ag_generate_set(const char *gamedir, int to_w, int to_h, double font_scale,
         free(o);
     }
     if (man) fclose(man);
+
+    /* THE STOCK-CLASS MENU ASSETS (FINDINGS 69.5). Seven assets exist ONLY as .i06,
+     * because PopTop authored the menu, the credits and the folder screens at 640x480
+     * and nothing else. Without them the menu dies with
+     *
+     *     Error opening pack file item 'setuplb.i16'
+     *
+     * the moment it is asked to run at any other resolution. They are MODE-INDEPENDENT
+     * -- fixed sizes for slots 1-3 -- so they are keyed on their own manifest rather
+     * than on the mode marker, and generated once.
+     *
+     * Folded into this pass rather than given their own entry point so the 1 GB
+     * archive walk happens once. The installer used to do this in Python; moving it
+     * here is what lets the installer drop its interpreter entirely. */
+    char statpath[2048];
+    snprintf(statpath, sizeof statpath, "%s/data/ARTSET-STATIC.txt", gamedir);
+    FILE *chk = fopen(statpath, "rb");
+    if (chk) fclose(chk);
+    else {
+        static const struct { const char *ext; int w, h; } SLOTS[3] =
+            { { "i08", 800, 600 }, { "i10", 1024, 768 }, { "i12", 1280, 1024 } };
+        FILE *sm = fopen(statpath, "wb");
+        size_t sok = 0;
+        for (size_t i = 0; i < as.n; i++) {
+            if (!as.from_i06[i]) continue;          /* only the .i06-only seven */
+            const ag_entry *e = as.src[i];
+            if (!blob[e->archive]) continue;
+            char base[160];
+            snprintf(base, sizeof base, "%s", as.name[i]);
+            char *dot = strrchr(base, '.'); if (dot) *dot = 0;
+            for (int k = 0; k < 3; k++) {
+                size_t sl;
+                unsigned char *so = ag_rescale_container(blob[e->archive] + e->offset,
+                                                         e->size, SLOTS[k].w, SLOTS[k].h,
+                                                         640, 480, 1.0, 0, &sl);
+                if (!so) continue;
+                char sp[2048];
+                snprintf(sp, sizeof sp, "%s/data/%s.%s", gamedir, base, SLOTS[k].ext);
+                FILE *sf = fopen(sp, "wb");
+                if (sf) {
+                    if (fwrite(so, 1, sl, sf) == sl && sm)
+                    { fprintf(sm, "%s.%s\n", base, SLOTS[k].ext); sok++; }
+                    fclose(sf);
+                }
+                free(so);
+            }
+        }
+        if (sm) fclose(sm);
+        if (log) {
+            snprintf(msg, sizeof msg, "[+] artgen: %zu stock-class menu asset(s) for"
+                     " slots 1-3 (they exist only at 640x480 -- FINDINGS 69.5)", sok);
+            log(msg);
+        }
+    }
+
     for (int a = 0; a < 4; a++) free(blob[a]);
     ag_assets_free(&as); ag_names_free(&names); ag_index_free(&ix);
 

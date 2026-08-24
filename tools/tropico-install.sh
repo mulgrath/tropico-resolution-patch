@@ -10,11 +10,11 @@
 #   binkw32.dll        the proxy. The original is preserved as binkw32_orig.dll,
 #                      which the proxy forwards 77 of its 81 exports to.
 #   tropico-fix.ini    configuration. Short by design -- every fix is on by default.
-#   artsets/<WxH>/     one UI art set per connected monitor, GENERATED HERE from the
-#                      user's own archives. Switching between them later is a copy.
-#   data/*.i16 + i08/i10/i12 menu art
-#                      the active set, plus the seven 640x480-only menu assets
-#                      synthesised for the stock art classes.
+#
+# The UI art is NOT installed here. The proxy generates it at launch, from the user's
+# own archives, for whatever the display actually turns out to be -- about a second,
+# once per resolution (FINDINGS 96). This installer used to stage a full set per
+# connected monitor: 226 MB of prediction it no longer has to make.
 #
 # Nothing derived from PopTop's art ships with this patch; it is all generated
 # from the archives already on the user's disk.
@@ -54,13 +54,15 @@ if [ "${1:-}" = "--uninstall" ]; then UNINSTALL=1; shift; fi
 # Checked up front and by name. Without this the failure is a Python traceback or a
 # silently empty art set forty seconds in, neither of which tells someone that they
 # are missing a package.
+#
+# python3 USED TO BE ON THIS LIST. It generated the art set, which the proxy now does
+# in C at launch -- so the installer has no interpreter dependency at all, and neither
+# will the Windows package that was going to have to ship one.
 MISSING=""
-command -v python3 >/dev/null 2>&1 || MISSING="$MISSING python3"
 command -v xrandr  >/dev/null 2>&1 || MISSING="$MISSING xrandr (x11-xserver-utils)"
 if [ -n "$MISSING" ]; then
   echo "!! missing:$MISSING"
-  echo "   The installer needs python3 to generate the art set from your own game"
-  echo "   archives, and xrandr to see what modes your monitors are in."
+  echo "   The installer needs xrandr to see what mode your monitor is in."
   exit 1
 fi
 
@@ -183,11 +185,17 @@ fi
 # Default: every distinct mode across the connected outputs. Those are exactly the
 # modes the game can end up in, because Wine measures only the primary monitor
 # (FINDINGS 18) and tropico-gog.sh switches which monitor that is.
-MODES=""
+# ------------------------------------------------------------------- the mode
+# ONE mode, not a list. This used to compute every distinct mode across every connected
+# output so that a set could be staged for each -- prediction machinery that existed
+# only because the art had to exist before the game started. The proxy measures the
+# display itself at launch and builds art to match, so all this has to do is name a
+# sensible starting resolution in the ini. If the user plays on the other monitor, the
+# proxy adopts that monitor's own mode without anyone having predicted it.
+ACTIVE=""
 if [ $# -ge 2 ]; then
   tropico_validate_mode "$1" "$2" || exit 1
-  MODES="${1}x${2}"
-  ACTIVE="$MODES"
+  ACTIVE="${1}x${2}"
 else
   OUTS="$(tropico_outputs || true)"
   if [ -z "$OUTS" ]; then
@@ -195,11 +203,6 @@ else
     echo "   Pass the resolution explicitly, e.g.:  $(basename "$0") 1920 1080" >&2
     exit 1
   fi
-  ACTIVE=""
-  # Negotiate PER OUTPUT. A panel's current mode is not always usable -- 1366x768 is
-  # one of the commonest laptop resolutions and its width is not a multiple of 4, so
-  # it shears (FINDINGS 10). Fall back to the largest mode that panel actually
-  # offers and we can actually use, never to a fixed resolution it may not have.
   OLDIFS="$IFS"; IFS='
 '
   for row in $OUTS; do
@@ -207,20 +210,13 @@ else
     set -- $row
     name="$1"; mode="$2"; prim="$3"
     w="${mode%x*}"; h="${mode#*x}"
-    use=""
-    if [ "$mode" != "-" ] && tropico_validate_mode "$w" "$h" 2>/dev/null; then
-      use="$mode"
-    else
-      # Same removal as tools/tropico: `tropico_best_mode` was to pick the largest
-      # mode this panel actually offers, is defined nowhere, and had its failure
-      # swallowed by `|| true` -- so this has always fallen straight through to the
-      # message below. The reason the mode was rejected is now printed, which the
-      # dead branch used to carry and the surviving one did not.
-      echo "   $name: $mode is not usable ($(tropico_validate_mode "$w" "$h" 2>&1 >/dev/null || true));" \
-           "this monitor will use the game's stock resolutions"
+    if [ "$prim" = "primary" ]; then
+      if [ "$mode" != "-" ] && tropico_validate_mode "$w" "$h" 2>/dev/null; then
+        ACTIVE="$mode"
+      else
+        echo "   $name: $mode is not usable ($(tropico_validate_mode "$w" "$h" 2>&1 >/dev/null || true))" >&2
+      fi
     fi
-    [ -n "$use" ] && MODES="$MODES $use"
-    [ "$prim" = "primary" ] && [ -n "$use" ] && ACTIVE="$use"
     IFS='
 '
   done
@@ -231,9 +227,6 @@ else
     exit 1
   fi
 fi
-MODES="$(echo $MODES | tr ' ' '\n' | sort -u | tr '\n' ' ')"
-[ -n "$(echo $MODES)" ] || { echo "!! no usable mode found" >&2; exit 1; }
-echo "   modes to stage:$MODES"
 echo "   will run at:   $ACTIVE"
 
 [ -f "$PROXY" ]    || { echo "!! missing $PROXY" >&2; exit 1; }
@@ -281,43 +274,31 @@ if [ -f "$GAMEDIR/data/ARTSET-MANIFEST.txt" ] && [ ! -f "$GAMEDIR/data/ARTSET-ST
   echo "   removed $legacy file(s) from the previous single-mode layout"
 fi
 
-# ------------------------------------------------- the mode-independent menu art
-# The seven assets PopTop only authored at 640x480 (FINDINGS 69.5) are missing from
-# EVERY art class, not just the target one. [Menu] Slot picks which class the menu
-# uses -- slots 0-4 map to i06/i08/i10/i12/i16 -- so without these, Slot=3 dies with
-# "Error opening pack file item 'setuplb.i12'" exactly as Slot=4 once died on .i16.
-# These do not change with the mode, so they are generated once and are not part of
-# any swappable set.
-if [ ! -f "$GAMEDIR/data/ARTSET-STATIC.txt" ]; then
-  echo "== generating the menu assets for the stock art classes (slots 1-3) =="
-  TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-  : > "$TMP/static.txt"
-  for spec in "i08 800 600" "i10 1024 768" "i12 1280 1024"; do
-    set -- $spec
-    python3 "$SELF/tropico-artset.py" --data "$GAMEDIR/data" --exe "$GAMEDIR/Tropico.EXE" \
-        --width "$2" --height "$3" --src-ext i06 --src-size 640x480 --missing-only \
-        --out-ext "$1" --out "$TMP/menu_$1" >/dev/null
-    cp "$TMP/menu_$1"/*."$1" "$GAMEDIR/data/"
-    for f in "$TMP/menu_$1"/*."$1"; do
-      cmp -s "$f" "$GAMEDIR/data/$(basename "$f")" || { echo "!! failed to install $(basename "$f")" >&2; exit 1; }
-      basename "$f" >> "$TMP/static.txt"
-    done
-  done
-  cp "$TMP/static.txt" "$GAMEDIR/data/ARTSET-STATIC.txt"
-  echo "   $(wc -l < "$GAMEDIR/data/ARTSET-STATIC.txt") stock-class menu assets installed and verified"
-else
-  echo "   stock-class menu assets already present"
+# --------------------------------------------------- art: generated at LAUNCH now
+# Three things used to happen here and none of them do any more:
+#
+#   the stock-class menu art   seven assets PopTop only authored at 640x480
+#                              (FINDINGS 69.5), synthesised into i08/i10/i12 by Python
+#   staging                    one full set per connected monitor into artsets/<WxH>/
+#   activation                 copying one of those sets into data/
+#
+# The proxy does all three itself, in C, once it has measured the display for real --
+# about a second for a whole set, against ~13 s of Python plus two 132 MB copies
+# (FINDINGS 96/97). That deletes the part of this installer that had to GUESS which
+# resolution the game would end up at, which was most of it.
+#
+# Clear the marker so the first launch builds a set. Unconditional and cheap: it is the
+# only thing that makes the proxy notice a reinstall.
+rm -f "$GAMEDIR/data/ARTSET-MODE.txt"
+
+# Old staged sets are dead weight -- 226 MB for three modes on a development box.
+# Removed on upgrade rather than left to rot, and only once the proxy that replaces
+# them is already in place.
+if [ -d "$GAMEDIR/artsets" ]; then
+  echo "   removed $(du -sh "$GAMEDIR/artsets" 2>/dev/null | cut -f1) of staged art sets;" \
+       "the patch builds artwork at launch now"
+  rm -rf "$GAMEDIR/artsets"
 fi
-
-# -------------------------------------------------------------- stage the sets
-for m in $MODES; do
-  [ -n "$m" ] || continue
-  echo "== staging ${m} =="
-  "$SELF/tropico-setmode.sh" --stage "${m%x*}" "${m#*x}"
-done
-
-# ------------------------------------------------------------------- activate
-"$SELF/tropico-setmode.sh" "${ACTIVE%x*}" "${ACTIVE#*x}"
 
 # ------------------------------------------------------------- desktop entry
 # The only thing this patch writes outside the game folder and its own directory.
@@ -386,12 +367,8 @@ if [ "$STEAM" = 1 ]; then
 else
   echo "   PLAY:               $PLAY_CMD   (or the Tropico entry in your applications menu)"
 fi
-if [ -n "${TROPICO_PLAY_CMD:-}" ]; then
-  echo "   switch resolution:  ./set-resolution.sh W H   (--list to see what is ready)"
-else
-  echo "   switch resolution:  $(basename "$SELF")/tropico-setmode.sh W H"
-fi
-echo "   what is staged:     $(basename "$SELF")/tropico-setmode.sh --list"
+echo "   switch resolution:  $(basename "$SELF")/tropico-setmode.sh W H"
+echo "   what is installed:  $(basename "$SELF")/tropico-setmode.sh --list"
 echo "   undo everything:    $(basename "$0") --uninstall"
 # The [VText] dials depend on the ASPECT alone now (FINDINGS 86), so every 16:9 mode
 # arms from the defaults and 4:3 has no defect to correct. Only a third aspect -- 16:10
