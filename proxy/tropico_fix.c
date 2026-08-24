@@ -546,97 +546,6 @@ static int pick_mode(mode_t *out)
     return pick_mode_pass(out, !g_artgen_enabled);
 }
 
-/* ------------------------------------------------- deciding the mode, ONCE
- *
- * WHY THIS IS SEPARATE FROM PATCHING, AND RUNS EARLIER.
- *
- * Nothing here needs the game's code to be readable: the monitor, the ini and the
- * display's mode list are all outside the executable. Patching does need it, and on
- * the Steam edition it has to wait -- SteamStub keeps .text encrypted until the entry
- * wrapper runs, so the proxy defers to the first GetDeviceCaps, which happens during
- * video setup.
- *
- * That was fine until the proxy started GENERATING ART, because generation was sitting
- * inside apply_patches and inherited the wait. Measured on the Steam edition: the intro
- * played at the right resolution and the menu then died with
- *
- *     Error opening pack file item 'setuplb.i16'
- *
- * on a file that was on disk, valid, and byte-identical to the one working on GOG. The
- * game had already indexed data\ by the time the art appeared. Launching a second time
- * worked, because then the files were there before the process started -- which is the
- * whole diagnosis in one sentence: not what was generated, but when.
- *
- * So the mode is decided and the art built from DllMain, before the executable's entry
- * point, on BOTH paths. apply_patches then reuses the answer rather than working it out
- * again -- once, because launch_override can change which monitor is primary and doing
- * that twice is not free.
- */
-static int ini_override(mode_t *m);   /* all three are display-side only */
-static int pick_mode(mode_t *out);
-
-static int g_mode_decided, g_mode_ok;
-static mode_t g_decided_mode;
-
-static void check_ini_fits(void)
-{
-    static int done;
-    if (done) return;
-    done = 1;
-    /* THE MODE MUST FIT THE SCREEN IT WILL RUN ON. When it does not, the game
-         * asks for a mode larger than its desktop and renders NOTHING -- the intro
-         * audio plays over a blank screen, which looks like a crash and is not one.
-         * Measured: a virtual desktop requested at 2560x1440 lands on a 1920x1080
-         * monitor, Wine clamps it, and the ini still says 2560x1440.
-         *
-         * Refuse quietly rather than fail loudly and invisibly: say what happened,
-         * in words, and let the mode picker choose something that fits instead. */
-        char ip2[MAX_PATH];
-        int iw, ih, dw = GetSystemMetrics(SM_CXSCREEN), dh = GetSystemMetrics(SM_CYSCREEN);
-        snprintf(ip2, sizeof ip2, "%s\\tropico-fix.ini", g_dir);
-        iw = GetPrivateProfileIntA("Resolution", "Width",  0, ip2);
-        ih = GetPrivateProfileIntA("Resolution", "Height", 0, ip2);
-        if (iw && ih && dw && dh && (iw > dw || ih > dh)) {
-            logf_("[x] CONFIGURED MODE DOES NOT FIT. tropico-fix.ini asks for %dx%d but the"
-                  " screen this is running on is %dx%d. The game would render nothing at"
-                  " all -- you would hear the intro over a black screen.", iw, ih, dw, dh);
-            logf_("    Cause: the game was started for one monitor and opened on another."
-                  " Launch it from the monitor you want to play on.");
-            logf_("    Ignoring the configured mode and picking one that fits.");
-            g_ini_mode_unusable = 1;
-        }
-    }
-
-static int decide_mode(mode_t *out)
-{
-    if (!g_mode_decided) {
-        char ip3[MAX_PATH];
-        snprintf(ip3, sizeof ip3, "%s\\tropico-fix.ini", g_dir);
-        /* Read before the picker runs -- it is the picker's behaviour this changes. */
-        g_artgen_enabled = GetPrivateProfileIntA("Art", "Generate", 1, ip3);
-        /* THE MONITOR FIRST, AND THIS ORDERING IS THE WHOLE POINT.
-         *
-         * launch_override() does not choose anything -- it only reports g_launch_w/h,
-         * which choose_and_apply_monitor() sets. Moving the decision to DllMain without
-         * moving this left those at zero, so the launch monitor was invisible and the
-         * ini's mode won: measured on Steam, a 2560x1440 monitor ran at 1920x1080 with
-         * art generated to match, and the "mode is SMALLER than the screen" warning
-         * fired exactly as it was written to.
-         *
-         * It also has to precede the picker for the original reason: the picker
-         * validates a mode against the desktop Wine measures, which is the primary, so
-         * a 1440p request against a 1080p primary is rejected before the switch. */
-        choose_and_apply_monitor();
-        check_ini_fits();
-        g_mode_ok = (launch_override(&g_decided_mode)
-                     || ini_override(&g_decided_mode)
-                     || pick_mode(&g_decided_mode));
-        g_mode_decided = 1;
-    }
-    *out = g_decided_mode;
-    return g_mode_ok;
-}
-
 /* Optional override so a user can force a mode without a rebuild. */
 static int ini_override(mode_t *m)
 {
@@ -802,6 +711,30 @@ static void apply_patches(void)
      * (FINDINGS 75). One line here turns that into an obvious diagnosis. */
     logf_("[*] desktop as Wine sees it: %dx%d", GetSystemMetrics(SM_CXSCREEN),
           GetSystemMetrics(SM_CYSCREEN));
+    {
+        /* THE MODE MUST FIT THE SCREEN IT WILL RUN ON. When it does not, the game
+         * asks for a mode larger than its desktop and renders NOTHING -- the intro
+         * audio plays over a blank screen, which looks like a crash and is not one.
+         * Measured: a virtual desktop requested at 2560x1440 lands on a 1920x1080
+         * monitor, Wine clamps it, and the ini still says 2560x1440.
+         *
+         * Refuse quietly rather than fail loudly and invisibly: say what happened,
+         * in words, and let the mode picker choose something that fits instead. */
+        char ip2[MAX_PATH];
+        int iw, ih, dw = GetSystemMetrics(SM_CXSCREEN), dh = GetSystemMetrics(SM_CYSCREEN);
+        snprintf(ip2, sizeof ip2, "%s\\tropico-fix.ini", g_dir);
+        iw = GetPrivateProfileIntA("Resolution", "Width",  0, ip2);
+        ih = GetPrivateProfileIntA("Resolution", "Height", 0, ip2);
+        if (iw && ih && dw && dh && (iw > dw || ih > dh)) {
+            logf_("[x] CONFIGURED MODE DOES NOT FIT. tropico-fix.ini asks for %dx%d but the"
+                  " screen this is running on is %dx%d. The game would render nothing at"
+                  " all -- you would hear the intro over a black screen.", iw, ih, dw, dh);
+            logf_("    Cause: the game was started for one monitor and opened on another."
+                  " Launch it from the monitor you want to play on.");
+            logf_("    Ignoring the configured mode and picking one that fits.");
+            g_ini_mode_unusable = 1;
+        }
+    }
     logf_("[*] resolution table at 0x%08lx  (GOG build has 0x005a0fa0; a different value here"
           " just means a different build, which is fine)", table_va);
     memcpy(GATE_SIG + 1, &table_va, 4);
@@ -897,17 +830,19 @@ static void apply_patches(void)
      * is decided too late: with a 1080p primary a 1440p request is already rejected
      * and fallen back. This runs first, picks the monitor from where the player
      * launched, makes it primary, and waits for Wine to see it. */
-    /* choose_and_apply_monitor() used to be called here. It now runs inside
-     * decide_mode(), which runs from DllMain -- before the game's entry point, so the
-     * art can be built before data\ is indexed (FINDINGS 98). */
+    choose_and_apply_monitor();
 
     /* --- 4. slot 4, in BOTH tables ----------------------------------------- *
      * FINDINGS s8: patching the data table alone is not enough. A parallel
      * mapping lives in code and silently drops any mode it does not recognise. */
     mode_t m;
     {
+        /* Read before the picker runs -- it is the picker's behaviour this changes. */
+        char ip3[MAX_PATH];
+        snprintf(ip3, sizeof ip3, "%s\\tropico-fix.ini", g_dir);
+        g_artgen_enabled = GetPrivateProfileIntA("Art", "Generate", 1, ip3);
     }
-    if (!decide_mode(&m)) {
+    if (!launch_override(&m) && !ini_override(&m) && !pick_mode(&m)) {
         logf_("[-] no mode satisfied the constraints; leaving slot 4 stock (1600x1200)");
     } else {
         /* s85's fallback art-switch used to sit here: on the path where the configured
@@ -933,10 +868,8 @@ static void apply_patches(void)
                       " display disagree.", m.w, m.h, dw, dh);
         }
 
-        /* The art was built in DllMain, before the game's entry point. This call is
-         * kept as a safety net and is normally a no-op: it re-reads the marker, sees
-         * the mode it already matches, and returns. It only does work if something
-         * removed the art between DllMain and here. */
+        /* The mode is final here. Make the art match it before the game reads any --
+         * the menu is the first thing that does, and it opens after this. */
         ensure_art_for_mode(m.w, m.h);
 
         BYTE *chain = find_unique(CHAIN_SIG, sizeof CHAIN_SIG, g_text, g_textlen, "chain");
@@ -1937,13 +1870,6 @@ static int xrandr_outputs(xout_t *out, int cap)
  * the whole step. */
 static void choose_and_apply_monitor(void)
 {
-    /* ONCE. This changes which monitor is primary and waits for Wine to notice, so a
-     * second call is neither free nor harmless. decide_mode() calls it; the old call
-     * site in apply_patches is gone. */
-    static int done;
-    if (done) return;
-    done = 1;
-
     xout_t outs[8];
     int n, i, chosen = -1, prim = -1;
     char ip[MAX_PATH], want[64], want2[64], script[MAX_PATH * 4], udir[MAX_PATH];
@@ -5618,16 +5544,6 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
      * exists to test the hook-and-patch mechanism itself without needing the
      * Steam DRM to cooperate -- it isolates "does deferral work" from "does
      * SteamStub decrypt in time", which are separate claims. */
-    /* ART BEFORE THE GAME STARTS. This is DllMain, so we are running before the
-     * executable's entry point on BOTH editions -- which is the only moment that is
-     * reliably earlier than the game indexing data\. Deciding the mode here needs
-     * nothing from the game's code; only PATCHING does, and that is what defers.
-     * See decide_mode() for what this cost to find out. */
-    {
-        mode_t am;
-        if (decide_mode(&am)) ensure_art_for_mode(am.w, am.h);
-    }
-
     char defer[8] = {0};
     GetEnvironmentVariableA("TROPICO_FIX_DEFER", defer, sizeof defer);
     int force_defer = (defer[0] == '1');
