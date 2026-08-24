@@ -138,11 +138,23 @@ step is merely annoying.
 Tropico\                     <- the ZIP extracts here
   install.bat
   uninstall.bat
-  binkw32.dll                <- the proxy, bundled
-  tropico-fix.ini            <- template
-  README.txt                 <- CRLF
-  LICENSE
+  READ-ME-FIRST.txt          <- CRLF
+  tropico-patch\
+    binkw32.dll              <- the proxy, bundled
+    tropico-fix.ini          <- template
+    LICENSE
 ```
+
+**THE PROXY MUST NOT SIT AT THE TOP LEVEL, and this nearly shipped that way.** The ZIP
+extracts *into* the game folder, Windows filenames are case-insensitive, and the game
+folder already contains `binkw32.dll` and `readme.txt`. A top-level `binkw32.dll` in the
+archive therefore **overwrites the real Bink during extraction** -- before `install.bat`
+exists to guard anything, so §4's whole safety argument is bypassed by unzipping. The
+same trap eats the game's own `readme.txt`.
+
+Everything the archive delivers therefore lives under `tropico-patch\`, except the two
+entry points and a README named so it cannot collide. Checked against a real GOG install:
+`install.bat`, `uninstall.bat`, `READ-ME-FIRST.txt` and `tropico-patch\` are all free.
 
 No `lib\`, no `python\`, no `artsets\`, no `set-resolution.bat`. The three-line user
 surface from the original design is unchanged and still the acceptance test:

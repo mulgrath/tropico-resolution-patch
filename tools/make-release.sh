@@ -52,7 +52,51 @@ done
 cp "$ROOT/packaging/README.md" "$OUT/$NAME/README.md"
 cp "$ROOT/LICENSE"             "$OUT/$NAME/LICENSE"
 
-git ls-files 'tools/*' ':!tools/__pycache__/*' 'known-good/*' | while IFS= read -r f; do
+# ---------------------------------------------------------------- what ships
+# AN EXPLICIT LIST, not a glob over tools/. The repository holds twenty-odd
+# scripts and most of them are development apparatus -- the Python reference
+# implementation of the art codec, the nested-display rig, the Steam and GOG test
+# harnesses, the .WIN and .imb analysers. None of that is needed to install the
+# patch or play the game, and shipping it invites someone to run a tool that was
+# never meant for them.
+#
+# The Python art pipeline in particular MUST NOT ship. It is the oracle the C
+# generator is diffed against (FINDINGS 93-96) and it stays in the repository for
+# exactly that reason, but the proxy does the work now. A copy in a release would
+# be a second implementation for a user to find, run, and be confused by.
+#
+# Every entry below earns its place:
+#   tropico              the launcher: picks the monitor, sets the mode, restores
+#   tropico-common.sh    discovery, mode validation, the ini writer
+#   tropico-install.sh   install / uninstall
+#   tropico-setmode.sh   pin a resolution
+#   tropico-launchpoint.py   which monitor the game was launched from. NOT optional:
+#                            without it the launcher cannot choose a monitor at all
+#   tropico-fullscreen.py    asks the WM to fullscreen the Wine desktop. Best-effort,
+#                            backgrounded, but the window is misplaced without it
+#   known-good/binkw32.dll   the proxy
+#   known-good/tropico-fix.ini  the config template
+SHIP="tools/tropico
+tools/tropico-common.sh
+tools/tropico-install.sh
+tools/tropico-setmode.sh
+tools/tropico-launchpoint.py
+tools/tropico-fullscreen.py
+known-good/binkw32.dll
+known-good/tropico-fix.ini"
+
+# Still filtered through `git ls-files` -- a name on the list that is not committed
+# is a mistake, and building a release around an uncommitted file is how a tarball
+# ends up with something nobody reviewed.
+printf '%s\n' "$SHIP" | while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  if ! git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+    echo "!! REFUSING to build: $f is on the ship list but not committed" >&2
+    exit 1
+  fi
+done || exit 1
+
+printf '%s\n' "$SHIP" | while IFS= read -r f; do
   mkdir -p "$OUT/$NAME/lib/$(dirname "$f")"
   cp "$f" "$OUT/$NAME/lib/$f"
 done
@@ -61,7 +105,14 @@ done
 cp "$ROOT/known-good/binkw32.dll" "$OUT/$NAME/lib/known-good/binkw32.dll"
 
 # Source of the one binary we ship, so it can be rebuilt and compared.
-for f in proxy/tropico_fix.c proxy/binkw32.def proxy/build.sh proxy/README.md; do
+#
+# artgen.c/.h ARE PART OF THIS, since FINDINGS 96 moved art generation into the
+# proxy. Leaving them out was silent: the tarball built, and the source it shipped
+# simply did not compile -- which defeats the entire point of shipping it, because
+# the reproducibility check in README is what lets someone verify the binary.
+# Caught by building the extracted source rather than by reading the list.
+for f in proxy/tropico_fix.c proxy/artgen.c proxy/artgen.h proxy/binkw32.def \
+         proxy/build.sh proxy/README.md; do
   cp "$ROOT/$f" "$OUT/$NAME/source/$(basename "$f")"
 done
 
