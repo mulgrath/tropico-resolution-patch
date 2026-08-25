@@ -194,7 +194,22 @@ That needs `mingw-w64`. Building the measurement probes in `probes/`:
 
 Developed on Pop!_OS 24.04 under XWayland, against GOG 2.1.0.14 and Steam app 33520.
 
-## Licence
+## Licence and legal
+
+This is an independent, unofficial hobby project, given away free of charge. It is not
+affiliated with, authorised by or endorsed by Kalypso Media, PopTop Software, Take-Two
+Interactive, GOG.com, Valve, Epic Games or RAD Game Tools. "Tropico" and all related
+marks belong to their respective owners and are used here only to identify the game this
+patch applies to. You need your own legally obtained copy; this patch is no use without
+one.
+
+Nothing is circumvented. The GOG build ships without copy protection, and the Steam
+build's is left fully intact — the patched game is started through Steam, in the normal
+way. Removing that requirement is expressly not a goal, and changes that would do so will
+not be accepted. The patch also never modifies `Tropico.EXE` or the game archives; it
+adjusts the running game in memory.
+
+See `NOTICE` for the full statement, including a note for rights holders.
 
 MIT, for the code here — see `LICENSE`. Tropico belongs to its rights holders (PopTop
 Software, Kalypso Media); no game code, art, sound or data is in the working tree or in any
@@ -202,8 +217,7 @@ release built from it — `tools/make-release.sh` builds from an allowlist and t
 result for game formats before writing it. The UI art is generated on your machine from the
 copy you own.
 
-One exception, stated because a promise with a silent exception is not a promise: history
-before `HEAD` still contains `logs/hudbar.i16.backup.bin`, an 879 KB stock HUD-bar blob
-committed in `f46ce5e` as a rescue backup during the px.PK2 experiments. It was removed once
-those were resolved and px.PK2 was restored to stock, but removing a file does not remove it
-from the commits that added it. It is absent from every release.
+No exception: the working tree, every release, and the full commit history are free of
+game code, art, sound and data. An 879 KB stock HUD-bar blob was committed as a rescue
+backup during the px.PK2 experiments and removed when those resolved; it has since been
+purged from history entirely, so it is present in no commit reachable from any branch.

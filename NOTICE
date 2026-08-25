@@ -1,0 +1,99 @@
+NOTICE
+======
+
+This project is an independent, unofficial compatibility patch for the 2001 game
+Tropico. It is a hobby project, given away free of charge.
+
+
+No affiliation
+--------------
+
+This project is not affiliated with, authorised by, endorsed by, sponsored by, or
+in any way connected to Kalypso Media, PopTop Software, Take-Two Interactive,
+GOG.com, Valve, Epic Games, or RAD Game Tools.
+
+"Tropico" and all related names, logos and marks are the property of their
+respective owners and are used here only to identify the game this patch applies
+to. No claim to any of those marks is made or implied.
+
+
+No game content is included
+---------------------------
+
+Nothing belonging to Tropico is contained in this repository, or in any release
+built from it. Specifically, this project does not contain and does not
+distribute:
+
+  * any part of Tropico.EXE or any other game executable,
+  * any game art, sound, music, video, text, map or data file,
+  * any content extracted or decoded from the game's archives.
+
+The interface artwork that the patch uses is produced on your own machine, from
+the copy of the game already installed there. It is derived from your files, it
+never leaves your machine, and it is not redistributed here.
+
+The patch requires that you already own a legally obtained copy of the game. It
+is of no use whatsoever without one, and it is not a means of obtaining one.
+
+
+How the patch works
+-------------------
+
+The source for everything here is in this repository: the wrapper library in
+proxy/, the installer and tooling in tools/. Releases are built from an allowlist
+by tools/make-release.sh, which scans the result for game formats before writing
+it.
+
+The patch is a wrapper library (binkw32.dll) that loads alongside the game and
+adjusts it in memory while it runs. It does not modify Tropico.EXE, and it does
+not modify or repack the game's archives. The original binkw32.dll is preserved
+next to it as binkw32_orig.dll, and every one of its functions is forwarded to
+that original file; no third-party video code is reimplemented or redistributed.
+
+Everything the installer does is reversible with the supplied uninstaller.
+
+
+No circumvention
+----------------
+
+This project does not circumvent, disable, weaken, or work around any copy
+protection, digital rights management, licensing check or technological
+protection measure, and it is not intended or designed to.
+
+The GOG release of the game is distributed without such measures. The Steam
+release's protection is left fully intact: the patched game is started through
+Steam, in the normal way, exactly as an unpatched copy is. Removing that
+requirement is expressly not a goal of this project, and changes that would do so
+will not be accepted.
+
+
+Basis for the work
+------------------
+
+The patch was developed by observing and testing a lawfully purchased copy of the
+game in order to determine how it selects and renders display modes, and by
+correcting faults that prevent it from running correctly on current hardware and
+current operating systems. The results of that work are expressed here as new,
+independently written source code. Facts about file formats and program
+behaviour are not themselves the property of any party.
+
+The authors believe this to be permitted, including under Articles 5 and 6 of
+Directive 2009/24/EC in the European Union. Rights vary by country, and nothing
+here is legal advice.
+
+
+Warranty and liability
+----------------------
+
+This software is provided "as is", without warranty of any kind. See LICENSE.
+You use it on your own copy of the game, at your own risk.
+
+
+For rights holders
+------------------
+
+If you hold rights in Tropico or in any component referenced here and you have a
+concern about this project, please open an issue or contact the maintainers
+directly. This is a good-faith preservation project with no commercial interest,
+and we would far rather talk than argue. Reasonable requests will be acted on
+promptly.

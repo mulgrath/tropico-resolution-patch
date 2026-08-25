@@ -35,3 +35,9 @@ The user interface art this patch installs is GENERATED ON YOUR OWN MACHINE from
 the game archives in your own legally obtained copy, by tools/tropico-artset.py.
 It is derived from your files, it never leaves your machine, and it is not
 redistributed here. Installing this patch requires that you already own the game.
+
+The proxy forwards every function of binkw32.dll to the original file, which the
+installer preserves beside it as binkw32_orig.dll. Bink is the property of RAD
+Game Tools / Epic Games; none of its code is reimplemented or redistributed here.
+
+This project is unofficial and unaffiliated. See NOTICE for the full statement.

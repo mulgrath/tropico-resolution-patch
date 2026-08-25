@@ -6493,7 +6493,7 @@ run that fails also produces the number needed to fix it.
 ### 88.2 The packaging bug this uncovered, which was the bigger one
 
 The grey readouts on Steam were not a Steam defect. `known-good/binkw32.dll` -- the artifact
-`tools/tropico-install.sh` ships -- was last rebuilt at `ccb516c`, before §86 (aspect-only
+`tools/tropico-install.sh` ships -- was last rebuilt at `8ddcedb`, before §86 (aspect-only
 VText dials) and §87 (the `[C2]` repaint). Both changed `proxy/tropico_fix.c`; neither was
 rebuilt into the shipped file. The GOG install only looked correct because it was running a
 hand-copied `proxy/binkw32.dll`.
@@ -6724,7 +6724,7 @@ physical one. A 3840x2160 panel at 200% reports 1920x1080 to `SM_CXSCREEN`, to
 whole tier-1 mechanism rests on.
 
 This was first written up as a bug and fixed by declaring per-monitor DPI awareness
-(commit `0e290a7`). **That fix has been reverted** — owner's decision, 2026-08-23 — and
+(commit `2b0248f`). **That fix has been reverted** — owner's decision, 2026-08-23 — and
 this section records why, because the absence of a DPI call now looks exactly like the
 oversight it used to be.
 
@@ -7334,7 +7334,7 @@ not introduced by the split.
 
 ### 99a. What the split did and did not buy the GOG build
 
-Addendum, same day. The commit message for `cae0573` said the launches that bypass
+Addendum, same day. The commit message for `d32cc32` said the launches that bypass
 `tools/tropico` — Lutris, Heroic, a bare `wine Tropico.EXE` — "took the broken path
 until now", which reads as *fixed*. It is not, and the overstatement is worth correcting
 in place rather than leaving for someone to trip over.
@@ -7362,7 +7362,7 @@ would mean the proxy reproducing the launcher's virtual desktop, borderless regi
 write and fullscreen helper from inside a process that has already started — which it
 cannot do, because those are all launch-time decisions.
 
-`cae0573` is kept regardless. It removed a real fault, it costs nothing on the launcher
+`d32cc32` is kept regardless. It removed a real fault, it costs nothing on the launcher
 path (nothing is ever pending there, so the branch is unreachable), and it makes the two
 editions take the same route when a monitor does need switching.
 
