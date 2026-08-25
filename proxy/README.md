@@ -2,9 +2,16 @@
 
 Applies every fix from `../FINDINGS.md` to a **stock, unmodified** `Tropico.EXE` at
 runtime, so nothing of PopTop's is redistributed and the DRM-wrapped Steam build is
-covered too.
+covered too. Nothing on disk is patched: the game is adjusted in memory, each run.
+
+Every address below is derived in `FINDINGS.md` — that file, not this one, is the
+record of how each was found.
 
 ## Install
+
+Players do not do this by hand — `packaging/install.sh` (shipped at the root of a
+release) places the proxy, keeps the original beside it as `binkw32_orig.dll`, and
+generates the art set. The manual equivalent, for development:
 
 ```
 cd <Tropico game folder>
@@ -12,53 +19,103 @@ mv binkw32.dll binkw32_orig.dll
 cp /path/to/binkw32.dll .
 ```
 
-Run the game normally. A `tropico-fix.log` appears next to the exe.
+Run the game normally. To go back: delete `binkw32.dll`, rename `binkw32_orig.dll` back.
 
-To go back: delete `binkw32.dll`, rename `binkw32_orig.dll` back.
+A `tropico-fix.log` appears next to the exe, and it is the authoritative record of what
+applied — every patch logs its address and what it wrote. A healthy run at 2560x1440
+ends `done: 17 applied, 0 failed`.
 
-## What it does
+## What it patches
 
-| # | fix | FINDINGS |
-|---|---|---|
-| 1 | NOP the desktop-width gate, so a mode exactly as wide as the desktop is not rejected by an off-by-one (`>=`) | §2 |
-| 2 | Replace the x87 **signed** VRAM compare with an unsigned one, so Hardware 3D works with no `VideoMemorySize` registry value | §16 |
-| 3 | `jge` → `jae` on the second signed VRAM test (texture budget) | §16 |
-| 4 | Point slot 4 at the best mode the display actually offers, in **both** the data table and the code compare-chain | §1, §8 |
+**Getting the mode offered at all**
 
-## How slot 4 is chosen
+| site | fix |
+|---|---|
+| `00514da0` | gate `jge` → `jg`, so a mode exactly as wide as the desktop is kept rather than lost to an off-by-one (§2) |
+| `005a0fa0` + `0052d15a` | point slot 4 at the display's own mode, in **both** the data table and the code compare-chain (§1, §8) |
 
-Slots 0–3 are left stock — they are real modes almost everywhere and already work.
-Only slot 4 is chosen at runtime, because §11 caps each slot at its own stock art
-width and slot 4's is the largest at 1600.
+**Rendering the world at that mode**
 
-Candidates must satisfy every constraint in FINDINGS: `width % 4 == 0` (§10, else
-the image shears), `width <= 1600` (§11, else an unpainted strip), a width not used
-by slots 0–3 (§9, else the slot is unreachable), and the mode must actually exist
-(§7). Among survivors it prefers the closest aspect match to your desktop, then the
-largest. On a 1920x1080 panel that is **1600x900**; on a 4:3 or 5:4 display it keeps
-**1600x1200**. If nothing qualifies, slot 4 is left stock.
+| site | fix |
+|---|---|
+| `0046b140` | world-extent clamp `3200x2400` → twice the mode (§36) |
+| `00526220` | four forced writes — viewport width, image pixel height, object virtual width and height — gated on viewport width ≥ 1280 (§33) |
+| `0044deaa`, `0044e00f` | map-preview column lookup and row stepping, so previews scale instead of tearing |
+| `00532063` | destination clamps `jl` → `jmp`, letting the movie scaler magnify past the source size |
 
-## Overriding
+**Interface, menus and text**
 
-Optional `tropico-fix.ini` next to the exe:
+| site | fix |
+|---|---|
+| `00515450` | apply-video detoured so the frontend preset resolves to slot 4 — the menu survives a return from a map (§69) |
+| `0047c37c`, `0047c39d` | the two startup slot requests redirected to slot 4 |
+| `0047c375` | startup windowed-gate → `mov [obj+0x1c],0`, so a CFG left windowed heals itself |
+| `0040741e`, `0049179e` | the rotated-text (VText) call sites trampolined, arguments rewritten for the aspect |
+| `004526d0` | VText wrapper detour — diagnostic, logs every rotated draw and its caller (§65) |
+| `[C2]` colour table | readout colour `6318` → `7fff`: treasury, swiss bank, population, and the date by inheritance |
+
+**Renderer and startup**
+
+| site | fix |
+|---|---|
+| `0052df6f` | Hardware 3D refused by skipping `EnumDevices`, so the game gives its own honest "not available" message rather than bricking the install. `[Hardware] Enable=1` offers it anyway (§16) |
+| `004f92f8` | texture-budget signed compare `jge` → `jae` (§16) |
+| `0052f16b` | renderer branch → `and [settings+0x10],0`; the software path is unconditional, and a CFG that selected Hardware 3D heals itself on the next save (§91) |
+| `0047c3cc` | intro one-shot guard NOPed, so the startup movie plays every launch |
+
+## Resolution, and which monitor
+
+The proxy reads the display at load, picks the mode, and — on a multi-monitor setup —
+makes the launch monitor primary for the life of the process, because **Wine measures
+only the primary**. A host watchdog restores the previous primary when the process
+stops, crash included.
+
+There is no longer a 1600-pixel ceiling and no aspect restriction: slot 4 is retargeted
+to the display's own mode, and the world painter is rewritten to match. `[Resolution]
+Width`/`Height` pins a mode instead. Constraint violations are refused and logged
+rather than applied silently.
+
+Interface art for the mode is generated by `artgen.c` from the player's own archives,
+into loose `data\` overrides. If `data\` already holds a matching set it is reused, so
+only the first launch at a new resolution pays for it.
+
+## Configuration
+
+`tropico-fix.ini`, next to the exe. What ships is deliberately small:
 
 ```ini
 [Resolution]
-Width=1600
-Height=900
+Width=2560
+Height=1440
+
+[Intro]
+Force=1
 ```
 
-Constraint violations are refused (or warned about) and logged rather than applied
-silently.
+Beyond those, the proxy reads a large number of **research knobs** — `[VText]`,
+`[Menu]`, `[Chrome]`, `[Hardware]`, probe and logging switches — used to vary things
+under test. `TESTING.md` depends on them. They are not part of the supported surface,
+and players never set them.
 
 ## Why binkw32, and why not DllMain
 
 Both explained at length in the header of `tropico_fix.c`. In short: a `ddraw.dll`
-proxy loads too late (ddraw is `LoadLibrary`d from the tail of the very function
-holding the gate), and the Steam build's `.text` is still encrypted during DllMain,
-so patching defers to the first `GetDeviceCaps` call — which provably precedes the
-gate, since the gate consumes that call's result.
+proxy loads too late — ddraw is `LoadLibrary`d from the tail of the very function
+holding the gate — and the Steam build's `.text` is still SteamStub-encrypted during
+DllMain, so patching defers to the first `GetDeviceCaps` call, which provably precedes
+the gate because the gate consumes that call's result. A pending primary-monitor change
+defers the pass for the same reason: from DllMain you may read the display, never
+change it (§99).
+
+Every pattern scan **requires a unique match**. Two matches means the signature is not
+specific enough, and the proxy refuses rather than patch the wrong site.
 
 ## Building
 
-`./build.sh` — needs `i686-w64-mingw32-gcc`.
+`./build.sh` — needs `i686-w64-mingw32-gcc`. The build is reproducible: `ld` otherwise
+picks a random image base and `strip` re-stamps the timestamp, so `build.sh` pins all
+three sources of drift and explains why. Two identical hashes mean the DLL you were
+given is the source you can read.
+
+The other `binkw32_*.dll` files here are probe and experiment builds kept for
+comparison, not release artefacts.
