@@ -1,0 +1,14 @@
+# Windows packaging must stay CRLF, in the repository and on every checkout.
+#
+# Not cosmetic. Notepad renders an LF-only file as one unbroken line, which is
+# how a player would meet READ-ME-FIRST.txt; and cmd is documented to mis-parse
+# a label that does not end CRLF, which would break install.bat in the one way
+# that is hardest to diagnose. Without this, git's own eol handling strips the
+# CRLF on checkout and the release built from that checkout ships broken files.
+# tools/make-release.sh refuses to build if it ever finds them LF-only.
+*.bat                              text eol=crlf
+packaging/windows/READ-ME-FIRST.txt text eol=crlf
+
+# Everything else is a Unix text file or a binary; leave git's defaults alone.
+*.dll binary
+*.gz  binary

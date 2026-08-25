@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build a release tarball of the patch.
+# Build the release archives of the patch: a .tar.gz for Linux and a .zip for
+# Windows.
 #
 #   tools/make-release.sh 1.0
 #
@@ -21,6 +22,7 @@ NAME="tropico-resolution-patch-$VER"
 OUT="$ROOT/dist"
 
 command -v git >/dev/null 2>&1 || { echo "!! git is required to build a release" >&2; exit 1; }
+command -v zip >/dev/null 2>&1 || { echo "!! zip is required for the Windows package" >&2; exit 1; }
 [ -d "$ROOT/.git" ] || { echo "!! not a git checkout; refusing to guess what to ship" >&2; exit 1; }
 
 # The proxy must be current: this is the bug that shipped once already (FINDINGS 88.2).
@@ -33,8 +35,25 @@ if [ "$ROOT/proxy/tropico_fix.c" -nt "$ROOT/known-good/binkw32.dll" ]; then
   echo "   known-good/binkw32.dll rebuilt: the source was newer"
 fi
 
-rm -rf "$OUT/$NAME" "$OUT/$NAME.tar.gz" "$OUT/$NAME.tar.gz.sha256"
+rm -rf "$OUT/$NAME" "$OUT/$NAME.tar.gz" "$OUT/$NAME.tar.gz.sha256" \
+       "$OUT/$NAME-windows" "$OUT/$NAME-windows.zip" "$OUT/$NAME-windows.zip.sha256"
 mkdir -p "$OUT/$NAME/tropico-patch" "$OUT/$NAME/source"
+
+# The game-format scan, as a function, because it now guards two staging trees.
+# Belt and braces over the allowlist: if either package ever grows a .PK2 or an
+# .i16, the build stops rather than shipping someone else's art.
+scan_or_die() {
+  local dir="$1" bad
+  bad=$(find "$dir" -type f \( -iname '*.pk2' -o -iname '*.i08' -o -iname '*.i10' \
+        -o -iname '*.i12' -o -iname '*.i16' -o -iname '*.imb' -o -iname '*.pal' \
+        -o -iname '*.exe' -o -iname '*.cfg' -o -iname '*.xdt' -o -iname '*.lng' \) | head -5)
+  if [ -n "$bad" ]; then
+    echo "!! REFUSING to build: game-derived files reached $dir:" >&2
+    echo "$bad" >&2
+    rm -rf "$dir"
+    exit 1
+  fi
+}
 
 # LAYOUT. THE ARCHIVE IS EXTRACTED INTO THE GAME FOLDER, so every filename here has to
 # be one the game does not already use. Only the three entry points and the README sit
@@ -58,6 +77,7 @@ for w in install.sh uninstall.sh play; do
 done
 cp "$ROOT/packaging/README.md" "$OUT/$NAME/README.md"
 cp "$ROOT/LICENSE"             "$OUT/$NAME/tropico-patch/LICENSE"
+cp "$ROOT/NOTICE"              "$OUT/$NAME/tropico-patch/NOTICE"
 echo "$VER" > "$OUT/$NAME/tropico-patch/VERSION"
 
 # ---------------------------------------------------------------- what ships
@@ -125,16 +145,7 @@ for f in proxy/tropico_fix.c proxy/artgen.c proxy/artgen.h proxy/binkw32.def \
   cp "$ROOT/$f" "$OUT/$NAME/source/$(basename "$f")"
 done
 
-# Safety net. If any of these ever appear, something has gone wrong upstream of here.
-BAD=$(find "$OUT/$NAME" -type f \( -iname '*.pk2' -o -iname '*.i08' -o -iname '*.i10' \
-      -o -iname '*.i12' -o -iname '*.i16' -o -iname '*.imb' -o -iname '*.pal' \
-      -o -iname '*.exe' -o -iname '*.cfg' -o -iname '*.xdt' -o -iname '*.lng' \) | head -5)
-if [ -n "$BAD" ]; then
-  echo "!! REFUSING to build: game-derived files reached the staging directory:" >&2
-  echo "$BAD" >&2
-  rm -rf "$OUT/$NAME"
-  exit 1
-fi
+scan_or_die "$OUT/$NAME"
 
 # FLAT: no top-level directory inside the archive.
 #
@@ -151,6 +162,66 @@ tar -C "$OUT/$NAME" -czf "$OUT/$NAME.tar.gz" .
 rm -rf "$OUT/$NAME"
 ( cd "$OUT" && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
 
+# ============================================================ the Windows package
+#
+# Same proxy, same source, different everything else.
+#
+# WHAT IS NOT HERE, AND WHY. None of the Linux launcher ships: tropico,
+# tropico-common.sh, tropico-setmode.sh, tropico-launchpoint.py and
+# tropico-fullscreen.py exist to drive xrandr and a Wine desktop, and on Windows
+# there is nothing for them to do -- the proxy reads the display itself. Shipping
+# them would be shipping a launcher that cannot run.
+#
+# So the Windows package is the two .bat files, the read-me, the proxy and its
+# config, and the source. There is no Python in it at all.
+mkdir -p "$OUT/$NAME-windows/tropico-patch" "$OUT/$NAME-windows/source"
+
+# TOP LEVEL, and it matters as much here as on Linux -- more, because Windows
+# filenames are case-insensitive. The game ships a readme.txt, so ours is
+# READ-ME-FIRST.txt: on Linux those are two files, on Windows they are one, and
+# the loser is overwritten AT EXTRACTION TIME before any script can guard it.
+for w in install.bat uninstall.bat READ-ME-FIRST.txt; do
+  if ! git ls-files --error-unmatch "packaging/windows/$w" >/dev/null 2>&1; then
+    echo "!! REFUSING to build: packaging/windows/$w is not committed" >&2
+    exit 1
+  fi
+  cp "$ROOT/packaging/windows/$w" "$OUT/$NAME-windows/$w"
+done
+
+cp "$ROOT/known-good/binkw32.dll"       "$OUT/$NAME-windows/tropico-patch/binkw32.dll"
+cp "$ROOT/known-good/tropico-fix.ini"   "$OUT/$NAME-windows/tropico-patch/tropico-fix.ini"
+cp "$ROOT/LICENSE"                      "$OUT/$NAME-windows/tropico-patch/LICENSE"
+cp "$ROOT/NOTICE"                       "$OUT/$NAME-windows/tropico-patch/NOTICE"
+echo "$VER" > "$OUT/$NAME-windows/tropico-patch/VERSION"
+
+for f in proxy/tropico_fix.c proxy/artgen.c proxy/artgen.h proxy/binkw32.def \
+         proxy/build.sh proxy/README.md; do
+  cp "$ROOT/$f" "$OUT/$NAME-windows/source/$(basename "$f")"
+done
+
+# The .bat files and the read-me are CRLF in the repository and must stay that
+# way: Notepad renders a LF-only file as one long line, and cmd has been known to
+# mis-parse a label that does not end CRLF. Checked rather than converted here --
+# if the committed file is wrong, the fix belongs in the file, not in the build.
+for w in install.bat uninstall.bat READ-ME-FIRST.txt; do
+  if grep -qU $'\r$' "$OUT/$NAME-windows/$w"; then :; else
+    echo "!! REFUSING to build: packaging/windows/$w is not CRLF" >&2
+    exit 1
+  fi
+done
+
+scan_or_die "$OUT/$NAME-windows"
+
+# FLAT, for the reason above and one more: Windows Explorer's "Extract All"
+# always creates a folder named after the archive. A wrapper folder inside would
+# make two. install.bat handles the one Explorer adds by looking one level up for
+# Tropico.EXE, so the common mistake installs correctly instead of failing.
+( cd "$OUT/$NAME-windows" && zip -qr -X "$OUT/$NAME-windows.zip" . )
+rm -rf "$OUT/$NAME-windows"
+( cd "$OUT" && sha256sum "$NAME-windows.zip" > "$NAME-windows.zip.sha256" )
+
 echo "== $OUT/$NAME.tar.gz  ($(du -h "$OUT/$NAME.tar.gz" | cut -f1))"
 echo "   $(cat "$OUT/$NAME.tar.gz.sha256")"
+echo "== $OUT/$NAME-windows.zip  ($(du -h "$OUT/$NAME-windows.zip" | cut -f1))"
+echo "   $(cat "$OUT/$NAME-windows.zip.sha256")"
 echo "   proxy sha256: $(sha256sum "$ROOT/known-good/binkw32.dll" | cut -d' ' -f1)"

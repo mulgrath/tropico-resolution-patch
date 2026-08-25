@@ -1,0 +1,137 @@
+================================================================================
+  Tropico at your monitor's resolution  --  Windows
+================================================================================
+
+Tropico (2001) shipped with five fixed resolutions, the largest of which no
+modern monitor has. This runs it at your screen's real resolution -- world,
+interface, menus and intro -- on the GOG or Steam edition.
+
+It never touches your game's archives, and it installs nothing derived from the
+game that isn't generated on your own machine from your own copy.
+
+
+--------------------------------------------------------------------------------
+  HOW TO INSTALL
+--------------------------------------------------------------------------------
+
+1. Find your Tropico folder -- the one that contains Tropico.EXE.
+
+     GOG    usually  C:\GOG Games\Tropico
+     Steam  usually  C:\Program Files (x86)\Steam\steamapps\common\Tropico
+            (in Steam: right-click the game, Manage, Browse local files)
+
+2. Extract this ZIP *into that folder*, keeping its folder structure.
+   When you are done, install.bat sits right next to Tropico.EXE.
+
+   Do not extract it somewhere else and copy files in by hand. Some unzip tools
+   flatten folders; this one needs the tropico-patch\ folder to survive.
+
+3. Double-click install.bat.
+
+That is all. Start Tropico the way you normally do.
+
+The first time you play at a new screen resolution, the patch spends about a
+second building the interface artwork for it, from your own game files. After
+that it starts straight away.
+
+
+--------------------------------------------------------------------------------
+  IF WINDOWS OR YOUR ANTIVIRUS COMPLAINS
+--------------------------------------------------------------------------------
+
+It may. Here is exactly why, so you can judge it yourself.
+
+The patch is a DLL that attaches to the game and rewrites parts of it in memory
+while it runs. That is the only way to fix a 25-year-old program without
+modifying the game's own files -- and not modifying them is deliberate, because
+it keeps your installation intact and means Steam and GOG still see stock files.
+
+But "attaches to another program and rewrites its memory" is also what a lot of
+malware does, and antivirus software cannot tell intent from behaviour. The DLL
+is also unsigned: a code-signing certificate costs several hundred pounds a
+year, and this is a free hobby project.
+
+So you may see:
+
+  "Windows protected your PC" (SmartScreen)
+      Click "More info", then "Run anyway".
+
+  Your antivirus quarantines binkw32.dll, or the install seems to work but
+  the game starts unpatched
+      The file was removed after it was copied. Add the Tropico folder to your
+      antivirus exclusions, then run install.bat again.
+
+If you would rather not take that on trust, the full source for everything in
+this package -- and notes explaining every single change it makes to the game --
+is in the project repository. The DLL is reproducible: building the source
+yourself produces a byte-identical file, so you can check that what you were
+given is what you can read.
+
+
+--------------------------------------------------------------------------------
+  IF SOMETHING LOOKS WRONG
+--------------------------------------------------------------------------------
+
+"install.bat says Tropico.EXE is not in this folder"
+    The ZIP was extracted to the wrong place. See step 2 above.
+
+The game is in Program Files and install.bat cannot copy
+    Right-click install.bat and choose "Run as administrator".
+
+The patch stopped working after Steam updated or verified files
+    Steam's "Verify integrity of game files" replaces the file this patch
+    installs, so the patch is simply gone. Nothing is broken and nothing is
+    lost -- run install.bat again.
+
+"Hardware 3D is not available on this computer" when you pick it in F2
+    That is deliberate. Hardware 3D renders correctly on almost no modern
+    setup, and it crashes on Windows -- and because the game remembers the
+    choice, picking it could leave you unable to load a map *or* get back to
+    the settings screen. The software renderer is what you are already playing
+    on, and a modern processor runs it without effort.
+
+Changing resolution later
+    You usually do not have to. The patch reads the display every time it
+    starts and builds artwork to match, so changing your resolution or
+    plugging in a different monitor is handled by launching the game.
+
+    To pin a resolution instead, edit tropico-fix.ini next to Tropico.EXE:
+
+        [Resolution]
+        Width=2560
+        Height=1440
+
+
+--------------------------------------------------------------------------------
+  HOW TO UNINSTALL
+--------------------------------------------------------------------------------
+
+Double-click uninstall.bat.
+
+It puts back the original binkw32.dll and removes every file the patch
+generated, by the list the patch itself wrote down -- never by wildcard.
+
+Your saved games and TROPICO.CFG are not touched, and neither are the px*.PK2
+archives. The patch never writes to any of them.
+
+
+--------------------------------------------------------------------------------
+  WHAT THIS IS, AND WHAT IT IS NOT
+--------------------------------------------------------------------------------
+
+An independent, unofficial hobby project, given away free of charge. It is not
+affiliated with, authorised by or endorsed by Kalypso Media, PopTop Software,
+Take-Two Interactive, GOG.com, Valve, Epic Games or RAD Game Tools. "Tropico"
+and all related marks belong to their respective owners and are used here only
+to identify the game this patch applies to.
+
+No game code, art, sound, text or data is included in this package. The
+interface artwork is produced on your own machine from the copy of the game
+already installed there. You need a legally obtained copy of the game; this
+patch is no use without one.
+
+Nothing is circumvented. The patch never modifies Tropico.EXE or the game
+archives -- it adjusts the running game in memory -- and the Steam edition is
+still started through Steam, in the normal way.
+
+The patch itself is MIT licensed. See LICENSE and NOTICE in this package.
