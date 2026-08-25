@@ -615,6 +615,10 @@ fullscreen.
 *not* exoneration: the symptom is a race ("I happened to tab out at the wrong moment"), and a
 single non-reproduction of a race carries almost no information. Left open deliberately.
 
+**Reopened 2026-08-25:** the owner reports the same error arriving rarely during ordinary
+play, with no alt-tab involved. Same race, another route in. Tracked in the issue tracker
+from here; the candidate fix below is unchanged.
+
 **Leading hypothesis (owner's, and it fits the machine):** map load performs a
 `SetDisplayMode` ladder rather than jumping straight to the target (TESTING trap 4). Alt-tab
 during that ladder drops exclusive mode between a rectangle being computed and the blit that

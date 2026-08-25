@@ -11,16 +11,18 @@ that isn't generated on your own machine from your own copy.
 
 ## How to install
 
-You need `python3` and `xrandr`, plus `wine` (with 32-bit support) if you play the GOG
-version. Steam's version needs nothing extra — Steam provides Wine through Proton.
+You need `wine` (with 32-bit support) if you play the GOG version. Steam's version needs
+nothing extra — Steam provides Wine through Proton. The launcher also uses `xrandr` and
+`python3`, which your desktop almost certainly already has.
 
 ```bash
 ./install.sh
 ```
 
 It finds your Tropico — GOG, Steam, or both — and shows you what it found before it
-starts. It takes about half a minute per monitor, because it generates the interface
-artwork for your resolution from your own game files.
+starts. It takes a moment: it installs two files and nothing else. The interface artwork
+is built the first time you play at a new resolution, from your own game files, and takes
+about a second.
 
 ## How to play
 
@@ -55,6 +57,9 @@ Steam's graphics layer and crashes outright on Windows — and because the game 
 the choice, picking it could leave you unable to load a map *or* get back to the settings
 screen. The software renderer is what you are already playing on, and a modern processor
 runs it without effort.
+
+**The map pans on its own when I move the mouse (Steam).** It happens when your monitors
+are not top-aligned in your display settings. Aligning them stops it.
 
 **"DirectDraw error #150" on a second monitor.** Start the game from the monitor you
 want to play on, rather than moving it there afterwards.

@@ -64,7 +64,7 @@ scan_or_die() {
 # script exists to guard it. (Linux filenames are case-sensitive so readme.txt is safe
 # here, but the Windows package shares this layout and there it is not.)
 #
-# A release is not a checkout: FINDINGS/ROADMAP/TESTING and the experiment scripts are
+# A release is not a checkout: FINDINGS/TESTING and the experiment scripts are
 # development history, and putting them in front of someone who just wants the game at
 # 1080p is noise. They stay in the repository, which the README points at.
 #

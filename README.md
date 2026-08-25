@@ -1,223 +1,120 @@
-# Tropico resolution patch
+# Tropico at your monitor's resolution
 
-Makes Tropico (PopTop, 2001) run at your monitor's real resolution on Linux — world,
-HUD, menus, intro movie and all — under plain Wine, with one command to install and one
-to play.
+Tropico (PopTop, 2001) shipped with five fixed resolutions, and the largest of them is
+smaller than any monitor sold today — so on a modern screen it runs stretched, blurry,
+or in a small box in the corner.
 
-**Only original code lives here. Game binaries and game art are never committed** — see
-`.gitignore`. You supply your own install; everything derived from the game is generated
-on your machine from your own files.
+This patch runs it at your screen's real resolution: the world, the interface, the
+menus and the intro movie. It works on **Windows** and on **Linux**, with the **GOG**
+or **Steam** edition of the game.
 
-## What you need
+It is free, unofficial, and made by a fan. You need your own copy of Tropico.
 
-- A copy of Tropico you own — **GOG** or **Steam**. The patch never ships game content;
-  it generates the artwork it needs from your own archives.
-- `python3` and `xrandr`. The installer checks for both and stops with a plain message
-  if either is missing.
-- **GOG:** `wine` with 32-bit support (9.0 is enough). **Steam:** nothing extra — Steam
-  supplies Wine through Proton. No Proton-GE, no gamescope, no protontricks.
+---
 
 ## Install
 
-Download the release tarball, extract it **into your Tropico folder** — the one holding
-`Tropico.EXE` — and run:
+Download the latest release from the
+[Releases page](../../releases): the **`.zip`** for Windows, the **`.tar.gz`** for Linux.
 
-```bash
-./install.sh
-```
+### Windows
 
-It backs up the real `binkw32.dll` and writes the patch and its config. That is all it
-does: two files. The interface artwork is built by the patch itself, at launch, for
-whatever resolution your display turns out to be — about a second, once per resolution,
-from your own archives.
+1. Find your Tropico folder — the one with `Tropico.EXE` in it.
+   (In Steam: right-click the game → Manage → Browse local files.)
+2. Extract the zip **into that folder**.
+3. Double-click **`install.bat`**.
 
-The scripts act on the folder they are in and never search your machine, so a second
-install is a second extraction.
+Then start Tropico the way you normally do.
 
-Then:
+### Linux
 
-### If you own both editions
+1. Extract the tarball into your Tropico folder.
+2. Run `./install.sh`.
 
-It patches **every** Tropico install it finds — GOG and Steam, including Steam libraries
-on other drives (read from `libraryfolders.vdf`), flatpak Steam, Heroic and Lutris — and
-lists them before it starts. `--uninstall` removes the patch from all of them for the same
-reason: removing it from one and reporting success, while another copy stayed patched, is
-the worse failure. Set `TROPICO_DIR=/path/to/Tropico` to act on exactly one.
+Start the GOG version with `./play` or the **Tropico** entry in your applications menu.
+Start the Steam version with Steam's own **Play** button.
 
-Artwork is built at launch from that install's own archives, so a second copy costs
-nothing extra at install time.
+You need Wine (with 32-bit support) for the GOG version; the Steam version uses Steam's
+own. Most desktops already have everything else.
 
-```bash
-tools/tropico            # play
-```
+---
 
-or use the **Tropico** entry the installer adds to your applications menu.
+## Good to know
 
-### Launch it from the monitor you want to play on
+**It builds its own artwork.** The game's interface was drawn for a small screen and
+cannot be stretched, so the patch redraws it at your resolution from the game files you
+already own. That happens the first time you play at a new resolution and takes about a
+second. Nothing is downloaded, and no game files are changed.
 
-The launcher makes that monitor primary for the run, matches the game's resolution and
-artwork to it, and puts your primary back afterwards. Wine measures only the primary
-monitor, so aligning the two is what keeps the game on the screen you are looking at.
-Launching from one monitor while another is primary is the DirectDraw **#150** error
-(`FINDINGS.md` §18, §74).
+**Two monitors?** Start the game from the screen you want to play on. It matches itself
+to that screen and puts your desktop back the way it was when you quit.
 
-### Which monitor it runs on
+**Changing your resolution later** needs nothing from you. The patch checks the display
+every time the game starts.
 
-**Launch it from the monitor you want to play on.** The desktop opens the window on the
-screen you started it from, while Wine can only size the game for the *primary* monitor —
-so the launcher makes the monitor you launched from primary for that run, and puts your
-primary back afterwards (`FINDINGS.md` §76). Without that, a main monitor that is not the
-primary gives you the right screen at the wrong resolution.
+**If Steam verifies or updates the game**, the patch is replaced by Steam's own copy of
+the file and simply stops working — nothing is broken and nothing is lost. Run the
+installer again.
 
-The game runs inside a borderless, fullscreen Wine virtual desktop sized to that monitor,
-which is also why the DirectDraw **#150** error cannot occur — the game sees a single
-screen with origin (0,0).
+**"Hardware 3D is not available on this computer"** is deliberate. That renderer is
+broken on nearly every modern setup, and the game remembers the choice, so picking it
+could leave you stuck. The software renderer is the one you are already playing on, and
+a modern processor runs it without effort.
 
-To play on a different monitor for one launch:
+## Known issues
 
-```bash
-tools/tropico --monitor DP-3      # makes it primary for the run, then puts it back
-```
+- **On Linux under Steam, the map sometimes pans on its own** as you move the mouse. It
+  only happens when your monitors are not top-aligned in your display settings —
+  aligning them stops it.
+- **Rarely the game shows "DirectDraw Error #150"** and offers to continue. It is a
+  fault in the 2001 game that this patch does not cause and does not yet cover; alt-tabbing
+  away while a map loads is the reliable way to provoke it.
 
-To change it permanently, set the primary monitor in your desktop settings. The
-applications-menu entry always uses whatever is primary at the time.
-
-### Other commands
-
-```bash
-./play                                    # play (GOG; Steam uses its own Play button)
-./tropico-patch/tropico --list            # monitors, modes, and what art is installed
-./tropico-patch/tropico --monitor DP-3    # override the monitor for one launch
-./tropico-patch/tropico --log             # capture a trace for a bug report
-./tropico-patch/tropico-setmode.sh 2560 1440   # pin a resolution
-./uninstall.sh
-```
-
-See **Uninstall** below for what that removes.
-
-## Playing the Steam edition
-
-Press **Play in Steam**, from the monitor you want to play on. You cannot start this
-edition with `tools/tropico`: its DRM only decrypts the game for a process Steam itself
-started, and anything else gets `Application load error 5:0000065434`.
-
-Everything the launcher does for GOG, the patch does from inside instead — it detects
-the monitor you launched from, makes it primary for the run, matches the game's
-resolution and artwork to it, and puts your primary back when you quit, including if the
-game crashes (`FINDINGS.md` §90).
-
-Use **Software 3D** there. Proton's DirectDraw translation smears the Hardware renderer at
-every resolution, stock modes included, on an unpatched game too (`FINDINGS.md` §23).
-
-### Steam's "Verify integrity of game files" removes the patch
-
-The patch *is* `binkw32.dll`, so verifying (or any game update) restores Valve's copy and
-the patch is simply gone — with nothing of ours left running to tell you. The game returns
-to its stock resolution with the generated art still sitting unused on disk.
-
-It is not broken and nothing is lost. Re-run `./install.sh`; it is idempotent,
-and the artwork is rebuilt at the next launch, in about a second, so there is nothing
-to wait for at install time.
+Both are tracked in [Issues](../../issues), along with everything else known to be wrong.
 
 ## Uninstall
 
-```bash
-./uninstall.sh
-```
+Double-click **`uninstall.bat`** (Windows) or run **`./uninstall.sh`** (Linux). It puts
+the original file back and removes everything it added. Your saves, your settings and
+the game's own archives are never modified at any point.
 
-Restores the original `binkw32.dll`, deletes every file it generated by name (never by
-glob — a glob would sweep up art the game ships loose), and removes the desktop entry.
-`TROPICO.CFG` and the `px*.PK2` archives are never written at any point.
+---
 
-## What it fixes
+## For developers
 
-| | |
-|---|---|
-| Resolution | any mode your monitor reports, not the five PopTop shipped |
-| World render | full-width terrain at any resolution, no smear, no void |
-| HUD and UI | a real art set generated at your resolution — the engine cannot scale art, so it is derived from your own files |
-| Main menu and intro | full resolution instead of a 640x480 box in the corner, including when you return to the menu from a map |
-| Scenario map previews | correct magnification instead of tiling and colour noise |
-| Hardware 3D | **refused**, deliberately — it is correct only on GOG under system wine, smears under Proton and crashes on native Windows, and picking it used to brick the install (`FINDINGS.md` §91). Asking for it now gets the game's own "not available on this computer" message. `[Hardware] Enable=1` offers it anyway |
-| Startup movie | optional every-launch playback (stock plays it once, ever) |
+The patch is a single DLL that sits in front of the game's video library and corrects
+the running game in memory. It never modifies `Tropico.EXE` or the game archives.
 
-## Known limits
+- `proxy/` — the C source of everything that ships
+- `tools/` — the Linux launcher, and the research scripts
+- `FINDINGS.md` — the reverse-engineering notes: every address, with the evidence
+- `TESTING.md` — how to test this without fooling yourself
 
-- **Rotated tab labels** are correct at every 16:9 mode from the defaults -- the dials
-  depend on the aspect alone (`FINDINGS.md` §86, correcting §72.4). 16:10 is predicted
-  and unconfirmed; 4:3 has no defect.
-- **Steam is launched from Steam's own Play button**, because the DRM only decrypts the
-  exe for a process Steam started -- `tools/tropico` cannot start that edition. Everything
-  the launcher does for GOG, the proxy does from inside instead: it picks the monitor you
-  launched from, makes it primary for the run, adopts that monitor's mode and art set, and
-  hands your primary back afterwards -- including if the game crashes (`FINDINGS.md` §90).
-- **Hardware 3D is not offered.** It renders correctly on exactly one of the three
-  runtimes this game meets — GOG under system wine. Under Proton it smears at every
-  resolution, stock modes on a stock exe included (`FINDINGS.md` §23), and on native
-  Windows it crashes on map entry. Worse, the choice persists to `TROPICO.CFG` and F2 is
-  then unreachable to undo it, so a single click could brick the install (§91). The patch
-  now refuses it through the engine's own "Hardware 3D is not available on this computer"
-  message. The software renderer is what the game ships to; a modern CPU runs it without
-  noticing. `[Hardware] Enable=1` in `tropico-fix.ini` restores the old behaviour.
-- Fonts are left exactly as PopTop shipped them, deliberately (`FINDINGS.md` §63.5).
-
-## Layout
-
-- `tools/tropico` — **the launcher.** What players run
-- `packaging/install.sh`, `packaging/uninstall.sh` — the installer pair, extracted into the game folder
-- `tools/tropico-setmode.sh` — pin a resolution
-- `tools/tropico-gog.sh` — **the test harness, not the launcher.** It defaults to a Wine
-  virtual desktop and exposes a dozen research knobs; `TESTING.md` depends on all of it
-- `proxy/` — the `binkw32.dll` proxy: every runtime patch lives here
-- `FINDINGS.md` — verified reverse-engineering results, with addresses and the evidence
-- `ROADMAP.md` — what is done, what is not, and what was deliberately declined
-- `TESTING.md` — methodology, and the traps that invalidated earlier experiments
-- `probes/` — small Win32 programs used to measure Wine/DirectDraw behaviour directly
-
-## Building from source
-
-The release ships a prebuilt `known-good/binkw32.dll`, which is entirely this project's
-own code — the C source sits beside it in `proxy/`. The build is **reproducible**, so you
-can check the shipped binary against one you built yourself and expect an exact match:
+The build is reproducible, so you can check the DLL in the release against one you
+build yourself and expect an exact match (needs `mingw-w64`):
 
 ```bash
 proxy/build.sh /tmp/mine.dll && sha256sum /tmp/mine.dll known-good/binkw32.dll
 ```
 
-Two identical hashes mean the DLL you were given is the source you can read. (This used
-to be untrue: `ld` picks a random image base for a DLL when none is given, and `strip`
-re-stamps the timestamp afterwards, so two builds of identical source differed in ~5,500
-bytes. `proxy/build.sh` pins all three sources of drift and explains why.)
-
-That needs `mingw-w64`. Building the measurement probes in `probes/`:
-`i686-w64-mingw32-gcc -o x.exe x.c -lddraw -ldxguid -luser32`.
-
-Developed on Pop!_OS 24.04 under XWayland, against GOG 2.1.0.14 and Steam app 33520.
+Bug reports and questions belong in [Issues](../../issues). Developed on Pop!_OS 24.04
+against GOG 2.1.0.14 and Steam app 33520.
 
 ## Licence and legal
 
 This is an independent, unofficial hobby project, given away free of charge. It is not
 affiliated with, authorised by or endorsed by Kalypso Media, PopTop Software, Take-Two
 Interactive, GOG.com, Valve, Epic Games or RAD Game Tools. "Tropico" and all related
-marks belong to their respective owners and are used here only to identify the game this
-patch applies to. You need your own legally obtained copy; this patch is no use without
-one.
+marks belong to their respective owners and are used here only to identify the game
+this patch applies to. You need your own legally obtained copy; this patch is no use
+without one.
 
 Nothing is circumvented. The GOG build ships without copy protection, and the Steam
 build's is left fully intact — the patched game is started through Steam, in the normal
-way. Removing that requirement is expressly not a goal, and changes that would do so will
-not be accepted. The patch also never modifies `Tropico.EXE` or the game archives; it
-adjusts the running game in memory.
+way. Removing that requirement is expressly not a goal, and changes that would do so
+will not be accepted.
 
-See `NOTICE` for the full statement, including a note for rights holders.
-
-MIT, for the code here — see `LICENSE`. Tropico belongs to its rights holders (PopTop
-Software, Kalypso Media); no game code, art, sound or data is in the working tree or in any
-release built from it — `tools/make-release.sh` builds from an allowlist and then scans the
-result for game formats before writing it. The UI art is generated on your machine from the
-copy you own.
-
-No exception: the working tree, every release, and the full commit history are free of
-game code, art, sound and data. An 879 KB stock HUD-bar blob was committed as a rescue
-backup during the px.PK2 experiments and removed when those resolved; it has since been
-purged from history entirely, so it is present in no commit reachable from any branch.
+The code here is MIT — see `LICENSE`. No game code, art, sound or data is in this
+repository, in its history, or in any release built from it; the interface artwork is
+generated on your machine from the copy you own. See `NOTICE` for the full statement,
+including a note for rights holders.
