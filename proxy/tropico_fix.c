@@ -163,6 +163,8 @@ static void apply_monitor(void);
  * apply() writes the prefix registry and belongs in the patch pass. */
 static void vd_detect(void);
 static void vd_apply(void);
+static DWORD WINAPI xcompare_thread(LPVOID);
+static int g_cur_xcmp;                   /* s101, armed from [Cursor] XCompare */
 static int   g_vd_want;                  /* [Display] VirtualDesktop */
 static int   g_vd_inside;                /* this process IS in the desktop we armed */
 static int   g_vd_checked;
@@ -1023,6 +1025,9 @@ static void apply_patches(void)
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
         g_cur_fix = GetPrivateProfileIntA("Cursor", "Fix", 0, ip);
         g_cur_msg = GetPrivateProfileIntA("Cursor", "MsgProbe", 0, ip);
+        g_cur_xcmp = GetPrivateProfileIntA("Cursor", "XCompare", 0, ip);
+        if (g_cur_xcmp)
+            CloseHandle(CreateThread(NULL, 0, xcompare_thread, NULL, 0, NULL));
         if (GetPrivateProfileIntA("Unix", "Probe", 0, ip)) unix_probe();
         if (g_cur_msg) install_msg_probe();
         if (GetPrivateProfileIntA("Cursor", "Probe", 0, ip) || g_cur_fix) {
@@ -2391,6 +2396,129 @@ static void vd_apply(void)
             logf_("  [vdesk] VirtualDesktop=0 -- removed the desktop this patch armed");
         }
     }
+}
+
+/* --------------------------------------------- s101 Wine's cursor vs X's cursor
+ *
+ * WHY THIS AND NOT ANOTHER s89 PROBE. Every instrument s89 built compares Wine with
+ * Wine: GetCursorPos against GetMessagePos against WM_MOUSEMOVE's lParam. They have
+ * always agreed, and that is the point -- a coordinate space that is uniformly
+ * scaled or shifted by the layer UNDERNEATH stays perfectly self-consistent, so
+ * three agreeing Wine sources cannot detect it. Nothing has ever compared Wine's
+ * answer with the X server's.
+ *
+ * The owner's hypothesis is exactly that shape: Proton presents the game letterboxed
+ * or centred, and the pointer mapping does not undo it, so the game is told a
+ * position that is a scale and an offset away from where the pointer really is. A
+ * game that edge-scrolls sees an edge that is not there, and pans while the pointer
+ * sits still in the middle of the picture.
+ *
+ * The measurement is one line: X root coordinates from XQueryPointer (s90.1's host
+ * channel, the same one xrandr already goes through), Wine's GetCursorPos, and the
+ * origin of the monitor the game is on. Inside a virtual desktop pinned to one
+ * output, these must satisfy
+ *
+ *     x_root == monitor.x + wine.x        (and the same in y)
+ *
+ * exactly. A CONSTANT difference is an offset -- something centring the picture. A
+ * difference that GROWS with the coordinate is a scale, and its ratio names the
+ * letterbox: 1440/1920 = 0.75 is 4:3 pillarboxed into 16:9. Agreement refutes the
+ * hypothesis outright and sends the search below X.
+ *
+ * It runs on its own thread, not in the GetCursorPos hook: the host channel costs a
+ * subprocess and a few hundred milliseconds, which is nothing every two seconds and
+ * a stutter on every cursor read. Sampling is capped, because a diagnostic that
+ * degrades the thing it is measuring produces a measurement of itself.
+ *
+ *   [Cursor] XCompare=1
+ */
+
+/* Just the pointer, without xrandr's 16 KB of mode lists: this runs repeatedly. */
+static int x_pointer(long *x, long *y)
+{
+    char udir[MAX_PATH], script[MAX_PATH * 3], win[MAX_PATH], buf[512];
+    HANDLE h;
+    DWORD got = 0;
+    int i;
+    const char *p;
+    if (!game_unix_dir(udir, sizeof udir)) return 0;
+    snprintf(win, sizeof win, "%s\\tropico-xptr.txt", g_dir);
+    DeleteFileA(win);
+    write_host_file("tropico-pointer.py", POINTER_PY);
+    snprintf(script, sizeof script,
+             "/usr/bin/python3 '%s/tropico-pointer.py' > '%s/tropico-xptr.txt' 2>&1\n",
+             udir, udir);
+    if (!unix_sh(script, 1200)) return 0;
+    for (i = 0; i < 15; i++) {
+        h = CreateFileA(win, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                        OPEN_EXISTING, 0, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            ReadFile(h, buf, sizeof buf - 1, &got, NULL);
+            CloseHandle(h);
+            if (got) break;
+        }
+        Sleep(100);
+    }
+    if (!got) return 0;
+    buf[got] = 0;
+    p = strstr(buf, "POINTER ");
+    if (!p) return 0;
+    return sscanf(p + 8, "%ld %ld", x, y) == 2;
+}
+
+static DWORD WINAPI xcompare_thread(LPVOID unused)
+{
+    xout_t outs[8];
+    int n, i, mon = -1, sample;
+    long ox = 0, oy = 0;
+    (void)unused;
+
+    /* The monitor the game is on, read ONCE: inside a fullscreen virtual desktop it
+     * cannot change, and re-reading it would cost an xrandr per sample. */
+    n = xrandr_outputs(outs, 8);
+    for (i = 0; i < n; i++) if (outs[i].primary) mon = i;
+    if (mon >= 0) { ox = outs[mon].x; oy = outs[mon].y; }
+    logf_("[*] [xcmp] comparing X's pointer with Wine's. Screen is %dx%d; the monitor"
+          " Wine measures starts at %ld,%ld in X. Wine.x + %ld should equal X.x",
+          GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), ox, oy, ox);
+
+    /* BRACKETED, and it has to be: the X read goes through a subprocess and lands
+     * half a second away from the Wine read, so a moving pointer manufactures a
+     * mismatch out of nothing but latency. Measured on the control -- a stationary
+     * pointer agreed exactly, a moving one produced deltas up to 144 px that meant
+     * only that the mouse had moved.
+     *
+     * And stationary-only sampling would be useless here: the drift is MOTION-driven
+     * (s89), so the symptom is never present in the samples that would be exact. So
+     * Wine is read on both sides of the X read, and X is required to fall between
+     * them. Anything inside the bracket is latency; anything outside it is real, and
+     * the report says by how much it missed. */
+    for (sample = 0; sample < 40; sample++) {
+        POINT w1, w2;
+        long xr = -1, yr = -1, e1, e2, lo, hi, dx = 0, dy = 0;
+        int out = 0;
+        Sleep(2000);
+        if (!GetCursorPos(&w1)) continue;
+        if (!x_pointer(&xr, &yr)) continue;
+        if (!GetCursorPos(&w2)) continue;
+
+        e1 = (long)w1.x + ox; e2 = (long)w2.x + ox;
+        lo = e1 < e2 ? e1 : e2; hi = e1 < e2 ? e2 : e1;
+        if (xr < lo) { dx = xr - lo; out = 1; } else if (xr > hi) { dx = xr - hi; out = 1; }
+        e1 = (long)w1.y + oy; e2 = (long)w2.y + oy;
+        lo = e1 < e2 ? e1 : e2; hi = e1 < e2 ? e2 : e1;
+        if (yr < lo) { dy = yr - lo; out = 1; } else if (yr > hi) { dy = yr - hi; out = 1; }
+
+        logf_("[*] [xcmp] X %ld,%ld | wine+origin %ld,%ld -> %ld,%ld | %s%s",
+              xr, yr, (long)w1.x + ox, (long)w1.y + oy, (long)w2.x + ox, (long)w2.y + oy,
+              out ? "OUTSIDE the bracket by " : "inside the bracket",
+              out ? "" : "");
+        if (out)
+            logf_("[!] [xcmp]   ^ missed by %ld,%ld -- X and Wine disagree about where"
+                  " the pointer is", dx, dy);
+    }
+    logf_("[*] [xcmp] done -- 40 samples");
+    return 0;
 }
 
 /* The adopted mode wins over [Resolution]: it describes the screen the player is
