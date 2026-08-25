@@ -96,15 +96,39 @@ rm -rf "$GAMEDIR/artsets"
 #   tropico-pointer.py     dropped on the host so xrandr_query can find the pointer
 #   tropico-primary.lock   the heartbeat the primary-restoring watchdog watches
 #   unix-probe-*.txt       from the [Unix] probe, which is off unless asked for
+#   tropico-vd.state       the size of the virtual desktop the proxy last armed
+#   tropico-vd-fs.py       dropped on the host to fullscreen that desktop
 rm -f "$GAMEDIR/tropico-fix.ini" \
       "$GAMEDIR/tropico-fix.log" \
       "$GAMEDIR/tropico-launcher.log" \
       "$GAMEDIR/tropico-trace.log" \
       "$GAMEDIR/tropico-xrandr.txt" \
       "$GAMEDIR/tropico-pointer.py" \
-      "$GAMEDIR/tropico-primary.lock"
+      "$GAMEDIR/tropico-primary.lock" \
+      "$GAMEDIR/tropico-vd.state" \
+      "$GAMEDIR/tropico-vd-fs.py"
 rm -f "$GAMEDIR"/unix-probe-*.txt
 echo "   - removed tropico-fix.ini, the logs and the run-time scratch files"
+
+# ------------------------------------------------- the virtual desktop, if armed
+# [Display] VirtualDesktop=1 sets a value in the PREFIX, not in the game folder, so
+# deleting our files does not undo it -- and a prefix left in desktop mode would put
+# an UNPATCHED game in a 1920x1080 window forever, with nothing of ours left to
+# explain why. The proxy removes it when the flag goes to 0, but that needs one more
+# launch, and an uninstall is exactly the case where there will not be one.
+#
+# Edited as text rather than through `wine reg`: the prefix belongs to Proton, whose
+# wine is not on PATH, and `wine reg` against a foreign prefix is how you get a
+# second, wrong wineserver. Only the one line we wrote is removed, matched in full.
+case "$GAMEDIR" in
+  */steamapps/common/*)
+    PFX="${GAMEDIR%/common/*}/compatdata/33520/pfx/user.reg"
+    if [ -f "$PFX" ] && grep -q '^"Desktop"="TropicoVD"$' "$PFX" 2>/dev/null; then
+      sed -i '/^"Desktop"="TropicoVD"$/d' "$PFX"
+      echo "   - removed the virtual desktop from the Proton prefix"
+    fi
+    ;;
+esac
 
 # ---------------------------------------------------------------- menu entry
 # Only if it points HERE. The entry lives in $HOME and is shared, while this script

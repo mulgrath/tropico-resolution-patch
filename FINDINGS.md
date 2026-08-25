@@ -7371,3 +7371,96 @@ path (nothing is ever pending there, so the branch is unreachable), and it makes
 editions take the same route when a monitor does need switching.
 
 Do not re-run this experiment expecting a different answer.
+
+## 100. The Steam edition can have a virtual desktop after all — through the registry
+
+s90 concluded that `tools/tropico` "cannot be in the launch path" on Steam, and the old
+ROADMAP recorded a virtual desktop as **tried and rejected**: under Proton it "arrived
+bordered and not fullscreen" (ValveSoftware/wine#164 for `Decorated`/`Managed`,
+ValveSoftware/Proton#4673 for placement). Both statements are about the COMMAND LINE and
+about PRESENTATION. Neither says the desktop itself is unavailable, and this section is
+the measurement that separates the two.
+
+### 100.1 The registry route works, and it needs no command line
+
+`probes/vdprobe.c`, three runs in one prefix on a two-monitor desktop:
+
+| how | SM_CMONITORS | screen | virtual screen |
+|---|---|---|---|
+| bare `wine prog.exe` | 2 | 1920x1080 | 4480x1440 at 0,-360 |
+| `wine explorer /desktop=Tropico,1280x1024 prog.exe` | 1 | 1280x1024 | 1280x1024 at 0,0 |
+| **registry only, nothing on the command line** | **1** | **1280x1024** | **1280x1024 at 0,0** |
+
+```
+HKCU\Software\Wine\Explorer            Desktop   = TropicoVD
+HKCU\Software\Wine\Explorer\Desktops   TropicoVD = 1280x1024
+```
+
+So the thing s90 said could not be delivered to Steam can be: the proxy is already
+running inside that prefix with the right to write those two values.
+
+### 100.2 It can only ever arm the NEXT launch
+
+The desktop exists before the game's first instruction, so nothing running inside the
+game can create the one it is running in. Arming is therefore idempotent and rewrites
+the size every run; a display that changed since last time costs one launch at the old
+size. Same shape as `d32cc32`'s pending monitor change.
+
+### 100.3 Being inside is RECORDED, not inferred
+
+`tropico-vd.state` holds the size last armed, and the proxy calls itself inside when
+Wine reports exactly that size on exactly one monitor. The metrics alone cannot answer
+it: on a single-monitor desktop the inside and outside readings are identical, and
+`FindWindow("__wine_desktop_manager")` returns NULL from the game's process in every
+configuration — the desktop window belongs to `explorer.exe`. This is s90.3's rule
+again: when a sentinel is also a legal value, get the fact from a source with no
+overlap.
+
+### 100.4 The window really does arrive placed, and the EWMH message really does fix it
+
+Measured under system wine, which is the same window-manager path the Proton complaint
+described: the desktop window is titled `"TropicoVD - Wine desktop"` and arrives at
+**+320+531** — placed like any other window, which is exactly the "bordered and not
+fullscreen" report. After the proxy fires `tools/tropico-fullscreen.py`'s message
+through the s90.1 host channel:
+
+```
+0x3800007 "TropicoVD - Wine desktop": ("explorer.exe")  1920x1080+0+0  +0+360
+   0x3e00001 "Tropico": ("tropico.exe")                 1920x1080+0+0  +0+360
+_NET_WM_STATE(ATOM) = _NET_WM_STATE_FOCUSED, _NET_WM_STATE_FULLSCREEN
+```
+
+**The desktop is deliberately not named "Tropico".** The game's own window carries that
+title, and the helper matches by substring, so a desktop of that name would be a coin
+toss between fullscreening the desktop and fullscreening the game window inside it.
+"TropicoVD" is matched by no window the game creates.
+
+### 100.5 The full cycle, measured end to end
+
+GOG install, system wine, launched WITHOUT `tools/tropico` so the Steam path is what
+runs (2026-08-25):
+
+1. `VirtualDesktop=1`, run 1 — `armed a 1920x1080 virtual desktop`, and both registry
+   values are in `user.reg` afterwards.
+2. Run 2 — `inside the 1920x1080 virtual desktop`, `no monitor to choose and no primary
+   to change`, `asked the window manager to fullscreen TropicoVD`, and the geometry
+   above.
+3. `VirtualDesktop=0`, run 3 — `disarmed`, the `Desktop` value is gone from `user.reg`
+   (wine drops the now-empty key), `tropico-vd.state` is deleted.
+4. Run 4 — back on the real desktop: two monitors, the launch monitor chosen, the s90
+   path exactly as before.
+
+The `Desktops\TropicoVD` size entry is left behind on purpose: it names a size and
+nothing reads it without the `Desktop` value.
+
+### 100.6 What is NOT measured
+
+**Proton.** Everything above is system wine. The two Valve bugs the original rejection
+cited are Proton-side, and 100.4 only shows that the EWMH request is what a
+window manager acts on — not that Proton's desktop window accepts it. That run is the
+point of the flag.
+
+Also unanswered: which monitor the desktop lands on with more than one. Inside it the
+proxy no longer switches the primary, so placement is the window manager's choice;
+`_NET_WM_FULLSCREEN_MONITORS` is the lever if it turns out to need one.
+

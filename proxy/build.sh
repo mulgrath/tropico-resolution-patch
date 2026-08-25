@@ -34,7 +34,7 @@ OUT="${1:-binkw32.dll}"
 i686-w64-mingw32-gcc -shared -O2 -Wall -Wextra -msse2 -mfpmath=sse \
     -o "$OUT" tropico_fix.c artgen.c binkw32.def \
     -static-libgcc \
-    -lgdi32 -luser32 -lkernel32 \
+    -lgdi32 -luser32 -lkernel32 -ladvapi32 \
     -Wl,--enable-stdcall-fixup \
     -Wl,--no-insert-timestamp \
     -Wl,--image-base,0x6a000000
