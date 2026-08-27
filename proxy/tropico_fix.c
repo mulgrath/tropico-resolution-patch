@@ -6104,9 +6104,11 @@ static void bc_dump(const char *why)
         if (g_bc[i].hits) snap[n++] = g_bc[i];
     qsort(snap, n, sizeof(bc_row), bc_cmp);
 
-    logf_("[*] [blit] ==== census (%s): %u distinct (size @ position) tuples%s."
-          "  Most-drawn first -- fixed furniture floats up, scrolling terrain sinks.",
-          why, n, g_bc_lost ? ", TABLE OVERFLOWED so some were DROPPED" : "");
+    logf_("[*] [blit] ==== census (%s) -- the last %d s only: %u distinct"
+          " (size @ position) tuples%s.  Most-drawn first -- fixed furniture floats"
+          " up, scrolling terrain sinks.",
+          why, g_bc_every, n,
+          g_bc_lost ? ", TABLE OVERFLOWED so some were DROPPED" : "");
     for (unsigned i = 0; i < n; i++) {
         logf_("  [blit] %4dx%-4d at %5d,%-5d   x%u",
               snap[i].w, snap[i].h, snap[i].x, snap[i].y, snap[i].hits);
@@ -6118,6 +6120,16 @@ static void bc_dump(const char *why)
     }
     logf_("[*] [blit] ==== end census");
     free(snap);
+
+    /* Clear for the next window.  MEASURED, not tidiness: a single run saturated
+     * the 8192-slot table, and a full table drops NEW tuples -- so a HUD panel
+     * opened late in a session would never be recorded at all, and the census
+     * would look complete while silently missing the thing being investigated.
+     * Resetting makes each dump a WINDOW rather than a cumulative total, which is
+     * also the more useful reading: whatever is on screen now is redrawn every
+     * frame and so re-enters the table within one frame of the reset. */
+    memset(g_bc, 0, sizeof g_bc);
+    g_bc_used = 0; g_bc_lost = 0;
 }
 
 static DWORD WINAPI bc_thread(LPVOID unused)
