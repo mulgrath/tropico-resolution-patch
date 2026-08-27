@@ -28,7 +28,10 @@ done
 command -v import >/dev/null || {
   echo "!! ImageMagick's 'import' is not installed.  apt install imagemagick" >&2; exit 1; }
 
-GAMEDIR="$(tropico_find_dir)"
+# tropico_find_dir was renamed tropico_find_nearby in f39d694 and these two rig
+# scripts were not updated with it, so both had been dying at this line with
+# "command not found". TROPICO_DIR still wins, which is what the error below says.
+GAMEDIR="${TROPICO_DIR:-$(tropico_find_nearby "$PWD" || true)}"
 [ -n "$GAMEDIR" ] || { echo "!! could not find a Tropico install. Set TROPICO_DIR." >&2; exit 1; }
 OUT="$GAMEDIR/rig-shots"
 mkdir -p "$OUT"

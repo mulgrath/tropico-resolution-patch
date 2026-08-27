@@ -22,7 +22,10 @@ SELF="$(cd "$(dirname "$0")" && pwd)"
 # Tropico.EXE. But the extracted archive keeps a copy of this whole folder, so ./play
 # also gets run from wherever the user unpacked it, where the parent is not the game.
 # Looking one folder up and finding nothing is not a good enough answer there.
-GAMEDIR="$(tropico_find_nearby "$SELF" || true)"
+# TROPICO_DIR wins when set -- the rig runs this script straight out of the repo,
+# where "one folder up" is the repo and not a game at all. Same override the rig
+# and rigshot document.
+GAMEDIR="${TROPICO_DIR:-$(tropico_find_nearby "$SELF" || true)}"
 if [ -z "$GAMEDIR" ]; then
   tropico_wrong_folder_msg
   exit 1
