@@ -7590,3 +7590,100 @@ native size placed at an unscaled origin, the button moved and the plate is righ
 
 Until those numbers exist, which of the pair is wrong is **not known**, and the owner's
 reading (shadow wrong, button right) and its inverse are both still live.
+
+
+## 103. The blit census — one hook that sees every sprite of every widget class
+
+s102 ended with the offset provably not in any file, so the next evidence has to come
+from the draw itself. This is that instrument. It measures; it changes nothing.
+
+### 103.1 The leaf, not the dispatcher — and why that is not the obvious choice
+
+The tempting hook is `FUN_00501b90`, the style-0 dispatcher every piece goes through.
+It is the wrong one, and s50.7 already says why: it is handed **a position and nothing
+else**. All ten `mwbuildf` plates belong to widgets whose `.WIN` rect is `0,0`, so at the
+dispatcher they are ten *identical* calls. The per-sprite offset that actually separates
+the plates lives in the piece record and is applied further down. A dispatcher hook would
+faithfully log the widget origin and miss the entire quantity in dispute.
+
+`FUN_00538ba0` — the plain leaf of s62.1 — is where the two numbers meet. Its entry was
+read, not guessed:
+
+```
+sub esp,0x30 ; movsx eax,WORD PTR [ecx]      piece.x  int16 @ rec+0
+             ; movsx edi,WORD PTR [ecx+2]    piece.y  int16 @ rec+2
+add eax,[esp+0x44]                           + arg1   -> ABSOLUTE dest X
+add edi,esi   (esi = arg2)                   + arg2   -> ABSOLUTE dest Y
+             ; movsx edx,WORD PTR [ecx+4]    piece.w  int16 @ rec+4
+             ; movsx eax,WORD PTR [ecx+6]    piece.h  int16 @ rec+6
+```
+
+`ecx` is the piece record (fastcall). Arguments 4..7 are the clip box, and they identify
+themselves: the four early rejects test `dest_x > arg6`, `dest_x+w-1 < arg4`,
+`dest_y > arg7`, `dest_y+h-1 < arg5` — left, top, right, bottom. So one hook here yields,
+for every sprite of every widget class, **the source size and the absolute destination**.
+
+### 103.2 A census, not a stream
+
+This is the hottest path in the game: every piece of every sprite of every frame. Logging
+from inside it would perturb the frame time it exists to observe and emit a hundred
+megabytes of duplicate lines. So the hook does no I/O at all. Each distinct
+`(w, h, x, y)` is recorded once in an 8192-slot open-addressed table with a hit counter,
+O(1) per blit; a separate thread prints it. Sprites land at fixed places, so the table
+saturates in the first frame and afterwards only counters move.
+
+**The dump sorts by hit count descending, and that is the whole trick for reading it.** A
+HUD sprite is redrawn at the *same* position every frame, so its counter tracks the frame
+count. Scrolling terrain spreads over hundreds of positions that each take a few hits and
+never recur. Descending hits therefore floats the fixed furniture — which is the HUD — to
+the top, without the tool knowing what any asset is. `[Blit] MinY` is a second, cruder
+filter for the same problem, and the overflow flag is printed rather than swallowed.
+
+### 103.3 Validated in the rig, before it was handed over
+
+Run in the nested rig at 1920x1080 (s83): the hook installed at `0x00538ba0`, the game
+reached the menu, and the census recorded 326 distinct tuples with no crash and no
+refusal.
+
+That the plumbing works is the weaker claim. The stronger one is that the numbers *mean*
+what they are supposed to. Cross-checking every reported size against the sprites actually
+present in the generated `data/` set:
+
+```
+census tuples parsed:                              726
+sizes that exist as a real sprite in data/:  472 (65%)
+
+  30x29 at 932,681  x86   cour08.i16
+  26x31 at 879,679  x86   cour08.i16, sten10.i16, time16.i16
+  53x60 at 853,744  x16   nose61.i16
+  18x29 at 1370,714 x15   comi08.i16, comi12.i16, cour05.i16
+```
+
+The top of a menu-screen census is font sprites, which is exactly what a menu full of text
+should produce. Had the record fields been read at the wrong offsets, the sizes would not
+have resolved to real sprites at all. The remaining 35% are expected: clipped draws, and
+building `.imb` sprites, which are not loose `.i16` files and so were not in the index
+being checked against.
+
+### 103.4 How to read the run that matters
+
+Armed with `[Blit] Census=1` (plus `MinY`, `Delay`, `Every`). On a map with the build menu
+open, the plates and the buttons both appear near the top of the census, and s102.6's
+predictions are what they are checked against:
+
+```
+plate  mwbuildf [1]   expect 178x85 at 658,854
+button butrot   [0]   expect  80x37 at 745,900
+```
+
+Two outcomes, decided in advance so the data decides:
+
+* both at their predicted positions — the sprites land correctly and the visible offset is
+  *inside* the art, i.e. the rescaled pixels are not centred in their own box the way the
+  source was. That moves the search into `rescale_sprite`, not the layout.
+* one of them displaced — that one names the guilty rule, and by how much. A constant
+  delta is an origin; a delta proportional to the coordinate is a scale, and its ratio
+  names which design space the draw thinks it is in.
+
+Until those lines exist, which of the pair moved is **still not known**, and s102.7's two
+candidates both remain live.

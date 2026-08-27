@@ -87,6 +87,12 @@ static int locate_sections(void)
  */
 static int patch_world_viewport(UINT match_w, UINT new_w);
 static int patch_hud_probe(void);
+static int patch_blit_census(void);      /* s103 */
+static int g_bc_on;                      /* s103, armed from [Blit] Census; these
+                                          * three are read in the ini pass, which
+                                          * runs long before the census code, so
+                                          * they live up here with the prototype */
+static int g_bc_delay, g_bc_every, g_bc_miny;
 static int patch_pathb_recompute(BYTE *layout_fn);
 static int patch_chrome_scale(DWORD table_va);
 static int patch_vtext(int dy, int dx, int cliph, int have_dy, int have_dx, int have_cliph);
@@ -1066,6 +1072,21 @@ static void apply_patches(void)
                 logf_("[*] [chrome] ChromeScale=0 -- the six fmul operands are LEFT STOCK;"
                       " this run varies the draw style only");
             }
+        }
+    }
+
+    /* s103: the blit census (FINDINGS 102).  Read-only -- it tallies, it never
+     * changes a draw -- but it hooks the hottest path in the game, so it stays
+     * off unless the ini asks for it. */
+    {
+        char ip[MAX_PATH];
+        snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+        g_bc_on = GetPrivateProfileIntA("Blit", "Census", 0, ip);
+        if (g_bc_on) {
+            g_bc_delay = GetPrivateProfileIntA("Blit", "Delay", 25, ip);
+            g_bc_every = GetPrivateProfileIntA("Blit", "Every", 30, ip);
+            g_bc_miny = GetPrivateProfileIntA("Blit", "MinY", 0, ip);
+            if (patch_blit_census()) ok++; else fail++;
         }
     }
 
@@ -5981,6 +6002,199 @@ static DWORD WINAPI hudprobe_thread(LPVOID unused)
                   (unsigned)g_hud_mw, (unsigned)g_hud_mh);
         Sleep(g_hud_every * 1000);
     }
+}
+
+/* ------------------------------------------------------- s103 the blit census
+ *
+ * FINDINGS 102 named the pair -- the "shadows" are mwbuildf/mwinfof sprites drawn
+ * by class-4 widgets, the buttons are class-1 widgets positioned from the .WIN --
+ * and then killed every mechanism that could be read out of the files.  The art is
+ * generated exactly as PopTop's own 1280x1024 set says it should be, the .WIN
+ * arithmetic agrees, and compositing both rules offline at 1600x1200 and 1920x1080
+ * puts the buttons in the SAME relative place inside their plates.  So the offset
+ * is introduced at draw time and nothing on disk will show it.
+ *
+ * WHY THE LEAF AND NOT THE DISPATCHER.  The obvious hook is FUN_00501b90, but
+ * s50.7 already establishes what it receives: a position and nothing else.  All
+ * ten mwbuildf plates belong to widgets whose rect is 0,0, so at the dispatcher
+ * they are ten identical calls -- the per-sprite offset that actually separates
+ * the plates lives in the piece record and is applied further down.  Hooking the
+ * dispatcher would log the widget origin and miss the very quantity in question.
+ *
+ * FUN_00538ba0 is the plain leaf (s62.1).  Its entry was read, not guessed:
+ *
+ *      sub esp,0x30 ; movsx eax,[ecx]        piece.x   (int16 at rec+0)
+ *      ...          ; movsx edi,[ecx+2]      piece.y   (int16 at rec+2)
+ *      add eax,[esp+0x44]                    + arg1    -> absolute dest X
+ *      add edi,esi (esi = [esp+0x44]/arg2)   + arg2    -> absolute dest Y
+ *      movsx edx,[ecx+4]                     piece.w   (int16 at rec+4)
+ *      movsx eax,[ecx+6]                     piece.h   (int16 at rec+6)
+ *
+ * and args 4..7 are the clip box, which is what identifies them: the four early
+ * rejects test dest_x > arg6, dest_x+w-1 < arg4, dest_y > arg7, dest_y+h-1 < arg5.
+ * So one hook here yields, for EVERY sprite of EVERY widget class, the source size
+ * and the absolute destination.  That is the census.
+ *
+ * A CENSUS, NOT A STREAM.  This is the hottest path in the game -- every piece of
+ * every sprite of every frame.  Logging from inside it would change the thing being
+ * measured and produce a hundred megabytes of duplicate lines.  Instead each
+ * distinct (w, h, x, y) is recorded once in a fixed table with a hit counter, via a
+ * hash so the hot path is O(1) and does no I/O at all; a separate thread prints the
+ * table.  Sprites land at fixed places, so the table saturates in the first frame
+ * and then only the counters move.
+ */
+#define BC_CAP 8192u                     /* distinct (w,h,x,y) tuples kept       */
+typedef struct { short w, h, x, y; unsigned hits; } bc_row;
+static bc_row  g_bc[BC_CAP];
+static unsigned g_bc_used, g_bc_lost;    /* lost = tuples dropped once full      */
+
+/* Open addressing, power-of-two capacity, linear probe.  No locks: a torn read in
+ * a counter costs one hit in a diagnostic, and taking a lock in this path would
+ * perturb the frame time it is meant to observe. */
+static void bc_note(int w, int h, int x, int y)
+{
+    unsigned k = (unsigned)((w * 73856093) ^ (h * 19349663) ^ (x * 83492791) ^ (y * 2654435761u));
+    k &= (BC_CAP - 1);
+    for (unsigned n = 0; n < 64; n++) {
+        bc_row *r = &g_bc[(k + n) & (BC_CAP - 1)];
+        if (r->hits == 0) {
+            if (g_bc_used >= BC_CAP - 64) { g_bc_lost++; return; }
+            r->w = (short)w; r->h = (short)h; r->x = (short)x; r->y = (short)y;
+            r->hits = 1; g_bc_used++; return;
+        }
+        if (r->w == w && r->h == h && r->x == x && r->y == y) { r->hits++; return; }
+    }
+    g_bc_lost++;
+}
+
+/* __cdecl so the stub can push three arguments and clean up with one add. */
+static void __cdecl bc_hook(const short *rec, int bx, int by)
+{
+    int x, y;
+    if (!rec) return;
+    x = bx + rec[0]; y = by + rec[1];
+    /* The world draws through this leaf as well, and terrain lands at hundreds of
+     * distinct positions -- left unfiltered it saturates the table and buries the
+     * HUD.  MinY is the escape hatch: the HUD sits in the bottom band, so a floor
+     * a little above the bar's top edge keeps the census to the widgets.  Default
+     * 0 keeps everything, which is the right default for the first run. */
+    if (y < g_bc_miny) return;
+    bc_note(rec[2], rec[3], x, y);
+}
+
+static int bc_cmp(const void *a, const void *b)
+{
+    unsigned ha = ((const bc_row *)a)->hits, hb = ((const bc_row *)b)->hits;
+    return ha < hb ? 1 : ha > hb ? -1 : 0;      /* descending */
+}
+
+/* Sorting by hit count is the whole trick for reading this.  A HUD sprite is
+ * redrawn at the SAME position every frame, so its counter tracks the frame count;
+ * scrolling terrain spreads over hundreds of positions that each accumulate a few
+ * hits and then never recur.  Descending hits therefore floats the fixed furniture
+ * -- which is exactly the HUD -- to the top, with no knowledge of what the assets
+ * are.  The table is copied first: the game keeps writing to it while this runs,
+ * and sorting underneath a live writer is how a diagnostic starts lying. */
+static void bc_dump(const char *why)
+{
+    bc_row *snap = (bc_row *)malloc(sizeof(bc_row) * BC_CAP);
+    unsigned n = 0, shown = 0;
+    if (!snap) { logf_("[x] [blit] out of memory for the census snapshot"); return; }
+    for (unsigned i = 0; i < BC_CAP; i++)
+        if (g_bc[i].hits) snap[n++] = g_bc[i];
+    qsort(snap, n, sizeof(bc_row), bc_cmp);
+
+    logf_("[*] [blit] ==== census (%s): %u distinct (size @ position) tuples%s."
+          "  Most-drawn first -- fixed furniture floats up, scrolling terrain sinks.",
+          why, n, g_bc_lost ? ", TABLE OVERFLOWED so some were DROPPED" : "");
+    for (unsigned i = 0; i < n; i++) {
+        logf_("  [blit] %4dx%-4d at %5d,%-5d   x%u",
+              snap[i].w, snap[i].h, snap[i].x, snap[i].y, snap[i].hits);
+        if (++shown >= 400) {
+            logf_("  [blit] ... %u further tuples NOT printed (all with %u hits or"
+                  " fewer)", n - shown, snap[i].hits);
+            break;
+        }
+    }
+    logf_("[*] [blit] ==== end census");
+    free(snap);
+}
+
+static DWORD WINAPI bc_thread(LPVOID unused)
+{
+    (void)unused;
+    Sleep((DWORD)g_bc_delay * 1000);
+    for (;;) {
+        bc_dump("periodic");
+        if (g_bc_every <= 0) return 0;
+        Sleep((DWORD)g_bc_every * 1000);
+    }
+}
+
+/* The 24-byte entry above, with no absolute operand in it, so the same bytes match
+ * any build.  Verified unique in the GOG .text -- and it has to be, because the
+ * ~16 leaves resemble each other closely and hooking the wrong one would produce a
+ * census of the wrong sprites while looking perfectly healthy. */
+static const BYTE BLIT_SIG[] = {
+    0x83,0xec,0x30,             /* sub   esp,0x30                */
+    0x0f,0xbf,0x01,             /* movsx eax,WORD PTR [ecx]      */
+    0x53, 0x55, 0x56,           /* push  ebx / ebp / esi         */
+    0x8b,0x74,0x24,0x44,        /* mov   esi,[esp+0x44]          */
+    0x57,                       /* push  edi                     */
+    0x03,0x44,0x24,0x44,        /* add   eax,[esp+0x44]          */
+    0x0f,0xbf,0x79,0x02,        /* movsx edi,WORD PTR [ecx+0x2]  */
+    0x8b,0xea                   /* mov   ebp,edx                 */
+};
+
+static int patch_blit_census(void)
+{
+    BYTE *fn = find_unique(BLIT_SIG, sizeof BLIT_SIG, g_text, g_textlen,
+                           "leaf blitter (FUN_00538ba0)");
+    if (!fn) { logf_("[x] [blit] leaf blitter signature not found -- census NOT armed");
+               return 0; }
+
+    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 128, MEM_COMMIT | MEM_RESERVE,
+                                      PAGE_EXECUTE_READWRITE);
+    if (!stub) { logf_("[x] [blit] VirtualAlloc failed"); return 0; }
+
+    /* Six bytes are relocated (sub esp,0x30 ; movsx eax,[ecx]) -- both are
+     * position independent, so they can simply be copied. */
+    int i = 0;
+    stub[i++] = 0x60;                                   /* pushad   esp -= 32   */
+    stub[i++] = 0x9c;                                   /* pushfd   esp -= 4    */
+    /* At function entry [esp+4]=arg1, [esp+8]=arg2.  36 bytes of saves are now
+     * below that, and each push moves the window another 4. */
+    stub[i++] = 0xff; stub[i++] = 0x74; stub[i++] = 0x24; stub[i++] = 0x2c; /* push [esp+0x2c] -> arg2 */
+    stub[i++] = 0xff; stub[i++] = 0x74; stub[i++] = 0x24; stub[i++] = 0x2c; /* push [esp+0x2c] -> arg1 */
+    stub[i++] = 0x51;                                   /* push ecx  (piece rec) */
+    stub[i++] = 0xe8;                                   /* call bc_hook          */
+    { DWORD r = (DWORD)(SIZE_T)((BYTE *)bc_hook - (stub + i + 4));
+      memcpy(stub + i, &r, 4); i += 4; }
+    stub[i++] = 0x83; stub[i++] = 0xc4; stub[i++] = 0x0c;   /* add esp,12        */
+    stub[i++] = 0x9d;                                   /* popfd                 */
+    stub[i++] = 0x61;                                   /* popad                 */
+    memcpy(stub + i, fn, 6); i += 6;                    /* the relocated entry   */
+    stub[i++] = 0xe9;                                   /* jmp back past it      */
+    { DWORD r = (DWORD)(SIZE_T)((fn + 6) - (stub + i + 4));
+      memcpy(stub + i, &r, 4); i += 4; }
+
+    BYTE det[6];
+    det[0] = 0xE9;
+    { DWORD r = (DWORD)(SIZE_T)(stub - (fn + 5)); memcpy(det + 1, &r, 4); }
+    det[5] = 0x90;
+    if (!poke(fn, det, 6)) { logf_("[x] [blit] VirtualProtect failed"); return 0; }
+
+    logf_("[+] [blit] census armed on the leaf blitter at %p (stub %p, %d bytes)."
+          "  Every sprite's SOURCE SIZE and ABSOLUTE DESTINATION is tallied%s; the"
+          " table prints %d s in and every %d s after.",
+          (void *)fn, (void *)stub, i,
+          g_bc_miny ? " for destinations at or below MinY" : "",
+          g_bc_delay, g_bc_every);
+    if (g_bc_miny)
+        logf_("  [blit] MinY=%d -- sprites landing above that row are NOT counted",
+              g_bc_miny);
+    CreateThread(NULL, 0, bc_thread, NULL, 0, NULL);
+    return 1;
 }
 
 static void maybe_start_hudprobe(void)
