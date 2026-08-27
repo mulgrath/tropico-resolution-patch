@@ -7464,3 +7464,129 @@ Also unanswered: which monitor the desktop lands on with more than one. Inside i
 proxy no longer switches the primary, so placement is the window manager's choice;
 `_NET_WM_FULLSCREEN_MONITORS` is the lever if it turns out to need one.
 
+
+
+## 102. The HUD button shadows: what they are, and four mechanisms ruled out
+
+Owner, 2026-08-26: "the shadows underneath the buttons in the center of the HUD are
+offset. It seems like they did not receive the same offset the buttons did when they
+scaled... the buttons are part of the UI that scales correctly with the resolution but
+the shadows are separate assets that are like the chrome that get scaled separately."
+
+The hypothesis is exactly right about the *shape* of the thing — two objects, two rules —
+and it names the right pair. What follows is the identification, and then four candidate
+mechanisms killed with evidence. **No root cause yet.** Nothing is fixed here.
+
+### 102.1 The two objects, named
+
+The bottom bar's centre is a flat wall. `int_main.i16` sprite 0 (1600x505 at y=695) is the
+bar plate, and rendering it shows the minimap diamond on the left and the ring hole on the
+right with **nothing between them** — no button shadows are baked into the bar. So the
+shadows are separate sprites, as the owner supposed.
+
+They are the *frame* assets, and the widgets that draw them are class 4 with an authored
+rect covering the entire virtual screen:
+
+```
+addbldge.win / info.win / edict.win
+   widgets 20-29, 50   cls 0x004   x=0 y=0 3200x2400   mwbuildf.imm / mwinfof.imm
+```
+
+`mwbuildf.i16` carries 11 sprites at ABSOLUTE positions in the art's own pixel space:
+
+```
+   [ 0] x=513  y=883   741x91     the strip behind the tab row
+   [ 1] x=548  y=949   148x94  \
+   [ 2] x=548  y=1034  148x98   |  the 5 x 2 grid of cell plates --
+   ...                          |  these are the "shadows"
+   [10] x=1094 y=1034  151x98  /
+```
+
+The buttons are a different class entirely, positioned from the `.WIN` and not from art:
+
+```
+   widgets 40-49   cls 0x001   x=1242.. y=2000/2172   134x82   butrot.imm
+   widgets 51-60   cls 0x001   x=994..  y=1784        248x164  mwbuilbe.imm
+```
+
+So the pairing is: **plate = class-4 widget + art-space sprite coordinates; button =
+class-1 widget + `.WIN` virtual rect.** Two objects, two rules, exactly as reported.
+
+### 102.2 Ruled out: a sprite escaping the rescale
+
+`ag_rescale_container` copies a sprite through **with its geometry untouched** when
+`fmt != 2 || w == 0 || h == 0`. Such a sprite would keep its 1600x1200 coordinates while
+every neighbour moved — a perfect fit for the symptom.
+
+Measured across the whole shipped set: **0 of 267 generated assets contain a passthrough
+sprite.** Every sprite is fmt 2 with non-zero dimensions, so every sprite took the same
+`xs`/`ys`. Art cannot disagree with art this way.
+
+### 102.3 Ruled out: a missing asset falling back to the archive
+
+If `mwbuildf.i16` were absent from the loose set the game would read the archived
+1600x1200 copy and draw the plate at (548, 949) while the buttons moved to the 1920x1080
+positions — an offset of (-110, +95), which would look precisely like this bug. It is not
+absent. All of `mwbuildf mwinfof mwbuilbe mwinfob butrot int_main edictwin` are present in
+`data/` and in `ARTSET-MANIFEST.txt`, and none appears in `ARTSET-STATIC.txt`.
+
+### 102.4 Ruled out: the generator disagreeing with PopTop's own non-4:3 set
+
+PopTop shipped a **1280x1024** set — 5:4, not 4:3 — so they had to answer this exact
+question themselves, by hand. Rescaling their `.i16` to 1280x1024 with the generator's
+per-axis rule and diffing against their hand-authored `.i12` gives a control nobody has to
+trust me for: 30 of 267 assets deviate by more than a pixel, and **the frame assets are
+not among them**:
+
+```
+mwbuildf  [ 1] predicted (438, 810, 118, 80)   PopTop (438, 810, 118, 80)
+mwbuildf  [ 2] predicted (438, 882, 118, 84)   PopTop (438, 882, 118, 84)
+mwbuilbe  [ 0] predicted (3, 0, 96, 70)        PopTop (3, 0, 96, 70)
+```
+
+The plates and the button *bases* match PopTop exactly. What does deviate is button
+ICON art (`mwbuilbe` sprites 1/3/5/7, `mwinfob`, `edictwin`) and the font assets — PopTop
+redrew pictorial glyphs per resolution rather than scaling them, which is an art-quality
+difference and not a placement rule. **The per-axis scale is PopTop's own rule for exactly
+the sprites at issue.**
+
+### 102.5 Ruled out: a stale art set
+
+If `data/` held a set generated for a different mode than the live one, `g_chr_fx/fy`
+(3200/art_w, 2400/art_h) would no longer equal the live factors and path-B widgets would
+shift against path-A ones. Both installs log `art set in data/ matches the mode
+(1920x1080)` against a live `1920x1080`, so the two factor pairs are identical and the
+s53 patch is the exact identity.
+
+### 102.6 The offline model does NOT reproduce the bug — which is the finding
+
+Compositing the plates at their art coordinates against the buttons at
+`.WIN * (W/3200, H/2400)`, for stock 1600x1200 and for the generated 1920x1080 set, puts
+the buttons in the *same relative position inside their plates* in both. The arithmetic
+agrees end to end:
+
+```
+                      1600x1200          1920x1080        ratio
+plate  [1] origin     (548, 949)         (658, 854)       1.201 / 0.900
+button [40] origin    (621, 1000)        (745, 900)       1.200 / 0.900
+plate -> button       (+73, +51)         (+87, +46)       1.192 / 0.902
+```
+
+So the files are right and the `.WIN` arithmetic is right. **The offset is introduced at
+draw time, by a rule that is not in any file.** That points at the one thing this project
+has explicitly never established — s52.3: "Only class 4 has a style field. The 26 class-1
+buttons, 114 class-0x80 frames and the rest draw through their own methods; whether any of
+them scales is **not established**." The plate is class 4. The button is class 1.
+
+### 102.7 The instrument this needs
+
+Not another detour per widget class. `FUN_00501b90` is the dispatcher that resolves a
+piece record and tail-calls one of ~16 leaf blitters (s62), so **one hook there sees every
+sprite of every class** and can log source dimensions against the destination rect actually
+used. Filtering to the handful of source sizes named in 102.1 keeps it to a few lines per
+frame rather than a flood. Two numbers settle it: if the class-1 destination rect is the
+`.WIN` rect scaled per-axis, the button is right and the plate moved; if it is the art's
+native size placed at an unscaled origin, the button moved and the plate is right.
+
+Until those numbers exist, which of the pair is wrong is **not known**, and the owner's
+reading (shadow wrong, button right) and its inverse are both still live.
