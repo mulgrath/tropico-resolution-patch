@@ -9142,3 +9142,53 @@ edition, with the mechanism named and logged per run, is not the same kind of ev
 four clean runs of an intermittent symptom.
 
 The remaining untested surface is now exactly one item: **a fresh install** (111.9).
+
+### 111.11 The fresh install, tested end to end
+
+111.9's last open item. Built a release from a **clean clone** (so `git ls-files` decides
+what ships, not the working tree), installed it into a GOG-shaped folder — `Tropico/app/`
+holding `Tropico.EXE` and `data/`, archive extracted beside it — and uninstalled again.
+
+```
+  == Found Tropico at .../Tropico/app   (this was run from .../Tropico)
+     - preserved the original binkw32.dll as binkw32_orig.dll
+     - installed binkw32.dll and verified it
+     - wrote tropico-fix.ini
+```
+
+Everything this session changed arrived intact, and the DLL is byte-identical to the
+built one rather than a stale committed copy:
+
+```
+  proxy         de0aef7be22c3b29  == proxy/binkw32.dll
+  launcher      append-log present, settle-poll present
+  launchpoint   placement() present, and RUN from the installed copy -> "3200 216 placement"
+  ini           carries s109's corrected VirtualDesktop warning
+```
+
+The last line is the one worth having: the *installed* helper was executed, not just
+grepped, and answered `placement`. 111.4's lesson was that a fix in a copy nobody runs is
+indistinguishable from no fix, so the check has to run the shipped artefact.
+
+Uninstall restores the folder to exactly `Tropico.EXE`, `data/`, the original
+`binkw32.dll` (byte-compared) and its own script.
+
+**One hazard found, and it is the installer working as designed.** Installing from a test
+copy *repointed the applications-menu entry at the test folder*:
+
+```
+  - NOTE: the applications-menu entry pointed at /mnt/Windows/GOG Games/Tropico/app;
+          it now starts this one. That install still works from its ./play.
+```
+
+Correct behaviour — the entry is shared and per-`$HOME`, and it says what it did — but it
+means **testing an install silently hijacks the real one's menu entry**, which a test run
+in a scratch directory has no business doing to a working install. Restored by hand here.
+The uninstall side has no such hazard and does not need one: it removes the entry only when
+`Exec=$GAMEDIR/play` matches, a guard whose comment records that removing it
+unconditionally once took the entry from a different working install. The install side
+should arguably get the mirror-image guard — refuse to repoint an entry at a folder that
+was never played from — but that is a change to shipped behaviour on the strength of one
+test-harness inconvenience, so it is recorded and not made.
+
+With this, **nothing on 111.9's untested list remains.**
