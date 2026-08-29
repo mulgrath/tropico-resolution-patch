@@ -14,17 +14,22 @@ game that isn't generated on your own machine from your own copy.
   HOW TO INSTALL
 --------------------------------------------------------------------------------
 
-1. Find your Tropico folder -- the one that contains Tropico.EXE.
+1. Find your Tropico folder.
 
      GOG    usually  C:\GOG Games\Tropico
      Steam  usually  C:\Program Files (x86)\Steam\steamapps\common\Tropico
             (in Steam: right-click the game, Manage, Browse local files)
 
-2. Extract this ZIP *into that folder*, keeping its folder structure.
-   When you are done, install.bat sits right next to Tropico.EXE.
+   On GOG the game itself lives in an "app" subfolder, so Tropico.EXE is in
+   C:\GOG Games\Tropico\app. Either folder is fine -- install.bat looks in
+   "app" and a few folders up, so anywhere inside your Tropico installation
+   works.
 
-   Do not extract it somewhere else and copy files in by hand. Some unzip tools
-   flatten folders; this one needs the tropico-patch\ folder to survive.
+2. Extract this ZIP *into that folder*, keeping its folder structure.
+
+   Do not extract it somewhere else -- Downloads, say -- and do not copy the
+   files in one at a time. Some unzip tools flatten folders; this one needs the
+   tropico-patch\ folder to survive.
 
 3. Double-click install.bat.
 
@@ -72,8 +77,10 @@ given is what you can read.
   IF SOMETHING LOOKS WRONG
 --------------------------------------------------------------------------------
 
-"install.bat says Tropico.EXE is not in this folder"
-    The ZIP was extracted to the wrong place. See step 2 above.
+"install.bat says it could not find Tropico near this folder"
+    The ZIP was extracted somewhere outside your Tropico installation --
+    Downloads is the usual one. Move the extracted folder into the Tropico
+    folder and run install.bat again. See step 2 above.
 
 The game is in Program Files and install.bat cannot copy
     Right-click install.bat and choose "Run as administrator".
@@ -89,6 +96,35 @@ The patch stopped working after Steam updated or verified files
     choice, picking it could leave you unable to load a map *or* get back to
     the settings screen. The software renderer is what you are already playing
     on, and a modern processor runs it without effort.
+
+Two monitors
+    The game opens on your MAIN monitor, at that monitor's resolution. To play
+    on the other one, make it your main display first:
+
+        Settings -> System -> Display -> pick the monitor
+                 -> Multiple displays -> "Make this my main display"
+
+    Tropico's fullscreen always goes to whichever monitor Windows calls the main
+    one. The patch could move that setting for you at every launch, and it used
+    to, but that is a change to your desktop rather than to the game -- and if
+    the game crashes, there is nothing left running to put it back. So it is off
+    unless you ask for it:
+
+        [Display]
+        SetPrimary=1
+
+    With that on, the patch makes whichever screen you launched from the main one
+    for the length of the game and puts it back when the game exits. If the game
+    is ended some way it cannot see -- a crash, or Task Manager -- your main
+    display stays moved until the next time you start Tropico, or until you set
+    it back yourself in Display settings above.
+
+    To pin one monitor rather than following your mouse, add its device name:
+
+        [Display]
+        Monitor=\\.\DISPLAY2
+
+    Every launch lists the names it can see in tropico-fix.log.
 
 Changing resolution later
     You usually do not have to. The patch reads the display every time it

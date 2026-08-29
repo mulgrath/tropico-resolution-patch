@@ -19,10 +19,14 @@ Download the latest release from the
 
 ### Windows
 
-1. Find your Tropico folder — the one with `Tropico.EXE` in it.
-   (In Steam: right-click the game → Manage → Browse local files.)
+1. Find your Tropico folder. On Steam: right-click the game → Manage → Browse
+   local files. On GOG it is usually `C:\GOG Games\Tropico`, and the game itself
+   sits in an `app` subfolder inside it — either is fine.
 2. Extract the zip **into that folder**.
 3. Double-click **`install.bat`**.
+
+The installer looks for the game in that folder, in an `app` subfolder, and a few
+folders up, so anywhere inside your Tropico installation will do.
 
 Then start Tropico the way you normally do.
 
@@ -46,8 +50,13 @@ cannot be stretched, so the patch redraws it at your resolution from the game fi
 already own. That happens the first time you play at a new resolution and takes about a
 second. Nothing is downloaded, and no game files are changed.
 
-**Two monitors?** Start the game from the screen you want to play on. It matches itself
-to that screen and puts your desktop back the way it was when you quit.
+**Two monitors?** On Linux, start the game from the screen you want to play on: it
+matches itself to that screen and puts your desktop back the way it was when you quit.
+On Windows the game opens on your main monitor, at that monitor's resolution — make the
+one you want your main display in Windows' Display settings. The patch can follow your
+launch monitor there too (`[Display] SetPrimary=1`), but moving your main display is a
+change to your desktop that nothing can undo if the game crashes, so it is not the
+default. `tropico-fix.ini` explains the trade in full.
 
 **Changing your resolution later** needs nothing from you. The patch checks the display
 every time the game starts.
