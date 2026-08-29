@@ -9270,3 +9270,31 @@ occur while it was watching; s107 established that `XCompare` cannot answer the 
 was written for (42% misses in a run with no drift) and s107.3(b) sketches the
 event-triggered probe that could. Nothing about it changed in this release, and 1.2 does
 not claim otherwise.
+
+### 112.4 Branching, from 1.2 onward
+
+Owner, 2026-08-29: *"We should have main be the current release build and then a feature
+branch be the next working version. In this case, we'd have used 1.2 as the feature branch
+while main stayed at 1.1. Then, when we're ready we merge to main."*
+
+```
+  master   the current release, and nothing else
+  <next>   named for the version being worked towards; all work lands here
+  v<X.Y>   an annotated tag at the merge, carrying the artefact hashes
+```
+
+Adopted at 1.2. What it was before: one long-lived branch (`steam-virtual-desktop`) 107
+commits ahead of a `master` that had stopped meaning anything, and **no tags at all**, so
+"which commit is 1.1?" had no answer. That is the part worth fixing rather than the branch
+names — a release branch whose position is a convention decays at the next commit, while a
+tag does not, which is why `v1.2` carries the three hashes and not just a name.
+
+`v1.2` is at `e220e0b`. It differs from the tree the archives were built at (`cfb29cb`) by
+`FINDINGS.md` alone — nothing on the ship list — so a rebuild from the tag reproduces the
+published bytes. Checked before tagging rather than assumed.
+
+Not done, and deliberately: **1.0 and 1.1 are not tagged retroactively.** Nothing records
+which commit either was built from, and a tag placed by inference would look exactly as
+authoritative as one placed by knowledge. `dist/` is gitignored, so even the archives that
+still exist locally cannot settle it without comparing their contents against candidate
+trees. If that archaeology is ever wanted it is a real, bounded job; guessing is not.
