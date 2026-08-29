@@ -9302,3 +9302,62 @@ which commit either was built from, and a tag placed by inference would look exa
 authoritative as one placed by knowledge. `dist/` is gitignored, so even the archives that
 still exist locally cannot settle it without comparing their contents against candidate
 trees. If that archaeology is ever wanted it is a real, bounded job; guessing is not.
+
+### 112.5 What of 1.2 actually runs on Windows, and what has never been tested there
+
+Asked before a Windows test pass. Worth writing down, because the answer is narrower than
+"1.2 changed a lot, so test everything".
+
+**Exactly one of this session's changes executes on Windows: s106**, the HUD panel movie.
+It is a signature-matched patch on the game's own code, so it is platform-independent by
+construction and runs on the same PE we have been patching under Wine. The rest cannot:
+
+```
+  s108  launch_mode_check()  fires only when g_launch_w is set, which requires the
+                             xrandr path -- never reached on Windows
+  s109  VirtualDesktop       documentation for a Wine-only feature, default 0
+  s110  launcher log/poll    a shell script; not in the Windows package at all
+  s111  placement probe      reached only through the host channel (below)
+```
+
+The gate is structural rather than a flag, which is the reason to trust it:
+
+```c
+  static int game_unix_dir(char *out, size_t cap) {
+      if (!((g_dir[0] == 'Z' || g_dir[0] == 'z') && g_dir[1] == ':')) return 0;
+```
+
+Every host-side call — `xrandr`, the pointer/placement probe, the virtual desktop — goes
+through `unix_sh`, which needs that path. On a real `C:\` install it returns 0 and the
+whole Linux display apparatus is inert without a single platform `#ifdef`. Verified by
+unpacking the shipped zip: it contains the DLL, the ini, LICENSE, NOTICE, VERSION and the
+two `.bat` files, and **no Linux helper at all**.
+
+So on Windows the mode comes from `pick_mode()` against `GetSystemMetrics`, with
+`[Resolution]` shipped empty on purpose (b169d81).
+
+**The real unknown is older than this session: the `.bat` installers have never met real
+`cmd.exe`.** 3a89814 reasons throughout about behaviour "under wine's cmd" — that is where
+they were written and debugged, and that commit's own story is cmd's parsing of labels
+inside parenthesised blocks silently breaking every run. Wine's cmd is a reimplementation;
+agreement with it is not evidence about the real one. Nothing in `FINDINGS` records a run
+on Windows.
+
+Worth watching in that pass, in rough order of "irreversible if wrong":
+
+* `install.bat`'s size guard on `binkw32_orig.dll` — 291328 bytes, the one step that cannot
+  be undone, and deliberately size-based because `findstr` cannot search a binary and
+  `fc /b` called two different DLLs identical under Wine.
+* `uninstall.bat` restoring **only** a 291328-byte backup and refusing anything else, and
+  its art-removal subroutine, which was moved out of a chained `if exist ... & set /a` that
+  deleted three files and reported two.
+* The Extract All case — extracting into the Tropico folder lands one level below it, which
+  both scripts are written to handle and neither has been shown to handle on Windows.
+* SmartScreen and antivirus on an unsigned DLL that writes another process's memory;
+  `READ-ME-FIRST.txt` exists to answer that rather than ask for trust.
+* Steam's "Verify integrity of game files" replacing `binkw32.dll` — documented, worth
+  confirming the recovery instructions are right.
+
+One cosmetic thing found while checking: the shipped `tropico-fix.ini` is one template for
+both platforms, so a Windows player reads four references to wine and xrandr in options
+that cannot apply to them. Not a defect; noted so it is a decision rather than an oversight.
