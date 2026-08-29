@@ -9361,3 +9361,29 @@ Worth watching in that pass, in rough order of "irreversible if wrong":
 One cosmetic thing found while checking: the shipped `tropico-fix.ini` is one template for
 both platforms, so a Windows player reads four references to wine and xrandr in options
 that cannot apply to them. Not a defect; noted so it is a decision rather than an oversight.
+
+**Clean the slate first, and note WHY it is not optional here.** The GOG install lives on
+the Windows partition — `/mnt/Windows/GOG Games/Tropico/app` under Linux *is*
+`C:\GOG Games\Tropico\app` under Windows — so the Linux-side patch was sitting in the
+folder the Windows installer would land on. Uninstalled from both editions before the pass:
+
+```
+  binkw32.dll   restored to the stock 291328 bytes in both
+  data/         288 generated files removed by manifest, leaving exactly the 21 the
+                game ships loose (1 .pal, 16 .imb, 4 .PK2) -- identical in both editions
+                and matching §24's inventory
+  Tropico.EXE   compared against Tropico.EXE.orig: byte-identical, so the executable was
+                never modified and that .orig is a redundant early backup, not evidence
+```
+
+The uninstaller reported its own unexpected leftovers rather than silently ignoring them
+(`tropico-vmsize.log`, `tropico-xptr.txt`) — worth keeping, it is the only reason those
+were noticed.
+
+**What is deliberately still there, because a stale copy has already cost one wrong
+diagnosis (111.4):** `tropico-resolution-patch-1.1/` and its tarball sit beside the game on
+the Windows partition. That is the same shape of hazard as 111.4's three launchers — an old
+patch beside a new one, in a folder an installer walks up into. `install.bat` looks one
+level up for `Tropico.EXE`, so it will not install *from* the wrong folder, but a tester who
+double-clicks the wrong `install.bat` has no way to tell. Not deleted here: they are the
+owner's files, not the patch's.
