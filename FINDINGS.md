@@ -7687,3 +7687,127 @@ Two outcomes, decided in advance so the data decides:
 
 Until those lines exist, which of the pair moved is **still not known**, and s102.7's two
 candidates both remain live.
+
+
+## 104. The census verdict: NEITHER moved. Every widget class scales by the same rule
+
+The run s103.4 asked for exists. Owner, 2026-08-29: "to me, they actually seemed fine."
+The census agrees, and it agrees to the pixel. `logs/blit-census-3840x2160.log.gz` is the
+run, preserved because the proxy `DeleteFileA`s its own log at every launch
+(`proxy/tropico_fix.c:6450-6451`) — a second launch would have destroyed it.
+
+The run is **3840x2160** on the GOG build, build menu open on a map. That is not the
+1920x1080 the s102 report was made at; see 104.5 before treating this as a close.
+
+### 104.1 The two scales, and the four things that use them
+
+Two factor pairs are in play, and every number below is one of them:
+
+```
+art factors    W/1600, H/1200   = 2.400, 1.800    sprite coordinates inside a .i16
+WIN factors    W/3200, H/2400   = 1.200, 0.900    widget rects in .WIN virtual space
+```
+
+`addbldge.win` (3200x2400, 61 widgets) extracted from `px4.PK2` gives the authored rects.
+Class handlers are the ones already tabled at FINDINGS line ~2856:
+
+```
+   0-9    cls 0x004  FUN_00502370   x=1116,1389,1661,1934,2207  y=1914/2086  260x156
+  10-19   cls 0x080  FUN_0051eb30   same five rects
+  20-29   cls 0x004  FUN_00502370   0,0 3200x2400        <- the plates, art-space
+  30-39   cls 0x004  FUN_00502370   same five rects
+  40-49   cls 0x001  FUN_00517d80   x=1242,1515,1787,2060,2333  y=2000/2172  134x82
+  51-60   cls 0x001  FUN_00517d80   x=994..2263                 y=1784       248x164
+```
+
+### 104.2 Class 4, art-space (`mwbuildf` — the "shadows"): exact
+
+Authored sprite coordinates x art factors, against the census:
+
+```
+  sprite   authored (1600x1200)      predicted x2.4/x1.8      census
+  [ 0]     513, 883   741x91         1231.2,1589.4 1778x164   1778x164 @ 1231,1589
+  [ 1]     548, 949   148x94         1315.2,1708.2  355x169    355x169 @ 1315,1708
+  [ 2]     548,1034   148x98         1315.2,1861.2  355x176    355x176 @ 1315,1861
+  [10]    1094,1034   151x98         2625.6,1861.2  362x176    362x176 @ 2626,1861
+```
+
+Four for four, and the whole 5x2 grid is present at the matching pitch (x = 1315, 1644,
+1970, 2297, 2626; y = 1708, 1861).
+
+### 104.3 Class 1, .WIN-space (`butrot`, `mwbuilbe` — the buttons): exact
+
+This is the quantity s102.7 said was **not established** — whether class 1 scales at all,
+and by what. It does, by the WIN factors, per-axis, with no other rule:
+
+```
+  butrot  .WIN 134x82        predicted x1.2/x0.9      census (161x74)
+    1242,2000                1490.4,1800.0            1490,1799
+    1515,2000                1818.0,1800.0            1818,1799
+    1787,2000                2144.4,1800.0            2144,1799
+    2060,2000                2472.0,1800.0            2472,1799
+    1242,2172                1490.4,1954.8            1490,1954
+    1515,2172                1818.0,1954.8            1818,1954
+     size 134x82  ->  160.8x73.8  ->  161x74
+
+  mwbuilbe .WIN y=1784 -> 1605.6; every drawn column landed on 1605:
+    x  1160 -> 1392.0  obs 1392      1720 -> 2064.0  obs 2064
+       1301 -> 1561.2  obs 1561      1844 -> 2212.8  obs 2212
+       1442 -> 1730.4  obs 1730      1986 -> 2383.2  obs 2383
+       1577 -> 1892.4  obs 1892      2120 -> 2544.0  obs 2544
+```
+
+`butrot` at (1490,1799) is **s102.6's own prediction** — it predicted (745,900) for
+1920x1080, and (1490,1800) is that same arithmetic at twice the width. Off by one row,
+which is rounding: the engine is not uniformly floor (2625.6 -> 2626, 1800.0 -> 1799), so
+read every match here as "within 1 px", never as exact integer identity.
+
+### 104.4 The nesting, which is what the eye actually judges
+
+Plate [1] and the class-4 grid cell that sits in it, checked as margins rather than
+positions, because a margin is what "offset" means:
+
+```
+                     authored, at 1600x1200        at 3840x2160        expected
+  left    plate.x   548 vs cell 558   =  10        1315 vs 1339 = 24   10 x2.4 = 24.0
+  right                              =   8         1670 vs 1651 = 19    8 x2.4 = 19.2
+  top     plate.y   949 vs cell 957   =   8        1708 vs 1722 = 14    8 x1.8 = 14.4
+  bottom                             =   8         1877 vs 1863 = 14    8 x1.8 = 14.4
+```
+
+The authored inset is not symmetric (10/8/8/8) and the rendered one is not symmetric
+either, in the same direction, by the right factor on each axis. The two rows differ —
+row 1 gives +14, row 2 gives +16 — and that too is authored, not drift: the authored top
+insets are 8 and 9 art px (plate [1] y=949 vs cell y=957; plate [2] y=1034 vs cell
+y=1043), and 8 x1.8 = 14.4 while 9 x1.8 = 16.2.
+
+So the answer to s103.4's decision is **the first branch, and then not even that**: both
+land at their predicted positions, and the sprites inside are not visibly off-centre in
+their own boxes either. At 3840x2160 there is no misplacement to explain. `rescale_sprite`
+does not need to be opened on this evidence.
+
+### 104.5 What this does NOT establish
+
+* **The resolution is wrong for the complaint.** s102 was reported at 1920x1080; this run
+  is 3840x2160, where both factor pairs are clean multiples (2.4/1.8 and 1.2/0.9) and
+  every product lands within a pixel of an integer. 1920x1080 gives 1.2/0.9 and 0.6/0.45 —
+  the *art* factors are the ugly ones there, and a half-pixel rule would show up in the
+  art path first. **Re-run the census at 1920x1080 before concluding anything about the
+  reported bug.** That is the one experiment left.
+* Only `addbldge.win` was checked. `info.win` and `edict.win` share the class-4 frame
+  widgets (s102.1) and were not measured.
+* Nothing here touches whether the *pixels inside* a rescaled sprite are centred; it shows
+  the boxes are where they should be.
+
+### 104.6 Two things the instrument itself revealed
+
+* **The reset in bbd44c2 is what made this run readable.** Census #1 (25 s in, still in
+  the menu) contains none of the build-menu geometry. #2 and #3 contain all of it. Without
+  the between-dumps reset, #1's counters would have dominated the sort and floated menu
+  furniture over the panel that was opened later.
+* **`MinY=600` is not a strong enough filter on a map.** Census #3 reported
+  `8128 distinct ... TABLE OVERFLOWED`, with `7728 further tuples NOT printed`. The 8192
+  slots are consumed by scrolling terrain. The HUD still floated to the top because it is
+  redrawn every frame, so the run survived — but a quieter widget could have been silently
+  dropped. Raise `MinY` toward the bar's top edge (~1590 at 2160p) for any run that only
+  cares about the HUD.
