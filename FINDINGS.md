@@ -8254,3 +8254,73 @@ mechanism") and 106.7's ("a mechanism that explains the symptom is not thereby t
 mechanism"): **make the instrument print the state the fix is supposed to change, not just
 the symptom it is supposed to remove.** A probe that had only reported the destination rect
 would have said `276x276` three times and named nothing.
+
+### 106.11 CONFIRMED on the Steam edition — and the signatures earned their keep
+
+Owner, 2026-08-29: "confirmed fixed videos on Steam 1080p."
+`logs/steam-hudmovie-1920x1080.log.gz`.
+
+Worth recording for what it says about method, not just about the movie. The Steam build's
+`.text` is **encrypted on disk** — 0.4% zero bytes, and even the s103 census signature that
+demonstrably resolves at runtime on GOG is absent from the file — so nothing about these two
+patches could be checked statically beforehand. What *could* be checked was the data, and it
+was identical: `mainwin.win` widget 8 at `2572,1481 560x560` with the same `[0, 1, 0, 1]`,
+and the same `16permit.bik` 276x276 / `12permit.bik` 220x236. Same bug, same key.
+
+Both signatures resolved at run time, at different addresses:
+
+```
+                       GOG        Steam      delta
+  ctor record copy     0x530a45   0x530a15   -0x30
+  paint scalable test  0x531d1f   0x531cef   -0x30
+  (world painter       0x526220   0x5261f0   -0x30, from the s99 Steam log)
+```
+
+Same -0x30 shift as the world painter, and *not* the same shift as the resolution table
+(`0x5a0fa0` vs `0x5a0cc0`, -0x2e0) — these are two different compiles, not one rebase. A
+hardcoded address would have needed a per-build table; the signature found it with no build
+detection at all. The probe line is then byte-identical to the GOG one:
+
+```
+  widget virtual 2572,1481 560x560 -> destination 1543,666 336x252; movie 276x276;
+  scalable=1 sizedtomovie=0 -> SCALED to fit the widget
+```
+
+**s106 is closed:** confirmed at 1920x1080 and 2560x1440 on GOG under system wine, and at
+1920x1080 on Steam under Proton in the s100 virtual desktop.
+
+### 106.12 A byproduct, and it is NOT a result
+
+The same run carried `[Cursor] XCompare=1`, armed since 614b2b9 and never before run against
+Proton — the measurement the s89/s100 cursor drift has been waiting for. **This run does not
+settle it**, and is recorded only so the numbers survive the next launch wiping the log.
+
+Ten samples, seven inside the bracket, three outside:
+
+```
+  X  946,1237 | wine+origin  911,1225 ->  908,1188    missed by  35,12
+  X 1119,1219 | wine+origin 1142,1196 -> 1677,1222    missed by -23, 0
+  X 1438,1204 | wine+origin 1434,1204 -> 1227,1254    missed by   4, 0
+```
+
+Read against 614b2b9's own decision rule — "a constant difference is an offset; one that
+grows with the coordinate is a scale" — **it is neither.** 35, -23 and 4 px, two signs, no
+relation to the coordinate. The letterbox hypothesis predicts a clean scale and this is not
+one.
+
+Three reasons that is not yet a negative result:
+
+* **The run was not designed to provoke the drift.** The owner was testing movies. The
+  symptom is motion-driven map panning, and whether it happened at all here is unknown.
+* **The bracket assumes monotonic motion**, and two of the three misses sit against large
+  travel between the Wine reads (1142 -> 1677 is 535 px). A pointer that moves right, then
+  back, then right again puts X legitimately outside `[before, after]`. That is the known
+  weakness of the instrument, stated in 614b2b9 when it was built.
+* The control (GOG, system wine) had *every* sample inside, so 3-in-10 is a real difference
+  between the two runtimes — but a difference in miss rate is not a mechanism.
+
+What it needs is a run that deliberately provokes the drift and samples through it.
+
+Cosmetic defect noticed in passing: the miss line prints `OUTSIDE the bracket by ` with the
+value missing, then the amount on the following `[!]` line. The number is not lost, but the
+first line is malformed.
