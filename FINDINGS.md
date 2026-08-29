@@ -8468,3 +8468,94 @@ redesign, not as it stands.
 Next: reproduce the drift with `Sites=1`, read which caller owns the edge reads, and detour
 that call site to log the pan decision beside X's pointer. That is 107.3(b), and it is the
 first instrument in this investigation that fires on the event instead of on a clock.
+
+
+## 108. The 1440p Steam launch renders nothing: the fit guard never covered the path that supplies the mode
+
+Owner, 2026-08-29: "I just tried to run at 1440p and it didn't work?"
+`logs/steam-1440p-mode-mismatch.log.gz`. It is in the log twice, three lines apart, and
+nothing in the code compared them:
+
+```
+  [+] [vdesk] armed a 2560x1440 virtual desktop. IT TAKES EFFECT ON THE NEXT LAUNCH
+  [*] desktop as Wine sees it: 1920x1080
+  ...
+  [+] slot 4 -> 2560x1440  (data table 005a0cc0, code chain 0052d12a)
+  [+] world painter at 005261f0: viewport width 1600 -> 2560
+```
+
+The game was configured for 2560x1440 — slot, art set, world extents and painter — inside
+a **1920x1080** desktop. A mode larger than its screen renders nothing at all, which is
+what the owner saw.
+
+### 108.1 The guard exists, and has the right words in it
+
+`tropico_fix.c` has carried this since s85:
+
+```
+  /* THE MODE MUST FIT THE SCREEN IT WILL RUN ON. When it does not, the game asks for a
+   * mode larger than its desktop and renders NOTHING -- the intro audio plays over a
+   * blank screen, which looks like a crash and is not one. Measured: a virtual desktop
+   * requested at 2560x1440 lands on a 1920x1080 monitor ... */
+```
+
+The comment describes this failure exactly, at this resolution pair. The code under it
+reads `[Resolution] Width/Height` from the ini — and **nothing else**:
+
+```c
+  iw = GetPrivateProfileIntA("Resolution", "Width",  0, ip2);
+  ih = GetPrivateProfileIntA("Resolution", "Height", 0, ip2);
+  if (iw && ih && dw && dh && (iw > dw || ih > dh)) { ... }
+```
+
+The Steam ini's `[Resolution]` is empty, so `iw` and `ih` are 0 and the guard did nothing.
+The mode came from somewhere else entirely:
+
+```c
+  if (!launch_override(&m) && !ini_override(&m) && !pick_mode(&m))
+```
+
+`launch_override` is s90, added **after** the guard, and it takes **priority** over the ini
+it guards. So on the Steam edition — where the mode comes entirely from the launch monitor
+and the ini is empty by design — the mode the game actually gets had never been checked
+against the screen at all. The guard was not wrong; it was left behind by the path that
+overtook it.
+
+### 108.2 Why the desktop was the old size, and why that is not an error
+
+s100: a Wine virtual desktop is created by `explorer.exe` **before** the process exists, so
+a process cannot resize the desktop it is already inside. Arming a new size is a registry
+write that takes effect on the next launch, and the proxy says so in as many words. The
+1440p mode was therefore not wrong — it was **one launch early**. The registry and
+`tropico-vd.state` both now read `2560x1440`, so the next launch comes up inside a 1440p
+desktop with everything matching.
+
+That makes this a clamp rather than a refusal: run at the size the screen really is, and
+say that the next launch gets what was asked for.
+
+### 108.3 The fix
+
+`launch_mode_check()`, called from the same guard block, applies the same test to the
+adopted mode and clears it when it does not fit, so the picker chooses one that does:
+
+```
+  [x] ADOPTED MODE DOES NOT FIT. The launch monitor is 2560x1440 but the screen this
+      process actually has is 1920x1080 -- the game would render nothing at all, which
+      sounds like a crash and is not one.
+      A 2560x1440 virtual desktop is armed and takes effect on the NEXT launch
+      (FINDINGS 100) -- the desktop exists before this process does. This launch runs
+      at 1920x1080; start it again to get 2560x1440.
+```
+
+The GOG path is unaffected: `tools/tropico` builds its own desktop at the mode it chose, so
+the adopted mode and the screen agree and the check never fires. `binkw32.dll` sha256
+`0b0df9df…`.
+
+**The lesson, and it is the third of its kind in this file.** s105: a mechanism that
+explains the symptom is not thereby the mechanism. 106.10: make the instrument print the
+state the fix is supposed to change. This one: **a guard protects the path it was written
+against, not the quantity it names.** The comment says "the mode", the code says
+`[Resolution]`, and a later commit made those two different things without either failing.
+Every value that reaches the same decision needs the check, or the check needs to sit at
+the decision — here, one call at the point where the mode is finally chosen would have
+covered `launch_override`, `ini_override` and `pick_mode` together.

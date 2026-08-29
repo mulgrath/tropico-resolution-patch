@@ -319,6 +319,7 @@ static const DWORD TABLE_SIG[10] = {640,480, 800,600, 1024,768, 1280,1024, 1600,
 
 typedef struct { DWORD w, h; } mode_t;
 static int launch_override(mode_t *m);   /* s90, defined with the monitor code */
+static void launch_mode_check(int dw, int dh); /* s108, ditto */
 
 /* ------------------------------------------------------- display scaling (DPI)
  *
@@ -784,6 +785,7 @@ static void apply_patches(void)
             logf_("    Ignoring the configured mode and picking one that fits.");
             g_ini_mode_unusable = 1;
         }
+        launch_mode_check(dw, dh);
     }
     logf_("[*] resolution table at 0x%08lx  (GOG build has 0x005a0fa0; a different value here"
           " just means a different build, which is fine)", table_va);
@@ -2618,6 +2620,44 @@ static int launch_override(mode_t *m)
     if (!g_launch_w || !g_launch_h) return 0;
     m->w = g_launch_w; m->h = g_launch_h;
     return 1;
+}
+
+/* ------------------- s108 the adopted mode has to fit the screen too
+ *
+ * The "MODE MUST FIT THE SCREEN" guard tested `[Resolution]` only. It predates
+ * launch_override(), which since s90 takes PRIORITY over the ini -- so on the Steam
+ * edition, where `[Resolution]` is empty and the mode comes entirely from the launch
+ * monitor, the mode the game actually gets was never checked against the screen at all.
+ *
+ * Measured 2026-08-29: launch monitor 2560x1440, virtual desktop still the 1920x1080
+ * one from the previous run, and the patch configured slot 4, the art set and the world
+ * painter for 1440p inside a 1080p desktop. The log printed `armed a 2560x1440 virtual
+ * desktop. IT TAKES EFFECT ON THE NEXT LAUNCH` and `desktop as Wine sees it: 1920x1080`
+ * three lines apart, and nothing compared them.
+ *
+ * A virtual desktop cannot be resized from inside the process it already contains
+ * (s100), so this is not an error to refuse -- it is a mode that arrives one launch
+ * early. Run at the size the screen really is, and say that the next launch gets what
+ * was asked for. */
+static void launch_mode_check(int dw, int dh)
+{
+    if (!g_launch_w || !g_launch_h || !dw || !dh) return;
+    if ((int)g_launch_w <= dw && (int)g_launch_h <= dh) return;
+
+    logf_("[x] ADOPTED MODE DOES NOT FIT. The launch monitor is %lux%lu but the screen"
+          " this process actually has is %dx%d -- the game would render nothing at all,"
+          " which sounds like a crash and is not one.",
+          (unsigned long)g_launch_w, (unsigned long)g_launch_h, dw, dh);
+    if (g_vd_arm_w && (g_vd_arm_w != (DWORD)dw || g_vd_arm_h != (DWORD)dh))
+        logf_("    A %lux%lu virtual desktop is armed and takes effect on the NEXT launch"
+              " (FINDINGS 100) -- the desktop exists before this process does. This launch"
+              " runs at %dx%d; start it again to get %lux%lu.",
+              (unsigned long)g_vd_arm_w, (unsigned long)g_vd_arm_h, dw, dh,
+              (unsigned long)g_vd_arm_w, (unsigned long)g_vd_arm_h);
+    else
+        logf_("    Cause: the game was started for one monitor and opened on another."
+              " Launch it from the monitor you want to play on.");
+    g_launch_w = g_launch_h = 0;      /* let the picker choose one that fits */
 }
 
 static void unix_probe(void)
