@@ -9278,14 +9278,18 @@ branch be the next working version. In this case, we'd have used 1.2 as the feat
 while main stayed at 1.1. Then, when we're ready we merge to main."*
 
 ```
-  master   the current release, and nothing else
+  main     the current release, and nothing else
   <next>   named for the version being worked towards; all work lands here
   v<X.Y>   an annotated tag at the merge, carrying the artefact hashes
 ```
 
-Adopted at 1.2. What it was before: one long-lived branch (`steam-virtual-desktop`) 107
-commits ahead of a `master` that had stopped meaning anything, and **no tags at all**, so
-"which commit is 1.1?" had no answer. That is the part worth fixing rather than the branch
+Adopted at 1.2, and `master` renamed to `main` at the same time — nothing in the repo
+referenced the name and there are no remotes, so it cost one command. `1.3` is open.
+
+What it was before: one long-lived branch (`steam-virtual-desktop`) 107 commits ahead of a
+`master` that had stopped meaning anything, two stale branches fully contained in it
+(deleted with `git branch -d`, which refuses anything not merged, so the deletion is its
+own proof), and **no tags at all**, so "which commit is 1.1?" had no answer. That is the part worth fixing rather than the branch
 names — a release branch whose position is a convention decays at the next commit, while a
 tag does not, which is why `v1.2` carries the three hashes and not just a name.
 
