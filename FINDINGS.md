@@ -8982,3 +8982,79 @@ The 1.1 copy sits one directory above the game folder and would resolve to the s
 `GAMEDIR`, writing the same log with the old truncating code. **Which command is actually
 used needs answering before any launcher change can be trusted to have been tested** — a
 fix deployed to a copy nobody runs is indistinguishable from a fix that does not work.
+
+### 111.5 CONFIRMED by the owner's run, and the race is eliminated
+
+Owner ran it with the terminal and cursor on the 1080p monitor:
+
+```
+     pointer at 3430,646 -> DP-3
+  == running on DP-3, where your mouse pointer is
+  == DP-3 is primary for this run (was HDMI-A-5; it will be put back)
+     X reported the new primary immediately
+  == Tropico  2560x1440
+```
+
+Two results in one log, and s110's two candidate mechanisms are now one:
+
+* **The pointer read is wrong.** `3430,646` is deep inside DP-3 while the cursor was on
+  HDMI-A-5. Confirmed, and note it is not frozen at a single value — 111.1 saw
+  `1922,1182`, this run `3430,646` — it updates whenever the pointer last crossed an X
+  surface, and is stale in between. "Stale", not "constant", is the right word.
+* **The primary switch is innocent.** `X reported the new primary immediately`. s110's
+  settle-race hypothesis is **eliminated**, by the instrument written to test it. The poll
+  stays — it costs one query when there is no race and it is the thing that says so — but
+  it fixed nothing, and the log now says that outright instead of leaving it ambiguous.
+
+s110 asked for a log that could tell the two apart. It did, on the first run, and killed
+one of them.
+
+### 111.6 The fix, both editions
+
+The launch point now comes from **where the compositor places a 1x1 window** on Wayland,
+and from the pointer on X11, each the other's fallback. Verified end to end with the
+cursor on the 1080p monitor:
+
+```
+  XQueryPointer         3217,624  child=0x0   -> DP-3       (wrong)
+  compositor placement   960,531              -> HDMI-A-5   (right)
+  tropico_launch_output                       -> HDMI-A-5   (was DP-3)
+```
+
+1x1 is placed in 50 ms, so the probe is neither visible nor slow. A window still at `0,0`
+after the timeout means nothing placed it — no window manager — which is a real answer
+("unknown"), not a position, and falls through to the pointer.
+
+**Both editions had the same bug, from the same call.** `tools/tropico-launchpoint.py` is
+the GOG path; `POINTER_PY` inside the proxy is the Steam path, and it was the same
+`XQueryPointer` with the same failure. Both are fixed and both now report which method
+answered, because a report that does not say cannot be diagnosed:
+
+```
+  GOG    launch point 960,531 (via placement) -> HDMI-A-5
+  Steam  [display] launched from HDMI-A-5 (launch point 960,531 in screen space, via placement)
+```
+
+The proxy's Wayland test does not trust the environment to have survived Wine and
+`start.exe`: it also looks for a `wayland-*` socket in `XDG_RUNTIME_DIR`. The embedded
+script was extracted from the built source and run as the host would run it, rather than
+eyeballed — a syntax error in a string literal fails silently and would have looked exactly
+like the bug it replaces.
+
+`binkw32.dll` sha256 `1e6b0a1a…` — **the Steam half is not yet run.**
+
+### 111.7 Why this hid for so long
+
+s90.3 replaced `GetCursorPos` with `XQueryPointer` for an excellent reason — Wine returns
+`0,0` before the game has a window, and `0,0` lands inside the primary whatever the layout,
+so the detector always answered "the primary", which looks right exactly when detection is
+unnecessary. The fix was correct and is still correct on X11.
+
+The new failure has the identical shape one layer out: XWayland returns a **stale but
+plausible** coordinate, which lands inside whichever monitor the pointer last visited over
+an X surface — usually the previous run's game window. Right whenever you launch twice in a
+row on the same monitor, which is most of the time. **Three times now this project has been
+bitten by an in-band value that is indistinguishable from a real answer** — s89's `0,0`
+cursor samples, s90.3's `0,0` from `GetCursorPos`, and now this. The rule s100.3 already
+wrote down covers it: *when a sentinel is also a legal value, get the fact from a source
+with no overlap.* A stale coordinate has no sentinel at all, so the source had to change.

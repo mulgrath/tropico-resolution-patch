@@ -126,7 +126,13 @@ if [ -z "$MONITOR" ]; then
   # wrong monitor" and "it picked the right monitor and then measured the wrong mode"
   # produce identical logs, and they need opposite fixes.
   _pt="$(DISPLAY="${DISPLAY:-:1}" python3 "$SELF/tropico-launchpoint.py" 2>/dev/null || true)"
-  [ -n "$_pt" ] && say "   pointer at ${_pt% *},${_pt#* } -> $MONITOR"
+  if [ -n "$_pt" ]; then
+    # "X Y METHOD". Say WHICH method: on Wayland the pointer is stale and the answer
+    # comes from where the compositor places a probe window instead (FINDINGS 111), and
+    # a report that does not say which one was used cannot be diagnosed.
+    _rest="${_pt#* }"
+    say "   launch point ${_pt%% *},${_rest%% *} (via ${_rest#* }) -> $MONITOR"
+  fi
 fi
 if [ -n "$MONITOR" ]; then
   tropico_outputs | awk -v o="$MONITOR" '$1==o{f=1} END{exit !f}' \

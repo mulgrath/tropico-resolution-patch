@@ -1834,21 +1834,75 @@ static int write_host_file(const char *leaf, const char *body)
  * XQueryPointer has no such ambiguity and reports ROOT coordinates -- the same space
  * xrandr reports output positions in -- so no conversion is needed either. */
 static const char POINTER_PY[] =
-    "import ctypes, ctypes.util\n"
+    /* s111: XQueryPointer is DEAD ON WAYLAND. XWayland is only sent pointer events
+     * while the pointer is over an XWayland surface, so once it moves onto a native
+     * Wayland window it reports the last position it ever saw -- measured on COSMIC as
+     * twelve identical samples in six seconds with child=0, naming the wrong monitor.
+     * Worse, it is self-reinforcing here: the game window IS an XWayland surface, so a
+     * wrong launch parks one under the stale coordinate and confirms it next time.
+     *
+     * So ask the compositor something it can answer: map a 1x1 window with no position
+     * hint and read where it was placed. That is the same rule the game window will be
+     * placed by. Measured with the pointer on the 1080p monitor: XQueryPointer said
+     * 3217,624 (DP-3, wrong), placement said 960,531 (HDMI-A-5, right), in 50 ms.
+     *
+     * Pointer first on X11, where it IS authoritative and window placement is not --
+     * plenty of X11 window managers cascade rather than placing under the pointer.
+     *
+     * The Wayland test does not trust the environment to have survived Wine and
+     * start.exe: a wayland-* socket in XDG_RUNTIME_DIR settles it either way. */
+    "import ctypes, ctypes.util, os, glob, time\n"
     "lib = ctypes.util.find_library('X11')\n"
     "x = ctypes.CDLL(lib)\n"
     "x.XOpenDisplay.restype = ctypes.c_void_p\n"
     "x.XDefaultRootWindow.restype = ctypes.c_ulong\n"
     "x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]\n"
+    "x.XCreateSimpleWindow.restype = ctypes.c_ulong\n"
+    "x.XCreateSimpleWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int,\n"
+    "    ctypes.c_int, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint, ctypes.c_ulong,\n"
+    "    ctypes.c_ulong]\n"
     "d = x.XOpenDisplay(None)\n"
     "r = x.XDefaultRootWindow(ctypes.c_void_p(d))\n"
-    "rr = ctypes.c_ulong(); cr = ctypes.c_ulong()\n"
-    "rx = ctypes.c_int(); ry = ctypes.c_int()\n"
-    "wx = ctypes.c_int(); wy = ctypes.c_int(); mk = ctypes.c_uint()\n"
-    "x.XQueryPointer(ctypes.c_void_p(d), ctypes.c_ulong(r), ctypes.byref(rr),\n"
-    "                ctypes.byref(cr), ctypes.byref(rx), ctypes.byref(ry),\n"
-    "                ctypes.byref(wx), ctypes.byref(wy), ctypes.byref(mk))\n"
-    "print('POINTER %d %d' % (rx.value, ry.value))\n";
+    "def ptr():\n"
+    "    rr = ctypes.c_ulong(); cr = ctypes.c_ulong()\n"
+    "    rx = ctypes.c_int(); ry = ctypes.c_int()\n"
+    "    wx = ctypes.c_int(); wy = ctypes.c_int(); mk = ctypes.c_uint()\n"
+    "    if not x.XQueryPointer(ctypes.c_void_p(d), ctypes.c_ulong(r), ctypes.byref(rr),\n"
+    "                           ctypes.byref(cr), ctypes.byref(rx), ctypes.byref(ry),\n"
+    "                           ctypes.byref(wx), ctypes.byref(wy), ctypes.byref(mk)):\n"
+    "        return None\n"
+    "    return (rx.value, ry.value)\n"
+    "def place():\n"
+    "    w = x.XCreateSimpleWindow(ctypes.c_void_p(d), ctypes.c_ulong(r), 0, 0, 1, 1, 0, 0, 0)\n"
+    "    if not w:\n"
+    "        return None\n"
+    "    x.XMapWindow(ctypes.c_void_p(d), ctypes.c_ulong(w))\n"
+    "    x.XFlush(ctypes.c_void_p(d))\n"
+    "    got = None\n"
+    "    for i in range(30):\n"
+    "        time.sleep(0.05)\n"
+    "        ax = ctypes.c_int(); ay = ctypes.c_int(); ch = ctypes.c_ulong()\n"
+    "        if x.XTranslateCoordinates(ctypes.c_void_p(d), ctypes.c_ulong(w),\n"
+    "                                   ctypes.c_ulong(r), 0, 0, ctypes.byref(ax),\n"
+    "                                   ctypes.byref(ay), ctypes.byref(ch)):\n"
+    "            if (ax.value, ay.value) != (0, 0):\n"
+    "                got = (ax.value, ay.value); break\n"
+    "    x.XDestroyWindow(ctypes.c_void_p(d), ctypes.c_ulong(w))\n"
+    "    x.XFlush(ctypes.c_void_p(d))\n"
+    "    return got\n"
+    "rt = os.environ.get('XDG_RUNTIME_DIR') or ('/run/user/%d' % os.getuid())\n"
+    "wl = bool(os.environ.get('WAYLAND_DISPLAY')) or \\\n"
+    "     os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland' or \\\n"
+    "     bool(glob.glob(os.path.join(rt, 'wayland-*')))\n"
+    "order = [('placement', place), ('pointer', ptr)] if wl else \\\n"
+    "        [('pointer', ptr), ('placement', place)]\n"
+    "for nm, fn in order:\n"
+    "    try:\n"
+    "        g = fn()\n"
+    "    except Exception:\n"
+    "        g = None\n"
+    "    if g:\n"
+    "        print('POINTER %d %d %s' % (g[0], g[1], nm)); break\n";
 
 static int unix_sh(const char *script, int wait_ms)
 {
@@ -1945,7 +1999,8 @@ static DWORD WINAPI heartbeat_thread(LPVOID p)
 /* Everything xrandr told us about one output. */
 typedef struct { char name[64]; int primary; DWORD w, h; long x, y; } xout_t;
 
-static long g_ptr_x = -1, g_ptr_y = -1;   /* root coords, from XQueryPointer */
+static long g_ptr_x = -1, g_ptr_y = -1;   /* root coords, from the host helper */
+static char g_ptr_how[16] = "";           /* s111: which method answered      */
 
 static int xrandr_outputs(xout_t *out, int cap)
 {
@@ -1959,7 +2014,15 @@ static int xrandr_outputs(xout_t *out, int cap)
         line[li] = 0; li = 0;
         if (!strncmp(line, "POINTER ", 8)) {
             long qx, qy;
-            if (sscanf(line + 8, "%ld %ld", &qx, &qy) == 2) { g_ptr_x = qx; g_ptr_y = qy; }
+            char how[16];
+            /* The third field is which method answered (s111). Optional, so an older
+             * helper still parses -- but a report that does not say whether the answer
+             * came from the pointer or from window placement cannot be diagnosed. */
+            if (sscanf(line + 8, "%ld %ld %15s", &qx, &qy, how) >= 2) {
+                g_ptr_x = qx; g_ptr_y = qy;
+                if (sscanf(line + 8, "%ld %ld %15s", &qx, &qy, how) == 3)
+                    snprintf(g_ptr_how, sizeof g_ptr_how, "%s", how);
+            }
         }
         if (line[0] && line[0] != ' ' && line[0] != '\t' && n < cap) {
             xout_t o;
@@ -2079,9 +2142,13 @@ static void choose_monitor(void)
         for (i = 0; i < n; i++)
             if (px >= outs[i].x && px < outs[i].x + (long)outs[i].w &&
                 py >= outs[i].y && py < outs[i].y + (long)outs[i].h) { chosen = i; break; }
-        if (chosen >= 0)
-            logf_("  [display] launched from %s (pointer at %ld,%ld in screen space)",
-                  outs[chosen].name, px, py);
+        {
+            char via[32];
+            snprintf(via, sizeof via, "%s%s", g_ptr_how[0] ? ", via " : "", g_ptr_how);
+            if (chosen >= 0)
+                logf_("  [display] launched from %s (launch point %ld,%ld in screen"
+                      " space%s)", outs[chosen].name, px, py, via);
+        }
     }
     if (chosen < 0) {
         logf_("  [display] could not tell which monitor this was launched from --"
