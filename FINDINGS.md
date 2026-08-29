@@ -7923,3 +7923,147 @@ project has that reports what the engine *actually draws*, per widget class, and
 used it to settle a genuinely open question — that class 1 scales by the WIN factors
 per-axis, which s52.3 and s102.7 both recorded as unestablished. That fact outlives the
 non-bug that motivated it.
+
+
+## 106. The bottom-right panel's movie is copied 1:1, because its asset used to fit
+
+Owner, 2026-08-29: "the little movies that play in the bottom right corner where the build
+preview and 'Tropico' placeholder graphic are not adjusted properly... I noticed especially
+that the Economic Edicts were visually offset."
+
+Root cause found by reading the draw, then checked against PopTop's own five sets the way
+s105 was. **The fix is written and armed; it is NOT yet confirmed in game** — 106.6 states
+what the confirming run must print, before it is run.
+
+### 106.1 The object, named
+
+`mainwin.win` widget 8 — **class 0x040, virtual rect 2572,1481 560x560**, constructed by
+`FUN_005309c0`, painted by `FUN_00531990` (vtable `0x57e490` slot 7). It sits exactly on
+top of the panel art stack s50 already named: widget 3 (class 0x010, 2570,1480 555x555) is
+the zoomed detail preview, widgets 4/5/6/9/11-15 (class 0x004, 2565,1475 560x560) are
+`br00` / `brempty` — the "Tropico" placeholder circle.
+
+The movies are the edicts. 42 names — `abribe adraft amnsty arrest ... permit ... worgeo` —
+and they are a **five-way per-resolution set**, exactly like the `.iNN` art:
+
+```
+  prefix  mode        movie      widget rect = 560 x (W/3200, H/2400)
+  06      640x480     112x112    112.0 x 112.0     exact
+  08      800x600     140x140    140.0 x 140.0     exact
+  10      1024x768    176x176    179.2 x 179.2
+  12      1280x1024   220x236    224.0 x 238.9     <- per-axis, PopTop's 5:4 set
+  16      1600x1200   276x276    280.0 x 280.0
+```
+
+`12*.bik` at 220x236 is the tell. 220/276 = 0.797 against 1280/1600 = 0.800, and 236/276 =
+0.855 against 1024/1200 = 0.853. **PopTop scaled these movies per-axis with the screen**,
+the same rule s105 found in the art. The asset was authored to fill the widget.
+
+### 106.2 The destination is right — it is the CONTENT that never scales
+
+`FUN_00531990` converts its virtual rect with the live factors, like every other class:
+
+```asm
+531a03  movsx eax,[obj+0x0b] ; +parent    fmul [0x5a0ffc]  (W/3200)  -> dest left
+531a24  movsx edx,[obj+0x0d] ; +parent    fmul [0x5a1004]  (H/2400)  -> dest top
+531a4c  movsx ecx,[obj+0x0f]             ... + left - 1              -> dest right
+531a79  movsx edx,[obj+0x11]             ... + top  - 1              -> dest bottom
+```
+
+(the `fadd [0x57c030]` in each is **0.1**, a nudge, not a round-half-up.) So the rect is
+scaled per-axis and lands where the panel art does. What goes wrong is one flag further on:
+
+```asm
+531d1f  mov  eax,[obj+0x7a]       ; the .WIN record's own +0x40 dword
+531d22  test eax,eax
+531d24  je   531d44               ; -> needScale = 0
+        ... otherwise needScale = (destW != bink->Width || destH != bink->Height)
+
+531d8d  ; and when needScale == 0:
+        cmp edi,eax / jle .. / lea eax,[eax+edx-1] / mov [esp+0x10],eax
+        ; destination RIGHT clamped to left + movieW - 1, and the same for the bottom
+```
+
+**With the flag clear the destination is clamped back down to the movie's own size,
+anchored at the rect's left/top, and copied 1:1.** `mainwin.win` widget 8 has it clear —
+which cost PopTop nothing, because 106.1's table is what "clear" assumes.
+
+At 1920x1080 the rect is **336x252** and slot 4 loads the **276x276** `16*.bik`: 60 px of
+bare panel down the right-hand side, and 24 rows of movie cut off at the bottom. That is
+the offset the owner saw, and re-centring cannot fix it — the movie is the wrong *size*
+for the panel.
+
+### 106.3 The flag's meaning, confirmed by all six users of it
+
+There are only six class-0x040 widgets in the game, and the flag splits them exactly along
+"does this movie ever need scaling":
+
+```
+  file           idx  rect                    obj+0x7a
+  videowin.win    0   0,0      3200x2400      1     full-screen movie
+  videowi2.win    1   600,450  2000x1500      1     full-screen movie, boxed
+  setupe.win      0   0,0      3200x2400      1     full-screen movie
+  mainwin.win     8   2572,1481  560x560      0     <- the HUD panel
+  credits.win     1   0,0      1240x1240      0     248x248 movie, never filled it
+  videowi4.win    0   0,0          1x1        0     dummy
+```
+
+The three with the flag are the three s69.6 already *measured* scaling (`[esp+0x30]=1`,
+destination 0..1919 x 0..1079, movie 640x480). That is a runtime confirmation of the
+flag's semantics, not an inference from the name of a field.
+
+### 106.4 The fix, and why it is keyed to one widget
+
+`[Menu] FixHudMovie` (**default 1**) detours the constructor's record copy — 25 bytes at
+`0x530a45`, unique only at that length; the obvious 21-byte form also matches the class
+0x008 deserialiser at `0x51a2c7` — and forces `obj+0x7a` to 1 **for the one widget whose
+virtual rect is 2572,1481 560x560**. Nothing else is touched. The engine's own comparison
+then runs and its own scaler (s69.6) does the work.
+
+Two properties worth stating:
+
+* **It is a no-op where PopTop's assumption holds.** needScale is `dest != movie`, so at
+  640x480 and 800x600 — where the table above is exact — the 1:1 path still runs.
+* **It is deliberately narrow.** Flipping the flag in the shared code at `0x531d1f` would
+  be two bytes and would also magnify the credits movie 2.5x at stock, where nothing is
+  broken. s46's lesson, read the other way round: that was a patch too broad, firing where
+  it should not have.
+
+Editing `mainwin.win` and shipping it loose would have been tidier and does not work —
+s65.6, `.WIN` has its own loader and loose overrides are not read.
+
+### 106.5 A correction to s69.6's justification
+
+`patch_blit_scale`'s comment claims the clamps it removes "live in FUN_00531690, which has
+exactly ONE caller -- the menu movie tick -- so nothing else can reach that code." That is
+wrong. `FUN_00531690` ends at `0x5317b0`; `0x532063` and `0x532073` are inside
+`FUN_00531990`, which is a **vtable method** reached by every class-0x040 widget, the HUD
+panel included. The conclusion drawn from it (that `[Menu] FixMovieScale` cannot affect
+anything else) is not supported by the premise.
+
+It happens to be harmless: with needScale 0 the earlier clamp at `0x531d8d` has already
+made destW/destH equal to the source extent, so the two `jl`s are no-ops on that path.
+Harmless for a reason the comment does not give is still worth correcting.
+
+### 106.6 The confirming run — predictions, written first
+
+`[Menu] HudMovieProbe=1` is read-only and prints one line per distinct (destination, movie)
+pair from inside the paint. At 1920x1080 with the build menu or an edict panel open:
+
+```
+  with FixHudMovie=0 (control)
+    widget virtual 2572,1481 560x560 -> destination 1543,666 336x252; movie 276x276;
+    scalable=0 -> copied 1:1 and clamped to the movie's own size
+
+  with FixHudMovie=1 (default)
+    ... scalable=1 -> SCALED to fit the widget
+    and one line at patch time: HUD panel widget ... obj+0x7a forced 0 -> 1
+```
+
+`1543,666 336x252` assumes the parent offset `[obj+0x5a]+0x11/+0x15` is zero, which is
+untested — a non-zero one shifts the destination without changing the 336x252 or the
+verdict. **If the probe prints a destination of 336x252 against a 276x276 movie, 106.2 is
+confirmed. If it prints 276x276 for both, this whole section is wrong and the offset is
+somewhere else.**
+
+Built and deployed (`binkw32.dll` sha256 `3bb26bc8…`), probe armed, not yet run.

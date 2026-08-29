@@ -108,6 +108,8 @@ static int g_menu_slot = -1;
 static int g_bink_pitch;
 static int patch_blit_probe(void);
 static int patch_blit_scale(void);
+static int patch_hud_movie(void);        /* s106 */
+static int patch_hud_movie_probe(void);  /* s106 */
 static int patch_preview_probe(void);
 static int patch_surface_probe(void);
 static int patch_preview_fix(int mode);
@@ -1117,6 +1119,12 @@ static void apply_patches(void)
         }
         if (GetPrivateProfileIntA("Menu", "FixMovieScale", 1, ip)) {
             if (patch_blit_scale()) ok++; else fail++;
+        }
+        if (GetPrivateProfileIntA("Menu", "FixHudMovie", 1, ip)) {
+            if (patch_hud_movie()) ok++; else fail++;
+        }
+        if (GetPrivateProfileIntA("Menu", "HudMovieProbe", 0, ip)) {
+            if (patch_hud_movie_probe()) ok++; else fail++;
         }
         if (GetPrivateProfileIntA("Menu", "BlitProbe", 0, ip)) {
             if (patch_blit_probe()) ok++; else fail++;
@@ -5343,6 +5351,207 @@ static int patch_blit_scale(void)
     }
     logf_("[+] [blit] destination clamps at %p removed (jl -> jmp): the movie scaler"
           " may now magnify past the source size", (void *)at);
+    return 1;
+}
+
+/* ------------------------- s106 the HUD panel's movie is copied 1:1, not scaled
+ *
+ * The little edict/build movie in the bottom-right panel is `mainwin.win` widget 8:
+ * class 0x040, virtual rect 2572,1481 560x560, painted by FUN_00531990.
+ *
+ * The DESTINATION is not the problem. That method scales its rect per-axis exactly
+ * like every other widget class (s104.3):
+ *
+ *     movsx eax,[obj+0x0b] / fmul [0x5a0ffc]   -> destination left   (W/3200)
+ *     movsx edx,[obj+0x0d] / fmul [0x5a1004]   -> destination top    (H/2400)
+ *
+ * What is wrong is that the movie is never scaled INTO it. At 0x531d1f the method
+ * reads a per-widget flag and only compares the destination against the movie when
+ * that flag is set:
+ *
+ *     mov  eax,[obj+0x7a]      ; the .WIN record's own +0x40 dword
+ *     test eax,eax
+ *     je   no_scale            ; -> needScale = 0
+ *     ...  needScale = (destW != bink->Width || destH != bink->Height)
+ *
+ * and when needScale is 0 the destination is clamped back DOWN to the source size at
+ * 0x531d8d, anchored at the rect's left/top, and copied 1:1.
+ *
+ * The flag is 0 for `mainwin.win` widget 8, and PopTop could afford that because the
+ * asset was authored to match the rect at every mode they shipped. The movies are a
+ * five-way per-resolution set like the art, and follow the same per-axis rule:
+ *
+ *     mode        rect = 560 x (W/3200, H/2400)      NN*.bik asset
+ *     640x480     112.0 x 112.0                      112x112
+ *     800x600     140.0 x 140.0                      140x140
+ *     1024x768    179.2 x 179.2                      176x176
+ *     1280x1024   224.0 x 238.9                      220x236    <- per-axis, 5:4
+ *     1600x1200   280.0 x 280.0                      276x276
+ *
+ * At 1920x1080 the rect is 336x252 while slot 4 loads the 276x276 `16*.bik`: 60 px of
+ * empty panel on the right and 24 rows of movie cut off at the bottom. Re-centring
+ * cannot fix that -- the movie is the wrong SIZE for the panel, and has to be scaled
+ * the way PopTop scaled it for 1280x1024.
+ *
+ * Setting the flag makes the engine's own comparison run and its own scaler (s69.6)
+ * do the work. It is a no-op wherever the two already agree, so at 640x480 and
+ * 800x600 nothing changes at all.
+ *
+ * TARGETED ON PURPOSE. Six class-0x040 widgets exist in the whole game; three already
+ * carry the flag (`videowin`, `videowi2`, `setupe` -- the full-screen movies). Of the
+ * three that do not, `videowi4` is a 1x1 dummy and `credits.win` widget 1 is a
+ * 1240x1240 box holding a 248x248 movie that has never filled it at ANY resolution,
+ * PopTop's own included. Flipping the flag in the shared code would magnify the
+ * credits movie 2.5x at stock -- a change nobody asked for, somewhere that is not
+ * broken. So this keys on the one widget's rect and refuses to fire on anything else.
+ * That is s46's lesson read the other way round: a patch too BROAD, firing where it
+ * should not.
+ *
+ * The tidier route -- editing `mainwin.win` and shipping it loose -- does not work.
+ * s65.6: `.WIN` has its own loader and loose overrides are not read.
+ *
+ * Read-only counterpart: [Menu] HudMovieProbe logs what each class-0x040 paint
+ * actually resolves to, so the numbers above can be checked rather than believed. */
+static int g_hm_fixed;
+
+static void __cdecl hm_fix_hook(BYTE *obj)
+{
+    /* The rect is already in place: FUN_0052a9f0 copied the record's first 0x40 bytes
+     * to obj+4 one instruction before the site detoured here. */
+    short x  = *(short *)(obj + 0x0b);
+    short y  = *(short *)(obj + 0x0d);
+    short cx = *(short *)(obj + 0x0f);
+    short cy = *(short *)(obj + 0x11);
+    if (x != 2572 || y != 1481 || cx != 560 || cy != 560) return;
+    if (*(DWORD *)(obj + 0x7a)) return;            /* already scalable -- leave it */
+    *(DWORD *)(obj + 0x7a) = 1;
+    if (!g_hm_fixed++)
+        logf_("  [movie] HUD panel widget (virtual %d,%d %dx%d) marked scalable"
+              " -- obj+0x7a forced 0 -> 1", x, y, cx, cy);
+}
+
+static int patch_hud_movie(void)
+{
+    /* FUN_005309c0's tail: the four class-0x040 extras copied out of the .WIN record
+     * into obj+0x7a..+0x89.  Twenty-five bytes, no absolute addresses, and unique --
+     * the shorter form collides with the class-0x008 deserialiser at 0x51a2c7. */
+    static const BYTE SIG[] = {0x8b,0x47,0x40, 0x89,0x46,0x7a,
+                               0x8b,0x4f,0x44, 0x89,0x4e,0x7e,
+                               0x8b,0x57,0x48, 0x89,0x96,0x82,0x00,0x00,0x00,
+                               0x8b,0x47,0x4c, 0x53};
+    BYTE *at = find_unique(SIG, sizeof SIG, g_text, g_textlen,
+                           "class-0x040 record copy (FUN_005309c0)");
+    if (!at) { logf_("[x] [movie] class-0x040 constructor not found --"
+                     " the HUD movie is NOT fixed"); return 0; }
+
+    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE,
+                                      PAGE_EXECUTE_READWRITE);
+    if (!stub) { logf_("[x] [movie] VirtualAlloc failed"); return 0; }
+
+    int i = 0;
+    memcpy(stub + i, at, 6); i += 6;             /* mov eax,[edi+0x40] / mov [esi+0x7a],eax */
+    stub[i++] = 0x60;                            /* pushad                */
+    stub[i++] = 0x9c;                            /* pushfd                */
+    stub[i++] = 0x56;                            /* push esi  (the widget) */
+    stub[i++] = 0xe8;                            /* call hm_fix_hook      */
+    { DWORD r = (DWORD)(SIZE_T)((BYTE *)hm_fix_hook - (stub + i + 4));
+      memcpy(stub + i, &r, 4); i += 4; }
+    stub[i++] = 0x83; stub[i++] = 0xc4; stub[i++] = 0x04;   /* add esp,4  */
+    stub[i++] = 0x9d;                            /* popfd                 */
+    stub[i++] = 0x61;                            /* popad                 */
+    stub[i++] = 0xe9;                            /* jmp back past the two moves */
+    { DWORD r = (DWORD)(SIZE_T)((at + 6) - (stub + i + 4));
+      memcpy(stub + i, &r, 4); i += 4; }
+
+    BYTE det[6];
+    det[0] = 0xE9;
+    { DWORD r = (DWORD)(SIZE_T)(stub - (at + 5)); memcpy(det + 1, &r, 4); }
+    det[5] = 0x90;
+    if (!poke(at, det, 6)) { logf_("[x] [movie] VirtualProtect failed"); return 0; }
+
+    logf_("[+] [movie] class-0x040 record copy at %p detoured -> %p: the HUD panel's"
+          " movie widget is marked scalable, so the engine fits the movie to the"
+          " panel instead of copying it 1:1 into the corner.  No other widget is"
+          " touched", (void *)at, (void *)stub);
+    return 1;
+}
+
+/* ------------------------------------------------ s106 the HUD movie probe
+ *
+ * Read-only.  Detours the scalable-flag test in FUN_00531990 and prints, once per
+ * distinct (destination, movie) pair, what the paint has actually resolved.  The
+ * stack slots are the paint's own: [esp+0x14] destW and [esp+0x38] destH were written
+ * at 0x531ab1/0x531abe, [esp+0x28] destTop at 0x531a56, and ebx has held destLeft
+ * since 0x531a24.  esp has not moved since the prologue, so they are all still live
+ * where this sits. */
+static void __cdecl hm_probe_hook(BYTE *obj, int destL, const DWORD *fr)
+{
+    static struct { int w, h, mw, mh; } seen[8];
+    static int n;
+    int destT  = (int)fr[0x28 / 4];
+    int destW  = (int)fr[0x14 / 4];
+    int destH  = (int)fr[0x38 / 4];
+    DWORD flag = *(DWORD *)(obj + 0x7a);
+    DWORD *bk  = *(DWORD **)(obj + 0x96);
+    int mw = bk ? (int)bk[0] : 0;
+    int mh = bk ? (int)bk[1] : 0;
+    int k;
+    for (k = 0; k < n; k++)
+        if (seen[k].w == destW && seen[k].h == destH
+            && seen[k].mw == mw && seen[k].mh == mh) return;
+    if (n >= (int)(sizeof seen / sizeof seen[0])) return;
+    seen[n].w = destW; seen[n].h = destH; seen[n].mw = mw; seen[n].mh = mh; n++;
+    logf_("  [movie] widget virtual %d,%d %dx%d -> destination %d,%d %dx%d;"
+          " movie %dx%d; scalable=%lu -> %s",
+          *(short *)(obj + 0x0b), *(short *)(obj + 0x0d),
+          *(short *)(obj + 0x0f), *(short *)(obj + 0x11),
+          destL, destT, destW, destH, mw, mh, (unsigned long)flag,
+          (flag && (destW != mw || destH != mh))
+              ? "SCALED to fit the widget"
+              : "copied 1:1 and clamped to the movie's own size");
+}
+
+static int patch_hud_movie_probe(void)
+{
+    static const BYTE SIG[] = {0x8b,0x45,0x7a, 0x85,0xc0, 0x74,0x1e,
+                               0x8b,0x85,0x96,0x00,0x00,0x00,
+                               0x8b,0x4c,0x24,0x14, 0x3b,0x08};
+    BYTE *at = find_unique(SIG, sizeof SIG, g_text, g_textlen,
+                           "class-0x040 scalable-flag test (FUN_00531990)");
+    if (!at) { logf_("[x] [movie] paint signature not found -- HUD probe NOT armed");
+               return 0; }
+
+    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 96, MEM_COMMIT | MEM_RESERVE,
+                                      PAGE_EXECUTE_READWRITE);
+    if (!stub) { logf_("[x] [movie] VirtualAlloc failed"); return 0; }
+
+    int i = 0;
+    stub[i++] = 0x60;                                          /* pushad  esp -= 32 */
+    stub[i++] = 0x9c;                                          /* pushfd  esp -= 4  */
+    stub[i++] = 0x8d; stub[i++] = 0x44; stub[i++] = 0x24; stub[i++] = 0x24;
+                                                    /* lea eax,[esp+0x24] -> paint esp */
+    stub[i++] = 0x50;                                          /* push eax   (frame) */
+    stub[i++] = 0x53;                                          /* push ebx   (destL) */
+    stub[i++] = 0x55;                                          /* push ebp   (widget) */
+    stub[i++] = 0xe8;
+    { DWORD r = (DWORD)(SIZE_T)((BYTE *)hm_probe_hook - (stub + i + 4));
+      memcpy(stub + i, &r, 4); i += 4; }
+    stub[i++] = 0x83; stub[i++] = 0xc4; stub[i++] = 0x0c;      /* add esp,12 */
+    stub[i++] = 0x9d;                                          /* popfd */
+    stub[i++] = 0x61;                                          /* popad */
+    memcpy(stub + i, at, 5); i += 5;             /* mov eax,[ebp+0x7a] / test eax,eax */
+    stub[i++] = 0xe9;
+    { DWORD r = (DWORD)(SIZE_T)((at + 5) - (stub + i + 4));
+      memcpy(stub + i, &r, 4); i += 4; }
+
+    BYTE det[5];
+    det[0] = 0xE9;
+    { DWORD r = (DWORD)(SIZE_T)(stub - (at + 5)); memcpy(det + 1, &r, 4); }
+    if (!poke(at, det, 5)) { logf_("[x] [movie] VirtualProtect failed"); return 0; }
+
+    logf_("[+] [movie] HUD movie probe armed at %p -> %p: every class-0x040 paint"
+          " reports its destination against the movie it was handed",
+          (void *)at, (void *)stub);
     return 1;
 }
 
