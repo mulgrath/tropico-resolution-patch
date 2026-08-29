@@ -7468,6 +7468,12 @@ proxy no longer switches the primary, so placement is the window manager's choic
 
 ## 102. The HUD button shadows: what they are, and four mechanisms ruled out
 
+> **RESOLVED in s105 — NOT A BUG.** The offset is authored: PopTop's own five
+> shipped sets place the button off-centre in its plate by the same proportions,
+> and the generated sets reproduce them exactly. The four mechanisms killed below
+> stay killed; what was missing was a control, not a cause. Read 102 for the
+> identification of the objects, which is still correct and still useful.
+
 Owner, 2026-08-26: "the shadows underneath the buttons in the center of the HUD are
 offset. It seems like they did not receive the same offset the buttons did when they
 scaled... the buttons are part of the UI that scales correctly with the resolution but
@@ -7793,7 +7799,7 @@ does not need to be opened on this evidence.
   every product lands within a pixel of an integer. 1920x1080 gives 1.2/0.9 and 0.6/0.45 —
   the *art* factors are the ugly ones there, and a half-pixel rule would show up in the
   art path first. **Re-run the census at 1920x1080 before concluding anything about the
-  reported bug.** That is the one experiment left.
+  reported bug.** That is the one experiment left. — **Done, s105. Same verdict.**
 * Only `addbldge.win` was checked. `info.win` and `edict.win` share the class-4 frame
   widgets (s102.1) and were not measured.
 * Nothing here touches whether the *pixels inside* a rescaled sprite are centred; it shows
@@ -7811,3 +7817,109 @@ does not need to be opened on this evidence.
   redrawn every frame, so the run survived — but a quieter widget could have been silently
   dropped. Raise `MinY` toward the bar's top edge (~1590 at 2160p) for any run that only
   cares about the HUD.
+
+
+## 105. RESOLVED: the shadow offset is PopTop's, not ours — the control nobody had run
+
+Owner, 2026-08-29, after the 1920x1080 re-run: "the shadows do indeed look correct. The
+user saw that the shadows are offset but that's how the game normally looks even at the
+stock resolutions."
+
+That is the answer, and it is checkable rather than merely plausible. s102 spent four
+sections killing mechanisms that could have *introduced* an offset without ever asking
+whether the offset was introduced at all. The button is not centred in its plate in the
+art PopTop shipped, at any of the five resolutions they shipped. Nothing moved it; it was
+authored there. `logs/blit-census-1920x1080.log.gz` is the run (six dumps, 1562 distinct
+tuples across them), preserved for the same reason as s104's.
+
+### 105.1 The 1920x1080 census matches the model, exactly as 3840x2160 did
+
+WIN factors 0.600/0.450, art factors 1.200/0.900. Predicted against census:
+
+```
+  butrot     cls 0x001, .WIN 134x82 -> 80.4x36.9, census size 80x37 for all six
+    1242,2000 ->  745.2,900.0   obs  745,899      1242,2172 ->  745.2,977.4  obs  745,977
+    1515,2000 ->  909.0,900.0   obs  909,899      1515,2172 ->  909.0,977.4  obs  909,977
+    1787,2000 -> 1072.2,900.0   obs 1072,899      1787,2172 -> 1072.2,977.4  obs 1072,977
+    2060,2000 -> 1236.0,900.0   obs 1236,899
+
+  grid cell  cls 0x004, .WIN 260x156 -> 156.0x70.2, census size 156x70/72 for all ten
+    1116,1914 ->  669.6,861.3   obs  667,860      1116,2086 ->  669.6,938.7  obs  667,938
+    1389,1914 ->  833.4,861.3   obs  831,861      1389,2086 ->  833.4,938.7  obs  831,938
+    1661,1914 ->  996.6,861.3   obs  994,861      1661,2086 ->  996.6,938.7  obs  994,938
+    1934,1914 -> 1160.4,861.3   obs 1158,861      1934,2086 -> 1160.4,938.7  obs 1158,938
+    2207,1914 -> 1324.2,861.3   obs 1321,861      2207,2086 -> 1324.2,938.7  obs 1321,938
+
+  mwbuildf   cls 0x004 art-space, x1.2/x0.9
+    [ 0]  513, 883 741x91  ->  615.6,794.7  889.2x81.9   obs  889x82  @  616,795
+    [ 1]  548, 949 148x94  ->  657.6,854.1  177.6x84.6   obs  178x85  @  658,854
+    [ 2]  548,1034 148x98  ->  657.6,930.6  177.6x88.2   obs  178x88  @  658,931
+    [10] 1094,1034 151x98  -> 1312.8,930.6  181.2x88.2   obs  181x88  @ 1313,931
+```
+
+`178x85 @ 658,854` and `80x37 @ 745,900` are the two lines s103.4 wrote down in advance as
+the outcome to check against. Both arrived, `butrot` one row high from rounding. The grid
+cell sprite sits a consistent ~2.5 px left of its rect, which is the sprite's own piece
+offset (−2 art px) and is the same overhang seen at 2160p, where it measured −5 px against
+a 2x larger art factor.
+
+Not everything in that panel was clean, and it does not need to be: the `mwbuilbe` row at
+y=802 draws sprites 204–210 px wide against a 148.8-px rect, at x up to 3 px off the
+scaled origin. Those are wider than the widget that owns them, so they carry negative piece
+offsets. **Not investigated** — they are the icon art s102.4 already showed PopTop redrew
+by hand per resolution rather than scaling, and nothing about them bears on the plates.
+
+### 105.2 The control: PopTop's own five sets, measured
+
+For each shipped class, `mwbuildf` sprite [1] read straight out of the archive, against the
+`addbldge.win` cell rect scaled by that mode's WIN factors. If the button were meant to be
+centred in its plate, L would equal R and T would equal B:
+
+```
+  class  screen      plate[1] (art px)     cell rect              margins  L     T     R     B
+  i06     640x480    219, 379   59x38      223.2, 382.8  52x31     4.2   3.8   2.8   3.0
+  i08     800x600    274, 474   74x47      279.0, 478.5  65x39     5.0   4.5   4.0   3.5
+  i10    1024x768    350, 607   95x60      357.1, 612.5  83x50     7.1   5.5   4.7   4.6
+  i12   1280x1024    438, 810  118x80      446.4, 816.6 104x67     8.4   6.6   5.6   6.8
+  i16   1600x1200    548, 949  148x94      558.0, 957.0 130x78    10.0   8.0   8.0   8.0
+```
+
+**L > R at every one of the five.** The plate hangs further past the button on the left
+than on the right — by 1.0 to 2.8 px, mode-dependent and not monotonic in resolution,
+which is itself the signature of hand-authored art — and it hangs further above than below
+at three of the five, with 1280x1024 marginally the other way and 1600x1200 exactly even. This is PopTop's art, in PopTop's `.WIN`, at
+PopTop's own resolutions, including the hand-authored 5:4 `.i12` set that s102.4 already
+established they built by hand. The asymmetry is a drawing decision, not arithmetic.
+
+### 105.3 And the generated sets preserve it exactly
+
+Because both objects are linear in the factor pair — the plate in the art factors, the
+rect in the WIN factors, and W/1600 : W/3200 is 2:1 on both axes by construction — every
+margin is the stock margin times the axis factor. This is arithmetic, not measurement:
+
+```
+                      cell  L,T,R,B              butrot L,T,R,B
+  1600x1200 stock     10.0   8.0   8.0   8.0     73.0  51.0  8.0  2.0
+  1920x1080 x1.2/0.9  12.0   7.2   9.6   7.2     87.6  45.9  9.6  1.8
+  3840x2160 x2.4/1.8  24.0  14.4  19.2  14.4    175.2  91.8 19.2  3.6
+```
+
+What 105.1 and s104 measured is the other half: that the game actually *draws* the model.
+Arithmetic says the relationship is preserved; the census says the relationship on screen
+is the arithmetic. Together they close it.
+
+### 105.4 The verdict, and the lesson worth more than the verdict
+
+**The HUD button shadows are correct at 1920x1080 and at 3840x2160. There is no bug, and
+there is nothing to fix.** s102's four dead mechanisms were all real work — 102.2's
+passthrough audit, 102.3's asset check, 102.4's PopTop diff and 102.5's factor identity
+are each worth keeping — but the cheap check that would have ended it on day one was
+never run: **render the stock set and look at it.** A report of the form "X is offset"
+needs a control before it needs a mechanism, and the control here was five files sitting
+in `px4.PK2` the whole time.
+
+The census built for this (s103) still earns its place. It is the first instrument this
+project has that reports what the engine *actually draws*, per widget class, and s104.3
+used it to settle a genuinely open question — that class 1 scales by the WIN factors
+per-axis, which s52.3 and s102.7 both recorded as unestablished. That fact outlives the
+non-bug that motivated it.
