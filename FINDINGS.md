@@ -8886,3 +8886,99 @@ about the order while being silent about the latency.
 
 Deployed to `tropico-patch/tropico` in the GOG install (verified byte-identical to
 `HEAD` first, so nothing local was overwritten). **Not yet run.**
+
+
+## 111. It IS a Wayland issue: XQueryPointer is frozen, so the launcher reads a stale monitor
+
+Owner, 2026-08-29: "Run 1: 1440p on 1440p correct. Run 2: 1080p coming from 1440p,
+incorrect. Run 3: 1080p incorrect again. Run 4: 1080p incorrect again. So now it's not even
+switching back to 1080p? Maybe some Wayland issue?"
+
+Yes. Measured, not inferred.
+
+### 111.1 The pointer read does not move
+
+The session is `XDG_SESSION_TYPE=wayland`, `XDG_CURRENT_DESKTOP=COSMIC`.
+`tools/tropico-launchpoint.py` asks `XQueryPointer` on the XWayland root. Sampled twelve
+times over six seconds:
+
+```
+   0.0s   1922,1182   child=0x0  -> DP-3 (1440p)
+   0.5s   1922,1182   child=0x0  -> DP-3 (1440p)
+   ...
+   5.5s   1922,1182   child=0x0  -> DP-3 (1440p)
+
+  distinct positions in 6 s: 1
+```
+
+**`child=0x0` is the tell.** The pointer is over no XWayland window at all, so XWayland is
+receiving no pointer events and is reporting the last position it ever saw. Under X11 that
+value is the truth; under Wayland the compositor only forwards pointer events to XWayland
+while the pointer is over an XWayland surface. A native Wayland window — the owner's
+terminal — is invisible to it.
+
+`1922,1182` is **two pixels inside DP-3's left edge**, which is what a pointer leaving an
+XWayland surface and never coming back looks like.
+
+### 111.2 Why it got *stickier*, not just wrong
+
+This explains the escalation in the report, which a simple "wrong monitor" would not:
+
+```
+  run 1  pointer last seen over the game window on DP-3 -> DP-3 -> 1440p, correct
+  run 2  owner moves to the 1080p monitor.  XWayland never saw the move; still DP-3.
+         The game opens on DP-3 again -- and is itself an XWayland surface, so the
+         only pointer position XWayland knows is re-cemented there.
+  run 3  same.   run 4  same.
+```
+
+It is a self-reinforcing loop: each wrong launch puts an X surface under the stale
+coordinate and confirms it. That is the "stickier than the cursor check" the owner named,
+and it is why moving the terminal did not help — a Wayland-native terminal is not something
+XWayland can see.
+
+s78 chose the pointer over `_NET_ACTIVE_WINDOW` by measurement, and that measurement was
+right about *placement*. What it could not have caught is that the pointer is only readable
+at all while it happens to be over an X surface — on a Wayland session the reading is
+correct exactly when it does not matter.
+
+### 111.3 A route that does work: ask the compositor where it puts a window
+
+The compositor will not tell an X client where the pointer is. It will place an XWayland
+window, and X *can* read where that landed. So ask the question the launcher actually
+needs answered — "which output does a new window go to?" — instead of one X cannot answer:
+
+```
+  map a 200x200 X11 window with no position hint, let the compositor place it,
+  XTranslateCoordinates to root, destroy it
+
+  -> compositor placed a new X11 window at 3100,216 -> DP-3
+```
+
+Proven to return a real placement rather than 0,0, which is the only thing that had to be
+established before designing around it. It is also the *right* question by construction:
+the game window will be placed by the same rule as the probe.
+
+**Not yet built, and one thing must be confirmed first** — whether that answer tracks the
+owner's intent or merely agrees with the stale pointer by coincidence. Both probes named
+DP-3 in the same session, which is consistent with the pointer being genuinely on DP-3 at
+the time. The test is one action: put the cursor and focus on the 1080p monitor and re-run
+both. If `XQueryPointer` still says `1922,1182` while the placement probe says HDMI-A-5,
+both halves are proven at once.
+
+### 111.4 Separately: the instrumentation never ran, and there are three launchers
+
+s110's appending log produced nothing for runs 1-4 — no `====` header appeared. The
+deployed copy does work; running it directly appends correctly. So those runs used a
+different copy. There are three on this machine, and only one was updated:
+
+```
+  /mnt/Windows/GOG Games/Tropico/app/tropico-patch/tropico            updated (13870 b)
+  /mnt/Windows/GOG Games/Tropico/tropico-resolution-patch-1.1/...     old 1.1 (11546 b)
+  ~/.steam/.../common/Tropico/tropico-patch/tropico                   old     (11546 b)
+```
+
+The 1.1 copy sits one directory above the game folder and would resolve to the same
+`GAMEDIR`, writing the same log with the old truncating code. **Which command is actually
+used needs answering before any launcher change can be trusted to have been tested** — a
+fix deployed to a copy nobody runs is indistinguishable from a fix that does not work.
