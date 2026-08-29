@@ -8724,3 +8724,39 @@ a different bug from this one and wants s99's six-second poll instrumented, not 
 may read the primary before X has finished changing it and clamp the desktop to the old one
 — the same clamp, from a race rather than from ordering. If it reproduces, the fix is to
 wait for the change to settle before launching, not to restructure anything.
+
+### 109.6 The PCGamingWiki entry: not a lever, but a corroboration and a warning
+
+Owner supplied the page's content (it 403s to automated fetches). Its multi-monitor advice
+is:
+
+> Use dxwrapper … Under `[Compatibility]`, set `EnableDdrawWrapper` to 1. **If using a
+> multi-monitor setup, to prevent launch issues**, under `[Compatibility]` set `Dd7to9`
+> to 1. … Change the 3D Mode to "Hardware" after loading a game.
+
+**Not usable here, for two reasons that are already this project's positions.** It is a fix
+for the **hardware** renderer, which s91 refuses deliberately and by measurement; and its
+mechanism is a redistributed third-party DirectDraw wrapper, which s69.7 already declined
+on the same ground it declined dgVoodoo2 — *"a third-party binary, which sits badly with 'a
+patch, not a redistribution'"*, and which `NOTICE` commits to.
+
+**What it is worth is independent corroboration.** A community fix that has to say "on a
+multi-monitor setup, translate DirectDraw away entirely to prevent launch issues" is saying
+that stock Tropico's DirectDraw path is adapter-naive and assumes the primary. That is the
+same conclusion this project reached from the other end — s90's "the Steam edition drives
+the display from inside, because nothing else can", and the whole make-the-target-monitor-
+primary design. The patch is not working around a Wine quirk there; it is working around
+the game, and Windows users hit it too.
+
+**And it is a warning about 109.5's experiment, which is the useful part.** The virtual
+desktop presents exactly one screen at `0,0`. If the game's DirectDraw is adapter-naive on
+multi-monitor, then the desktop may have been *incidentally* protecting the launch — doing
+real work, just not the work s100 documented it as doing. So the experiment has a second
+outcome worth naming in advance:
+
+* mode correct at 2560x1440 → 109.4 holds, the desktop goes.
+* mode correct but a **DirectDraw failure** appears — `#150`, or s75's `DDERR_INVALIDRECT`
+  — → the desktop was earning its keep on a channel nobody had attributed to it, and the
+  question becomes how to get a single-screen presentation without freezing `SM_CXSCREEN`.
+* mode still 1920x1080 with nothing in the way → s99 does not reproduce; instrument its
+  six-second poll rather than reaching for a wrapper.
