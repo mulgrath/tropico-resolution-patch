@@ -164,6 +164,16 @@ static void unix_probe(void);             /* s90, defined with the probe below *
 static char  g_mon_to[64], g_mon_from[64];
 static DWORD g_mon_to_w, g_mon_to_h;
 static int   g_mon_pending;
+/* s113. Which display source answered, because the two need different verbs to
+ * change anything: xrandr on the host, ChangeDisplaySettingsEx here. */
+static int   g_mon_win32;
+/* The primary to return to when this process is done with the display. Loaded from
+ * tropico-primary.state when a previous run did not get to put it back, so a crash
+ * cannot make a leftover look like the player's own choice. */
+static char  g_prev_primary[64];
+static DWORD g_mon_from_w, g_mon_from_h;
+static DWORD g_prev_primary_w, g_prev_primary_h;
+static LONG  g_restore_done;
 
 static void choose_monitor(void);
 static void apply_monitor(void);
@@ -601,6 +611,77 @@ static int ini_override(mode_t *m)
     return 1;
 }
 
+/* ------------------------------------------ s113 the ini's mode against the screen
+ *
+ * Lifted out of the patch pass so it can also run from DllMain, where on a run with
+ * no pending monitor change it is already answerable -- and it HAS to run before
+ * ini_override(), which consults the flag it sets. Without it, a DllMain decision
+ * would take an ini mode the patch pass was going to reject, generate art for it,
+ * and hand the game a mode larger than its screen: intro audio over black.
+ *
+ * Guarded like choose_monitor(). Whichever caller gets here first does the work and
+ * logs it once; the other is a no-op. When a monitor change IS pending, DllMain
+ * skips this and the patch pass does it after the switch, against the screen the
+ * game will actually run on -- which is the reason it lived there to begin with.
+ */
+static void ini_fit_check(void)
+{
+    static int done;
+    char ip[MAX_PATH];
+    int iw, ih, dw = GetSystemMetrics(SM_CXSCREEN), dh = GetSystemMetrics(SM_CYSCREEN);
+    if (done) return;
+    done = 1;
+    snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+    iw = GetPrivateProfileIntA("Resolution", "Width",  0, ip);
+    ih = GetPrivateProfileIntA("Resolution", "Height", 0, ip);
+    if (!(iw && ih && dw && dh && (iw > dw || ih > dh))) return;
+
+    /* THE MODE MUST FIT THE SCREEN IT WILL RUN ON. When it does not, the game asks
+     * for a mode larger than its desktop and renders NOTHING -- the intro audio
+     * plays over a blank screen, which looks like a crash and is not one. Measured:
+     * a virtual desktop requested at 2560x1440 lands on a 1920x1080 monitor, Wine
+     * clamps it, and the ini still says 2560x1440.
+     *
+     * Refuse quietly rather than fail loudly and invisibly: say what happened, in
+     * words, and let the mode picker choose something that fits instead. */
+    logf_("[x] CONFIGURED MODE DOES NOT FIT. tropico-fix.ini asks for %dx%d but the"
+          " screen this is running on is %dx%d. The game would render nothing at"
+          " all -- you would hear the intro over a black screen.", iw, ih, dw, dh);
+    logf_("    Cause: the game was started for one monitor and opened on another."
+          " Launch it from the monitor you want to play on.");
+    logf_("    Ignoring the configured mode and picking one that fits.");
+    g_ini_mode_unusable = 1;
+}
+
+/* ------------------------------------------------------- s113 decide_mode
+ *
+ * ONE ANSWER, COMPUTED ONCE, AND THE REASON IT HAS TO BE CACHED IS FINDINGS 98:
+ * the art has to exist before the game indexes data\, which on the Steam edition
+ * is before the entry point -- so the mode has to be known in DllMain, while the
+ * table it is written into cannot be patched until much later.
+ *
+ * Both callers went through this sequence already; the only thing that is new is
+ * that the first caller's answer is kept. Whoever asks second gets the same mode,
+ * which is also the honest thing: two independent decisions that happen to agree
+ * are not the same as one decision.
+ *
+ * Not cached on failure. "Nothing satisfied the constraints" is a statement about
+ * the display as it is right now, and the display can change between the two calls
+ * -- that is precisely what apply_monitor() does.
+ */
+static mode_t g_decided;
+static int    g_mode_decided;
+
+static int decide_mode(mode_t *out)
+{
+    if (g_mode_decided) { *out = g_decided; return 1; }
+    if (!launch_override(&g_decided) && !ini_override(&g_decided) && !pick_mode(&g_decided))
+        return 0;
+    g_mode_decided = 1;
+    *out = g_decided;
+    return 1;
+}
+
 /* ------------------------------------------------- the world-extent clamp (FINDINGS 35)
  *
  * Found by decompiling, after byte-searching for 1600 failed six different ways:
@@ -762,31 +843,13 @@ static void apply_patches(void)
      * (FINDINGS 75). One line here turns that into an obvious diagnosis. */
     logf_("[*] desktop as Wine sees it: %dx%d", GetSystemMetrics(SM_CXSCREEN),
           GetSystemMetrics(SM_CYSCREEN));
-    {
-        /* THE MODE MUST FIT THE SCREEN IT WILL RUN ON. When it does not, the game
-         * asks for a mode larger than its desktop and renders NOTHING -- the intro
-         * audio plays over a blank screen, which looks like a crash and is not one.
-         * Measured: a virtual desktop requested at 2560x1440 lands on a 1920x1080
-         * monitor, Wine clamps it, and the ini still says 2560x1440.
-         *
-         * Refuse quietly rather than fail loudly and invisibly: say what happened,
-         * in words, and let the mode picker choose something that fits instead. */
-        char ip2[MAX_PATH];
-        int iw, ih, dw = GetSystemMetrics(SM_CXSCREEN), dh = GetSystemMetrics(SM_CYSCREEN);
-        snprintf(ip2, sizeof ip2, "%s\\tropico-fix.ini", g_dir);
-        iw = GetPrivateProfileIntA("Resolution", "Width",  0, ip2);
-        ih = GetPrivateProfileIntA("Resolution", "Height", 0, ip2);
-        if (iw && ih && dw && dh && (iw > dw || ih > dh)) {
-            logf_("[x] CONFIGURED MODE DOES NOT FIT. tropico-fix.ini asks for %dx%d but the"
-                  " screen this is running on is %dx%d. The game would render nothing at"
-                  " all -- you would hear the intro over a black screen.", iw, ih, dw, dh);
-            logf_("    Cause: the game was started for one monitor and opened on another."
-                  " Launch it from the monitor you want to play on.");
-            logf_("    Ignoring the configured mode and picking one that fits.");
-            g_ini_mode_unusable = 1;
-        }
-        launch_mode_check(dw, dh);
-    }
+    /* Both of these read SM_CXSCREEN, so they belong AFTER apply_monitor() and not
+     * before it -- the screen they judge against has to be the one the game will run
+     * on. ini_fit_check() is a no-op when DllMain already ran it, which it does on
+     * every run with no pending switch (s113); the check itself moved there so a
+     * DllMain mode decision cannot adopt an ini mode this would have rejected. */
+    ini_fit_check();
+    launch_mode_check(GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
     logf_("[*] resolution table at 0x%08lx  (GOG build has 0x005a0fa0; a different value here"
           " just means a different build, which is fine)", table_va);
     memcpy(GATE_SIG + 1, &table_va, 4);
@@ -885,7 +948,7 @@ static void apply_patches(void)
         snprintf(ip3, sizeof ip3, "%s\\tropico-fix.ini", g_dir);
         g_artgen_enabled = GetPrivateProfileIntA("Art", "Generate", 1, ip3);
     }
-    if (!launch_override(&m) && !ini_override(&m) && !pick_mode(&m)) {
+    if (!decide_mode(&m)) {
         logf_("[-] no mode satisfied the constraints; leaving slot 4 stock (1600x1200)");
     } else {
         /* s85's fallback art-switch used to sit here: on the path where the configured
@@ -2047,6 +2110,545 @@ static int xrandr_outputs(xout_t *out, int cap)
     return n;
 }
 
+/* ------------------------------------------- s113 the same list, from Win32
+ *
+ * WHY THIS HAS TO EXIST. Everything above reads the display by shelling out to
+ * xrandr through unix_sh, and unix_sh goes through game_unix_dir, which refuses
+ * any game folder not on Z:. On a real C:\ install that is every call, so on
+ * native Windows choose_monitor() has always stopped at "could not read the
+ * display from the host" with g_launch_w unset -- and what is left after that is
+ * primary-only in three separate places: pick_mode_pass enumerates
+ * EnumDisplaySettings(NULL), its fit gate is SM_CXSCREEN, and
+ * pin_window_to_primary drags the window back onto the primary. A player with two
+ * monitors could not launch on the second one at all. Reported on the first
+ * native-Windows run: a 1080p screen beside a 1440p primary, and the game would
+ * only ever open on the 1440p one.
+ *
+ * The Win32 view carries exactly what the xrandr parse carries -- a name, a
+ * primary flag, a size and a position -- so it fills the same struct and every
+ * line of the decision below is shared rather than duplicated. dmPosition is in
+ * virtual-screen coordinates with the primary at (0,0), which is the convention
+ * xrandr_outputs() already reports, so choose_monitor()'s pointer arithmetic needs
+ * no case of its own.
+ *
+ * XRANDR STAYS FIRST WHERE IT ANSWERS. Under Wine the Win32 view is the thing
+ * FINDINGS 74 is about -- Wine measures only the primary and renormalises the rest
+ * to negative coordinates -- which is why the launcher asks X directly. This is a
+ * fallback for the platform with no host to ask, not a replacement, and on Linux
+ * nothing reaches it.
+ */
+static int win32_outputs(xout_t *out, int cap)
+{
+    DISPLAY_DEVICEA dd;
+    DEVMODEA dm;
+    DWORD i;
+    int n = 0;
+    for (i = 0; n < cap; i++) {
+        memset(&dd, 0, sizeof dd); dd.cb = sizeof dd;
+        if (!EnumDisplayDevicesA(NULL, i, &dd, 0)) break;
+        /* ATTACHED, not merely present. A disconnected output still enumerates,
+         * and it has no rectangle for a pointer to be inside of. */
+        if (!(dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) continue;
+        memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+        if (!EnumDisplaySettingsA(dd.DeviceName, ENUM_CURRENT_SETTINGS, &dm)) continue;
+        if (!dm.dmPelsWidth || !dm.dmPelsHeight) continue;
+        memset(&out[n], 0, sizeof out[n]);
+        snprintf(out[n].name, sizeof out[n].name, "%s", dd.DeviceName);
+        out[n].primary = (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0;
+        out[n].w = dm.dmPelsWidth;
+        out[n].h = dm.dmPelsHeight;
+        out[n].x = dm.dmPosition.x;
+        out[n].y = dm.dmPosition.y;
+        n++;
+    }
+    return n;
+}
+
+/* ------------------------------------- s113 putting the primary back afterwards
+ *
+ * The Linux side leaves a HOST WATCHDOG behind: a shell loop outside the process
+ * that polls a heartbeat file and runs `xrandr --primary` again when it goes
+ * stale -- "crash included", as apply_monitor() puts it. Native Windows has
+ * nothing to leave behind. This package ships no helper executable and is not
+ * going to start, so the same guarantee is assembled from two weaker pieces:
+ *
+ *   THE WATCHER      restores as soon as the game's window is gone, on an
+ *                    ordinary thread. The one place this must NOT happen is
+ *                    DllMain's DLL_PROCESS_DETACH: ChangeDisplaySettingsEx
+ *                    broadcasts WM_DISPLAYCHANGE, and doing that under the loader
+ *                    lock with every other thread already dead risks a process
+ *                    that will not exit. A desktop on the wrong primary is
+ *                    annoying and fixable; a game that will not close is neither.
+ *
+ *   THE STATE FILE   outlives the process. If a run is killed before the watcher
+ *                    gets there, the next launch reads tropico-primary.state and
+ *                    knows which monitor was really the player's -- so it restores
+ *                    to THAT, and never mistakes its own leftover for a choice.
+ *
+ * The gap between them is real and worth stating plainly rather than hiding: kill
+ * the game outright and the primary stays on the game's monitor until Tropico is
+ * started again, or until the player changes it back in Display settings.
+ *
+ * [Display] SetPrimary=0 switches all of it off, and has since s90.
+ */
+static void primary_state_path(char *out, size_t cap)
+{
+    snprintf(out, cap, "%s\\tropico-primary.state", g_dir);
+}
+
+static void load_primary_state(void)
+{
+    char path[MAX_PATH], line[128];
+    unsigned w = 0, h = 0;
+    FILE *f;
+    primary_state_path(path, sizeof path);
+    f = fopen(path, "rb");
+    if (!f) return;
+    if (fgets(line, sizeof line, f)) {
+        size_t k = strlen(line);
+        while (k && (line[k - 1] == '\n' || line[k - 1] == '\r')) line[--k] = 0;
+        if (line[0]) snprintf(g_prev_primary, sizeof g_prev_primary, "%s", line);
+    }
+    if (fgets(line, sizeof line, f) && sscanf(line, "%ux%u", &w, &h) == 2) {
+        g_prev_primary_w = w; g_prev_primary_h = h;
+    }
+    fclose(f);
+}
+
+static void write_primary_state(void)
+{
+    char path[MAX_PATH];
+    FILE *f;
+    primary_state_path(path, sizeof path);
+    f = fopen(path, "wb");
+    if (!f) {
+        logf_("[!] [display] could not write tropico-primary.state -- the primary will"
+              " still be put back when the game closes, but a crash before that would"
+              " leave it on the game's monitor");
+        return;
+    }
+    fprintf(f, "%s\n%lux%lu\n", g_prev_primary,
+            (unsigned long)g_prev_primary_w, (unsigned long)g_prev_primary_h);
+    fclose(f);
+}
+
+static void clear_primary_state(void)
+{
+    char path[MAX_PATH];
+    primary_state_path(path, sizeof path);
+    DeleteFileA(path);
+}
+
+/* Name the refusal. A bare -1 in a log is a number the player cannot act on and
+ * that nobody remembers the meaning of a month later. */
+static const char *cds_name(LONG r)
+{
+    switch (r) {
+    case DISP_CHANGE_SUCCESSFUL:  return "SUCCESSFUL";
+    case DISP_CHANGE_RESTART:     return "RESTART -- the change needs a reboot";
+    case DISP_CHANGE_FAILED:      return "FAILED -- the display driver refused it";
+    case DISP_CHANGE_BADMODE:     return "BADMODE -- that mode is not supported";
+    case DISP_CHANGE_NOTUPDATED:  return "NOTUPDATED -- could not write it to the registry";
+    case DISP_CHANGE_BADFLAGS:    return "BADFLAGS";
+    case DISP_CHANGE_BADPARAM:    return "BADPARAM";
+    case DISP_CHANGE_BADDUALVIEW: return "BADDUALVIEW";
+    }
+    return "unrecognised";
+}
+
+/* Is this device the primary RIGHT NOW -- asked of Windows, not of our own record
+ * of what we told it. */
+static int is_primary_win32(const char *dev)
+{
+    DISPLAY_DEVICEA dd;
+    DWORD i;
+    for (i = 0; ; i++) {
+        memset(&dd, 0, sizeof dd); dd.cb = sizeof dd;
+        if (!EnumDisplayDevicesA(NULL, i, &dd, 0)) break;
+        if (_stricmp(dd.DeviceName, dev)) continue;
+        return (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0;
+    }
+    return 0;
+}
+
+/* Make one display device the primary, keeping the layout.
+ *
+ * Windows has no "set primary" call. What it has is a rule: the primary is the
+ * device at (0,0). So every attached display moves by the negative of the new
+ * primary's current position -- which changes the ORIGIN and nothing else, and is
+ * why this is exactly reversible: doing it again with the old device restores the
+ * old coordinates, not merely an equivalent arrangement.
+ *
+ * CDS_UPDATEREGISTRY is deliberate, and it is also what makes an interrupted
+ * restore harmless: the registry then already holds the layout we were moving
+ * TOWARDS, so a run killed between the writes and the apply has still left the
+ * player's own arrangement recorded rather than the game's.
+ *
+ * WHY THERE IS MORE THAN ONE OF THESE (s113.6). The version below marked
+ * `baseline` is the sequence MSDN documents, sample and all, and on the owner's
+ * Windows 11 24H2 machine it moved nothing while reporting success. That is not a
+ * coding error -- NirSoft's MultiMonitorTool shipped a 2.15 release whose notes
+ * say "a workaround for the new problems appeared in Windows 11 24H2 update ...
+ * Set as primary monitor, /SetPrimary", and its workaround is to apply the
+ * configuration more than once. So the mechanism is not something to pick once
+ * and trust; it is something to try and then CHECK.
+ *
+ * `applies` is that workaround reduced to its mechanism. `keep_fields` keeps the
+ * dmFields EnumDisplaySettings returned rather than narrowing them to DM_POSITION.
+ * `noreset` is the stage-everything-then-apply-once shape; without it each device
+ * is applied as it is set, which walks the desktop through intermediate layouts
+ * with two primaries or a hole in the middle -- every one of those a mode change
+ * the compositor and every running program has to absorb. That is why it is tried
+ * LAST and only when the gentler ones have already failed.
+ */
+static int cds_set_primary(const char *dev, int keep_fields, int noreset, int applies)
+{
+    DISPLAY_DEVICEA dd;
+    DEVMODEA dm;
+    LONG tx, ty, r;
+    int found = 0, refused = 0, k;
+    DWORD i;
+
+    memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+    if (!EnumDisplaySettingsA(dev, ENUM_CURRENT_SETTINGS, &dm)) {
+        logf_("[x] [display] EnumDisplaySettings(%s) failed -- there is no position to"
+              " move the origin to", dev);
+        return 0;
+    }
+    tx = dm.dmPosition.x; ty = dm.dmPosition.y;
+
+    for (i = 0; ; i++) {
+        memset(&dd, 0, sizeof dd); dd.cb = sizeof dd;
+        if (!EnumDisplayDevicesA(NULL, i, &dd, 0)) break;
+        if (!(dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) continue;
+        memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+        if (!EnumDisplaySettingsA(dd.DeviceName, ENUM_CURRENT_SETTINGS, &dm)) continue;
+        dm.dmPosition.x -= tx;
+        dm.dmPosition.y -= ty;
+        if (keep_fields) dm.dmFields |= DM_POSITION;
+        else             dm.dmFields  = DM_POSITION;
+        {
+            DWORD flags = CDS_UPDATEREGISTRY | (noreset ? CDS_NORESET : 0);
+            if (!_stricmp(dd.DeviceName, dev)) { flags |= CDS_SET_PRIMARY; found = 1; }
+            /* EVERY RETURN CODE IS READ. Discarding these is what made s113's first
+             * Windows run undiagnosable from its own log: the staging calls could all
+             * fail and nothing said so. */
+            r = ChangeDisplaySettingsExA(dd.DeviceName, &dm, NULL, flags, NULL);
+            if (r != DISP_CHANGE_SUCCESSFUL) {
+                refused++;
+                logf_("      staging %s at (%ld,%ld)%s refused: %ld %s",
+                      dd.DeviceName, (long)dm.dmPosition.x, (long)dm.dmPosition.y,
+                      (flags & CDS_SET_PRIMARY) ? " as PRIMARY" : "",
+                      (long)r, cds_name(r));
+            }
+        }
+    }
+    if (!found) {
+        logf_("[x] [display] %s is not among the attached devices any more", dev);
+        return 0;
+    }
+
+    for (k = 0; k < applies; k++) {
+        r = ChangeDisplaySettingsExA(NULL, NULL, NULL, 0, NULL);
+        if (r != DISP_CHANGE_SUCCESSFUL)
+            logf_("      apply #%d returned %ld %s", k + 1, (long)r, cds_name(r));
+    }
+    if (refused) logf_("      %d staged change(s) refused", refused);
+    return is_primary_win32(dev);
+}
+
+static int sp_baseline(const char *dev) { return cds_set_primary(dev, 0, 1, 1); }
+
+/* THE OTHER THREE ARE GONE, AND MEASURED (s113.6). probes/primaryprobe.c tried all
+ * five on the owner's Windows 11 24H2 machine and the CDS family loses in a way no
+ * amount of DEVMODE shaping can rescue: the CDS_SET_PRIMARY call itself returns
+ * DISP_CHANGE_FAILED. Widening dmFields did not help, and neither did a second
+ * apply -- NirSoft's 2.15 workaround addresses a different symptom, not this one.
+ * `applying per device' is the sharpest evidence of all: its staging call returned
+ * DISP_CHANGE_SUCCESSFUL and the device STILL did not become primary, which is the
+ * same lie the final apply tells and the reason nothing here trusts a return code.
+ *
+ * The keep_fields/noreset/applies parameters stay on cds_set_primary() because the
+ * probe still exercises all four shapes; a machine that answers differently is one
+ * probe run away from being understood, and re-deriving them then would be work
+ * done twice. */
+
+/* ------------------------------------------------- s113.6 the same job, via CCD
+ *
+ * QueryDisplayConfig/SetDisplayConfig, Windows 7 and later, and the API Windows'
+ * own Display settings page uses to apply "resolution, layout, orientation,
+ * scaling, primary, bit depth, and refresh rate". The rule is unchanged -- the
+ * primary is still the source at (0,0) -- but the whole topology is submitted as
+ * ONE object rather than as a sequence of per-device pokes, which is the part
+ * ChangeDisplaySettingsEx appears to have lost on 24H2.
+ *
+ * Resolved by name rather than imported, so a build of this DLL still loads on a
+ * system without these exports, and so Wine's partial implementation degrades to
+ * "not available" instead of to a link error.
+ */
+typedef LONG (WINAPI *ccd_query_t)(UINT32, UINT32 *, DISPLAYCONFIG_PATH_INFO *,
+                                   UINT32 *, DISPLAYCONFIG_MODE_INFO *,
+                                   DISPLAYCONFIG_TOPOLOGY_ID *);
+typedef LONG (WINAPI *ccd_set_t)(UINT32, DISPLAYCONFIG_PATH_INFO *,
+                                 UINT32, DISPLAYCONFIG_MODE_INFO *, UINT32);
+typedef LONG (WINAPI *ccd_info_t)(DISPLAYCONFIG_DEVICE_INFO_HEADER *);
+
+static int sp_ccd(const char *dev)
+{
+    HMODULE u32 = GetModuleHandleA("user32.dll");
+    ccd_query_t query;
+    ccd_set_t   set;
+    ccd_info_t  devinfo;
+    DISPLAYCONFIG_PATH_INFO paths[32];
+    DISPLAYCONFIG_MODE_INFO modes[64];
+    UINT32 npaths = 32, nmodes = 64, i;
+    LONG r;
+    int tx = 0, ty = 0, found = 0;
+
+    query   = (ccd_query_t)(void *)GetProcAddress(u32, "QueryDisplayConfig");
+    set     = (ccd_set_t)(void *)GetProcAddress(u32, "SetDisplayConfig");
+    devinfo = (ccd_info_t)(void *)GetProcAddress(u32, "DisplayConfigGetDeviceInfo");
+    if (!query || !set || !devinfo) {
+        logf_("      the CCD entry points are not in this user32 -- skipped");
+        return 0;
+    }
+
+    r = query(QDC_ONLY_ACTIVE_PATHS, &npaths, paths, &nmodes, modes, NULL);
+    if (r != ERROR_SUCCESS) { logf_("      QueryDisplayConfig failed: %ld", (long)r); return 0; }
+
+    /* The GDI name is the only thing tying a CCD source back to the \\.\DISPLAYn
+     * every other line of this file speaks in. */
+    for (i = 0; i < npaths; i++) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME sn;
+        char gdi[64];
+        UINT32 mi;
+        memset(&sn, 0, sizeof sn);
+        sn.header.type      = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        sn.header.size      = sizeof sn;
+        sn.header.adapterId = paths[i].sourceInfo.adapterId;
+        sn.header.id        = paths[i].sourceInfo.id;
+        if (devinfo(&sn.header) != ERROR_SUCCESS) continue;
+        WideCharToMultiByte(CP_ACP, 0, sn.viewGdiDeviceName, -1, gdi, sizeof gdi, NULL, NULL);
+        if (_stricmp(gdi, dev)) continue;
+        mi = paths[i].sourceInfo.modeInfoIdx;
+        if (mi < nmodes && modes[mi].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) {
+            tx = modes[mi].sourceMode.position.x;
+            ty = modes[mi].sourceMode.position.y;
+            found = 1;
+        }
+    }
+    if (!found) { logf_("      no CCD source matched %s", dev); return 0; }
+
+    for (i = 0; i < nmodes; i++)
+        if (modes[i].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) {
+            modes[i].sourceMode.position.x -= tx;
+            modes[i].sourceMode.position.y -= ty;
+        }
+
+    r = set(npaths, paths, nmodes, modes,
+            SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_APPLY | SDC_SAVE_TO_DATABASE);
+    if (r != ERROR_SUCCESS) logf_("      SetDisplayConfig returned %ld", (long)r);
+    return is_primary_win32(dev);
+}
+
+/* ------------------------------------------------------ s113.6 try, then CHECK
+ *
+ * Ordered by "least disruptive that might work" -- the documented sequence first,
+ * the per-device-apply one last because it is the one that walks the desktop
+ * through broken intermediate layouts on its way.
+ *
+ * THE ANSWER IS REMEMBERED. Once a mechanism has demonstrably moved the primary
+ * on this machine, the restore at window-close uses THAT ONE directly rather than
+ * walking the chain again -- a restore that retries four failing mechanisms first
+ * would rearrange the desktop several times over while the player watches.
+ */
+static int running_under_wine(void);   /* defined with the virtual-desktop code */
+
+typedef int (*setprim_fn)(const char *dev);
+static const struct { const char *name; setprim_fn fn; } SETPRIM[] = {
+    { "SetDisplayConfig",        sp_ccd      },
+    { "the documented sequence", sp_baseline },
+};
+static int g_setprim_pick = -1;
+
+static int set_primary_win32(const char *dev)
+{
+    int i, n = (int)(sizeof SETPRIM / sizeof SETPRIM[0]);
+
+    /* THE CHAIN IS FOR REAL WINDOWS ONLY, and this has to name the MECHANISM rather
+     * than a slot in the table above -- CCD moved to the front when the measurement
+     * came in, and a guard that said "the first one" would silently have changed
+     * what Wine does. Under Wine this function is reachable only when the xrandr
+     * read failed (a game folder off Z:, say); Wine keeps exactly the behaviour it
+     * had before s113.6, which is what keeps the Linux path identical in its log
+     * (s113.3). */
+    if (running_under_wine()) return sp_baseline(dev);
+
+    if (g_setprim_pick >= 0) {
+        if (SETPRIM[g_setprim_pick].fn(dev)) return 1;
+        logf_("[!] [display] %s worked earlier this run but not now -- trying the"
+              " others again", SETPRIM[g_setprim_pick].name);
+        g_setprim_pick = -1;
+    }
+
+    for (i = 0; i < n; i++) {
+        if (SETPRIM[i].fn(dev)) {
+            g_setprim_pick = i;
+            logf_("[+] [display] %s is primary, via %s%s", dev, SETPRIM[i].name,
+                  i ? " -- the documented sequence did not work on this machine" : "");
+            return 1;
+        }
+        logf_("  [display] %s did not make %s primary; trying the next mechanism",
+              SETPRIM[i].name, dev);
+    }
+    logf_("[x] [display] none of the %d mechanisms made %s the primary device."
+          " The refusals above are the diagnosis; primaryprobe.exe tests the same"
+          " five in isolation.", n, dev);
+    return 0;
+}
+
+static void restore_primary(const char *why)
+{
+    if (InterlockedExchange(&g_restore_done, 1)) return;
+    if (!g_prev_primary[0]) return;
+    if (set_primary_win32(g_prev_primary)) {
+        logf_("[+] [display] primary put back to %s (%s); Windows measures %dx%d",
+              g_prev_primary, why,
+              GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        clear_primary_state();
+    } else {
+        logf_("[x] [display] could NOT put the primary back to %s (%s). The state file is"
+              " kept on purpose, so the next launch tries again.", g_prev_primary, why);
+    }
+}
+
+/* --------------------------------------------- s113.7 giving it back, on the way out
+ *
+ * WHAT THIS REPLACES, AND WHY IT WAS THE WRONG SIGNAL. s113.4 watched for the
+ * game's window to appear and then vanish, and restored on the disappearance. Two
+ * separate faults, both visible in the 1.3-rc1 log once the switch actually worked:
+ *
+ *   IT LOSES THE RACE THAT MATTERS. Window destroyed -> message loop ends ->
+ *   WinMain returns -> ExitProcess. That is milliseconds; the watcher polled at
+ *   500 ms and then needed about a second for the display call. The thread dies
+ *   with the process. No log this project has ever collected contains the
+ *   "primary put back" line, on any run, which is what that looks like from here.
+ *
+ *   IT CAN WIN THE RACE THAT DOES NOT. A window of class 'Tropico' is created AND
+ *   DESTROYED during startup while the game runs on: rc1's log has one at
+ *   10,10 600x400, and the window dump two seconds later lists no window owned by
+ *   this process at all, with the intro movies still playing. Catching that pair
+ *   restores the primary two seconds into loading and undoes the switch.
+ *
+ * So do not infer the exit from a window. Ask for it. Tropico.EXE imports
+ * KERNEL32!ExitProcess -- confirmed in its import table -- and that is the one
+ * moment which is both late enough to be correct and still safe: every thread is
+ * alive, the loader lock is not held, and the WM_DISPLAYCHANGE broadcast that
+ * ChangeDisplaySettingsEx/SetDisplayConfig sends has somewhere to go. It is the
+ * moment DLL_PROCESS_DETACH is NOT, which is why s113.4 refused to restore there
+ * and why that refusal still stands.
+ *
+ * THE OTHER TWO LAYERS ARE UNCHANGED IN JOB AND SMALLER IN SCOPE. tropico-primary
+ * .state still catches what no in-process hook can -- a crash into TerminateProcess,
+ * Task Manager, a reboot -- and restores at the next launch. restore_primary() is
+ * guarded by an interlocked flag, so arriving twice is harmless by construction.
+ *
+ * Costs about a second on the way out: the same second the switch costs on the way
+ * in. That is the price of handing the display back, and it is worth paying where
+ * the alternative is leaving somebody's desktop rearranged until they next happen
+ * to play Tropico.
+ */
+typedef VOID (WINAPI *ExitProcess_t)(UINT);
+static ExitProcess_t g_real_exitprocess;
+
+static DWORD WINAPI exit_restore_thread(LPVOID p)
+{
+    (void)p;
+    restore_primary("the game is exiting");
+    return 0;
+}
+
+static VOID WINAPI hook_ExitProcess(UINT code)
+{
+    HANDLE h;
+    /* BOUNDED, and the bound is the whole reason this is on a thread rather than
+     * inline. s113.4's judgement was that "a desktop on the wrong primary is
+     * annoying and fixable; a game that will not close is neither" -- and moving
+     * the restore onto the exit path is exactly what would put that at risk. The
+     * display call belongs to the driver and this is the last moment we control,
+     * so give it a deadline. Five seconds is several times the ~1 s a successful
+     * SetDisplayConfig costs on the machine this was measured on, and when it does
+     * elapse nothing is lost that was not already lost: tropico-primary.state
+     * catches it at the next launch, which is precisely what it is for. */
+    h = CreateThread(NULL, 0, exit_restore_thread, NULL, 0, NULL);
+    if (h) { WaitForSingleObject(h, 5000); CloseHandle(h); }
+    else     restore_primary("the game is exiting; no thread could be created");
+    g_real_exitprocess(code);
+}
+
+static void arm_primary_restore(void)
+{
+    static int done;
+    void *real;
+    if (done || !g_prev_primary[0]) return;
+    done = 1;
+    if (hook_import("KERNEL32.dll", "ExitProcess", (void *)hook_ExitProcess, &real)) {
+        g_real_exitprocess = (ExitProcess_t)real;
+        logf_("  [display] ExitProcess hooked -- %s gets the primary back when the game"
+              " quits", g_prev_primary);
+    } else {
+        /* Not fatal, and say exactly what the player is left with rather than
+         * leaving a silence that reads as "handled". */
+        logf_("[!] [display] could not hook ExitProcess, so nothing will hand the primary"
+              " back when the game quits. tropico-primary.state will restore %s at the"
+              " next launch instead.", g_prev_primary);
+    }
+}
+
+static void apply_monitor_win32(void)
+{
+    int k;
+    /* Record the primary to return to ONLY if no earlier run already said what it
+     * is. Overwriting it here is how a crash turns into a permanent move: the
+     * leftover primary would be written down as the player's own. */
+    if (!g_prev_primary[0]) {
+        snprintf(g_prev_primary, sizeof g_prev_primary, "%s", g_mon_from);
+        g_prev_primary_w = g_mon_from_w;
+        g_prev_primary_h = g_mon_from_h;
+    }
+    write_primary_state();          /* before the change, not after */
+
+    if (!set_primary_win32(g_mon_to)) {
+        logf_("[x] [display] could not make %s the primary monitor -- the game will run on"
+              " %s, which is where it would have run anyway. Nothing is broken; the"
+              " launch monitor simply was not adopted.", g_mon_to, g_mon_from);
+        g_prev_primary[0] = 0;
+        clear_primary_state();
+        return;
+    }
+
+    /* Wait for the metrics to agree, for the same reason the xrandr path does: the
+     * mode picker and the fit checks all read SM_CXSCREEN a moment from now, and a
+     * stale reading there rejects a perfectly good mode. Unlike Wine, Windows has
+     * no loader lock in the way here -- this runs in the patch pass. */
+    for (k = 0; k < 60; k++) {
+        if ((DWORD)GetSystemMetrics(SM_CXSCREEN) == g_mon_to_w &&
+            (DWORD)GetSystemMetrics(SM_CYSCREEN) == g_mon_to_h) break;
+        Sleep(50);
+    }
+    if ((DWORD)GetSystemMetrics(SM_CXSCREEN) != g_mon_to_w)
+        logf_("[!] [display] %s is primary but Windows still measures %dx%d rather than"
+              " %lux%lu. The picker validates against what is measured, so this run may"
+              " not get the mode the launch monitor asked for.", g_mon_to,
+              GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
+              (unsigned long)g_mon_to_w, (unsigned long)g_mon_to_h);
+    else
+        logf_("[+] [display] primary %s -> %s; Windows now measures %dx%d. It is put back"
+              " when the game's window closes.", g_mon_from, g_mon_to,
+              GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    arm_primary_restore();
+}
+
 /* s90.2: the monitor is chosen from WHERE THE GAME WAS LAUNCHED, not from the mode
  * in the ini.
  *
@@ -2079,7 +2681,37 @@ static void choose_monitor(void)
     long px, py;
 
     snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-    if (!GetPrivateProfileIntA("Display", "SetPrimary", 1, ip)) return;
+    /* DEFAULT OFF ON WINDOWS, ON UNDER WINE, AND THE ASYMMETRY IS THE POINT (s113.8).
+     *
+     * Making a monitor primary is a change to the PLAYER'S COMPUTER, not to the game,
+     * and the two platforms can undo it to completely different standards.
+     *
+     * Under Wine the restore lives OUTSIDE this process -- a detached shell watchdog
+     * on a heartbeat for the Steam path, `trap restore_primary EXIT INT TERM HUP` in
+     * tools/tropico for GOG. Neither cares how the game ended; a segfault and a clean
+     * quit look the same to them. And xrandr's primary is runtime state that the
+     * desktop re-establishes at login, so even losing the watchdog self-heals.
+     *
+     * On Windows there is no out-of-process anything -- this package ships no helper
+     * executable -- and the change PERSISTS, because making it stick at all means
+     * SDC_SAVE_TO_DATABASE / CDS_UPDATEREGISTRY writing it into the stored display
+     * configuration. So the worst case is not "wrong until you log in again", it is
+     * "wrong until the player works out what did it". Measured on the owner's machine:
+     * a run that ended without the restore left the primary moved, and nothing in the
+     * desktop connects that to a game that is no longer running.
+     *
+     * We could not honestly make the second case rare enough. Every mechanism aimed at
+     * it -- the window watcher, tropico-primary.state, the ExitProcess hook -- exists
+     * to give back something we should not have taken by default. So on Windows it is
+     * now opt-in: the game opens on the primary monitor, at that monitor's resolution,
+     * which is the whole of what this patch promises. SetPrimary=1 restores the old
+     * behaviour for someone who wants it and has read what it costs.
+     *
+     * Turning it off here is enough by itself. g_launch_w is never set, so pick_mode()
+     * validates against SM_CXSCREEN -- the primary, the screen the game will actually
+     * run on -- and no mode is adopted from a monitor it will not be shown on. */
+    if (!GetPrivateProfileIntA("Display", "SetPrimary", running_under_wine() ? 1 : 0, ip))
+        return;
     GetPrivateProfileStringA("Display", "Monitor", "", want, sizeof want, ip);
 
     /* Not when tools/tropico started us. That launcher already chose the monitor,
@@ -2104,11 +2736,21 @@ static void choose_monitor(void)
 
     n = xrandr_outputs(outs, 8);
     if (n <= 0) {
-        logf_("  [display] could not read the display from the host -- leaving the"
-              " monitor alone (expected outside Steam/Proton; the GOG launcher does"
-              " this job itself)");
+        /* No host to ask: native Windows, or a prefix whose game is not on Z:.
+         * Win32 knows the same layout -- see win32_outputs() for why it is second
+         * rather than first. */
+        n = win32_outputs(outs, 8);
+        g_mon_win32 = (n > 0);
+        if (n > 0)
+            logf_("  [display] no host display channel -- reading the layout from Windows"
+                  " itself (%d monitor(s) attached)", n);
+    }
+    if (n <= 0) {
+        logf_("  [display] could not read the display from the host, and Windows reported"
+              " no attached monitor either -- leaving the monitor alone");
         return;
     }
+    load_primary_state();
     for (i = 0; i < n; i++) if (outs[i].primary) prim = i;
     if (prim < 0) { logf_("  [display] xrandr reports no primary output -- leaving it alone"); return; }
 
@@ -2117,6 +2759,14 @@ static void choose_monitor(void)
               outs[0].name, (unsigned long)outs[0].w, (unsigned long)outs[0].h);
         return;
     }
+
+    /* A leftover from a run that never put the primary back. Recorded now and
+     * restored by the same path a change of our own is, so the two cannot fight:
+     * whatever this run decides, the display ends up where the player left it. */
+    if (g_prev_primary[0] && _stricmp(g_prev_primary, outs[prim].name))
+        logf_("  [display] tropico-primary.state says the player's primary is %s, but %s"
+              " is primary now -- a previous run did not put it back. %s is what this"
+              " run will restore to.", g_prev_primary, outs[prim].name, g_prev_primary);
 
     if (want[0]) {
         for (i = 0; i < n; i++) if (!_stricmp(outs[i].name, want)) chosen = i;
@@ -2182,6 +2832,8 @@ static void choose_monitor(void)
     snprintf(g_mon_from, sizeof g_mon_from, "%s", outs[prim].name);
     g_mon_to_w = outs[chosen].w;
     g_mon_to_h = outs[chosen].h;
+    g_mon_from_w = outs[prim].w;
+    g_mon_from_h = outs[prim].h;
     g_mon_pending = 1;
     logf_("  [display] %s needs to become primary (currently %s) -- held until the"
           " patch pass, where the change can actually take effect", g_mon_to, g_mon_from);
@@ -2224,8 +2876,19 @@ static void choose_monitor(void)
 static void apply_monitor(void)
 {
     char script[MAX_PATH * 4], udir[MAX_PATH];
-    if (!g_mon_pending) return;
+    if (!g_mon_pending) {
+        /* Nothing to change for this run -- but a previous one may still owe the
+         * player their primary back (s113). Hand it back when the game closes, not
+         * now: moving the desktop out from under a game that has already measured
+         * it is the fault this whole section exists to avoid. */
+        if (g_mon_win32 && g_prev_primary[0]) arm_primary_restore();
+        return;
+    }
     g_mon_pending = 0;
+
+    /* Same decision, different verb. The host channel changes the primary with
+     * xrandr; without one, Windows changes its own. */
+    if (g_mon_win32) { apply_monitor_win32(); return; }
 
     if (!game_unix_dir(udir, sizeof udir)) return;
     snprintf(g_xr_prev, sizeof g_xr_prev, "%s", g_mon_from);
@@ -6877,20 +7540,46 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
      * Generating here fixes that and is measured to work: 267 assets in 1333 ms,
      * from DllMain, with no index error afterwards.
      *
-     * ONLY on the launch monitor's own mode, though. That is the one answer that
-     * does not depend on what Wine currently measures -- and whenever a primary
-     * switch is still pending, Wine's measurement is stale here by construction.
-     * The ini and the picker both validate against SM_CXSCREEN, so they have to
-     * wait for apply_monitor(); their art is built in the patch pass as before. */
+     * WHICH MODE, AND WHY THE ANSWER IS NOT ALWAYS THE LAUNCH MONITOR'S (s113).
+     *
+     * With a primary switch still pending, the launch monitor's own mode is the
+     * only answer that does not depend on what the display currently measures --
+     * the ini and the picker both validate against SM_CXSCREEN, and that reading
+     * is stale here by construction. So that case generates for the launch mode
+     * alone and leaves the rest to the patch pass, exactly as before.
+     *
+     * WITH NOTHING PENDING, THE WHOLE DECISION IS ALREADY ANSWERABLE, and until
+     * s113 it was not being asked. `launch_override()` needs g_launch_w, which is
+     * set only by choose_monitor()'s host-side monitor read -- and that read is
+     * structurally unavailable on native Windows (game_unix_dir refuses anything
+     * not on Z:) and skipped on a single-monitor Linux desktop. So this block did
+     * nothing at all on Windows: on GOG that is invisible, because the unwrapped
+     * build patches from inside DllMain anyway and generates on the way through,
+     * but on Steam the patch pass defers to GetDeviceCaps and the art then lands
+     * AFTER the game has indexed data\ -- which is FINDINGS 98, reproduced on the
+     * first native-Windows install as
+     *
+     *     Error opening pack file item 'setuplb.i16'
+     *
+     * on the first launch and gone on the second. The fix for 98 was real; it was
+     * reachable only through a Linux-only code path.
+     *
+     * decide_mode() caches, so the patch pass reuses this answer rather than
+     * computing a second one that merely agrees. */
     {
         mode_t am;
+        char ip[MAX_PATH];
         vd_detect();
         choose_monitor();
-        if (launch_override(&am)) {
-            char ip[MAX_PATH];
-            snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-            g_artgen_enabled = GetPrivateProfileIntA("Art", "Generate", 1, ip);
-            ensure_art_for_mode(am.w, am.h);
+        snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+        g_artgen_enabled = GetPrivateProfileIntA("Art", "Generate", 1, ip);
+        if (g_mon_pending) {
+            if (launch_override(&am)) ensure_art_for_mode(am.w, am.h);
+        } else {
+            ini_fit_check();
+            if (decide_mode(&am)) ensure_art_for_mode(am.w, am.h);
+            else logf_("  [artgen] no mode satisfied the constraints yet -- slot 4 stays"
+                       " stock, so the art the game ships is the art it wants");
         }
     }
 
