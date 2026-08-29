@@ -8656,3 +8656,71 @@ about which one yields, and that is a decision about the product rather than abo
 **A zero-code experiment settles the diagnosis before any of them is built:** make DP-3
 primary in the desktop environment and launch. If the game comes up at 2560x1440, 109.1 is
 confirmed end to end and the only open question is which of A/B/C to implement.
+
+### 109.4 The creative angle: the virtual desktop is what broke the mechanism that worked
+
+Owner, 2026-08-29, on the launch-wrapper option: "it's really inconvenient for the user to
+need to add in a path to the launch settings in Steam... Perhaps there's some kind of way
+we can do something either at the Wine/Proton level."
+
+There is, and it is a removal rather than an addition. Three facts already in this file
+line up, and none of them was put beside the other two until now:
+
+* **s99 verified this working on Steam, with no virtual desktop and no wrapper.** Its own
+  closing line: *"Verified on Steam, 2560x1440 on a 1920x1080 primary: `Wine now measures
+  2560x1440`, `slot 4 -> 2560x1440`, 17 patches applied, 0 failed, no pack-file error,
+  primary restored on exit."* First launch. The mechanism is s99's split — read the display
+  in `DllMain`, change it in the patch pass, where a thread can run and Wine can notice.
+* **Inside a virtual desktop that mechanism cannot work, by construction.** `SM_CXSCREEN`
+  is the desktop's size, fixed by `explorer.exe` before the process existed. The primary
+  switch still happens and the host still obeys it — today's log says
+  `primary HDMI-A-5 -> DP-3` — but Wine's answer is frozen: `Wine now measures 1920x1080`.
+  s100 added the desktop; the deadlock arrived with it.
+* **The desktop's stated justification was already refuted.** 614b2b9: it was armed on the
+  reasoning that GOG is immune to the s89 drift because the game cannot see the layout
+  inside a desktop — and *"It came up fullscreen under Proton ... and it drifted anyway.
+  That refutes the reasoning, mine and s89's both."*
+
+So the virtual desktop costs the 1440p mode change and does not buy the thing it was added
+for. Turning it off on Steam should restore s99's single-launch behaviour with no wrapper,
+no held primary, and no relaunch trick.
+
+**Two alternative explanations were checked and eliminated first**, because "remove the
+feature" is exactly the kind of conclusion that deserves resistance:
+
+* *The desktop was stale, not clamped* — a `wineserver`/`explorer.exe` surviving between
+  launches would join an existing 1080p desktop and ignore the new registry size. Measured
+  with the game closed: **no `wineserver`, no `explorer.exe`, no Proton process alive**. The
+  prefix shuts down fully between launches, so every launch builds a fresh desktop from the
+  registry — and still got 1920x1080 from a `2560x1440` value. The clamp is real.
+* *The registry write did not land* — it did: `"TropicoVD"="2560x1440"` was in `user.reg`
+  before the run that ignored it.
+
+### 109.5 The experiment, armed
+
+`[Display] VirtualDesktop=0` in the Steam ini, and `HKCU\Software\Wine\Explorer "Desktop"`
+removed by hand (with `user.reg` backed up, and with no wineserver running, so the file is
+the source of truth). By hand because otherwise the first launch would still be *inside*
+the old 1080p desktop while removing it for the next one — a transition that reads exactly
+like a failure.
+
+Predictions, so the run decides:
+
+```
+  no [vdesk] inside ... line, no desktop armed
+  [+] [display] primary HDMI-A-5 -> DP-3; Wine now measures 2560x1440
+  [*] desktop as Wine sees it: 2560x1440
+  [+] slot 4 -> 2560x1440
+  and NO "ADOPTED MODE DOES NOT FIT"
+```
+
+If instead Wine still measures 1920x1080 with no desktop in the way, then s99's result does
+not reproduce and the primary switch is not being noticed for some other reason — which is
+a different bug from this one and wants s99's six-second poll instrumented, not a wrapper.
+
+**A GOG hypothesis falls out of this and is NOT yet tested.** The owner reports the same
+"first launch is the wrong size" weirdness on GOG. `tools/tropico` runs
+`xrandr --output "$MONITOR" --primary` and then starts wine with no wait, so Wine's explorer
+may read the primary before X has finished changing it and clamp the desktop to the old one
+— the same clamp, from a race rather than from ordering. If it reproduces, the fix is to
+wait for the change to settle before launching, not to restructure anything.
