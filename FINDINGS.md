@@ -9108,3 +9108,37 @@ eliminated across four more samples.
   first-run path through it — the thing this session has been repeatedly reminded it cannot
   assume, since three separate bugs here were "the code is right and the copy being run is
   not" (111.4's three launchers being the most recent).
+
+### 111.10 CONFIRMED on Steam too — and the environment risk did not materialise
+
+Owner, 2026-08-29: "Ran the 4 alternating tests again, and it followed the cursor instead
+of launching on the same monitor as Steam. So Steam is working correctly as far as I can
+tell." `logs/steam-placement-1920x1080.log.gz`:
+
+```
+  [display] launched from HDMI-A-5 (launch point 960,531 in screen space, via placement)
+  [+] [display] running at HDMI-A-5's own mode 1920x1080
+  [+] slot 4 -> 1920x1080
+```
+
+**`via placement`** is the word that mattered. 111.9 named the specific way this could
+still fail — the Wayland test not firing through Wine and `start.exe`, leaving the proxy on
+the stale pointer — and it did not happen. The `wayland-*` socket check earns its place:
+it is why the answer does not depend on `WAYLAND_DISPLAY` surviving two process boundaries
+it was never guaranteed to survive.
+
+Worth noting the coordinate: `960,531`, the *same* answer the GOG launcher got from the
+same compositor at 11:19. Two entirely separate code paths — a shell launcher on the host
+and an embedded script shelled out of a Wine DLL — asking the same question and getting the
+same answer. That is a stronger result than either run alone.
+
+"Followed the cursor instead of launching on the same monitor as Steam" is also the case
+the old code could never have got right: Steam's own window is an XWayland surface, so the
+stale pointer would have been parked on it. The one arrangement most likely to occur in
+practice was the one most likely to be wrong.
+
+**s89's warning still applies to the drift, not to this.** Four alternating runs per
+edition, with the mechanism named and logged per run, is not the same kind of evidence as
+four clean runs of an intermittent symptom.
+
+The remaining untested surface is now exactly one item: **a fresh install** (111.9).
