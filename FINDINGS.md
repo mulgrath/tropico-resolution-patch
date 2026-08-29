@@ -9186,9 +9186,20 @@ means **testing an install silently hijacks the real one's menu entry**, which a
 in a scratch directory has no business doing to a working install. Restored by hand here.
 The uninstall side has no such hazard and does not need one: it removes the entry only when
 `Exec=$GAMEDIR/play` matches, a guard whose comment records that removing it
-unconditionally once took the entry from a different working install. The install side
-should arguably get the mirror-image guard — refuse to repoint an entry at a folder that
-was never played from — but that is a change to shipped behaviour on the strength of one
-test-harness inconvenience, so it is recorded and not made.
+unconditionally once took the entry from a different working install.
+
+**The install side is NOT getting the mirror-image guard, and the reason is better than
+"not yet justified".** Owner, 2026-08-29: *"No need to change it when testing is just part
+of the process. That'd just bloat the script with stuff a real user would never need."*
+Repointing the entry is exactly right for the only person who ever runs this — someone
+installing the patch onto a game they intend to play. The hazard exists solely for a
+scratch-directory install that will be deleted minutes later, which is a property of the
+test harness, not of the product. Code that exists to make testing tidier is code every
+real user carries forever, and this script's whole design case is that it *"places exactly
+two files"* and stays readable enough to audit before running.
+
+Recorded as a rule, because the pull to add it was real: **do not spend the shipped
+artefact's simplicity on the test harness's convenience.** The harness can restore what it
+disturbs — that is what a harness is for.
 
 With this, **nothing on 111.9's untested list remains.**
