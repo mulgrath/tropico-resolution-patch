@@ -8155,3 +8155,37 @@ symptom already existed. s105 says a report of "X is offset" needs a control bef
 mechanism; this is the companion: **a mechanism that explains the symptom is not thereby
 the mechanism.** The probe cost one run and settled it. The disassembly alone had already
 had two chances and taken the wrong branch both times.
+
+### 106.8 The second run: the fix was overwritten one instruction later
+
+Still offset. The probe again said exactly why, and this time the fault was mine, not the
+reading:
+
+```
+  [movie] HUD panel widget (virtual 2572,1481 560x560): obj+0x7a 0 -> 1, obj+0x7e 1 -> 0
+  [movie] widget virtual 2572,1481 460x614 -> destination 1543,666 276x276; movie 276x276;
+          scalable=1 sizedtomovie=1 -> copied 1:1 and clamped to the movie's own size
+```
+
+`sizedtomovie=1` at paint, after the hook had set it to 0 at construction. Nothing rewrote
+it — the hook simply ran **before the instruction that writes it**:
+
+```asm
+530a45  mov eax,[edi+0x40]
+530a48  mov [esi+0x7a],eax     ; <- the detour relocated these two and called the hook here
+530a4b  mov ecx,[edi+0x44]
+530a4e  mov [esi+0x7e],ecx     ; <- and then the record put the resize flag straight back
+```
+
+Six bytes were relocated because six is what a `jmp rel32` needs. `+0x7a` is stored in
+those six and `+0x7e` is not, so setting one flag stuck and clearing the other did not.
+`sizedtomovie=` was added to the probe line in the previous round for a different reason
+and is what made this a one-line diagnosis instead of another disassembly session.
+
+Fixed by relocating **twelve** bytes — all four stores — and calling the hook after them.
+Verified before building rather than after: the four instructions are position independent,
+and a scan of every rel8/rel32 branch in `.text` finds none landing inside
+`0x530a46..0x530a50`, so widening the detour cannot orphan a jump target.
+
+`binkw32.dll` sha256 `4b57fbe9…`. 106.7's prediction is unchanged and still the test:
+`560x560 -> 336x252` against a `276x276` movie, `scalable=1 sizedtomovie=0`.

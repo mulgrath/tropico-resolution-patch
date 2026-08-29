@@ -5455,8 +5455,15 @@ static int patch_hud_movie(void)
                                       PAGE_EXECUTE_READWRITE);
     if (!stub) { logf_("[x] [movie] VirtualAlloc failed"); return 0; }
 
+    /* TWELVE bytes are relocated, not six.  The hook has to run AFTER the record's
+     * +0x44 dword has been stored, or the store puts the resize flag straight back:
+     *
+     *     530a45  mov eax,[edi+0x40] / mov [esi+0x7a],eax
+     *     530a4b  mov ecx,[edi+0x44] / mov [esi+0x7e],ecx   <- this one
+     *
+     * All four are position independent and nothing branches into the range. */
     int i = 0;
-    memcpy(stub + i, at, 6); i += 6;             /* mov eax,[edi+0x40] / mov [esi+0x7a],eax */
+    memcpy(stub + i, at, 12); i += 12;
     stub[i++] = 0x60;                            /* pushad                */
     stub[i++] = 0x9c;                            /* pushfd                */
     stub[i++] = 0x56;                            /* push esi  (the widget) */
@@ -5466,15 +5473,15 @@ static int patch_hud_movie(void)
     stub[i++] = 0x83; stub[i++] = 0xc4; stub[i++] = 0x04;   /* add esp,4  */
     stub[i++] = 0x9d;                            /* popfd                 */
     stub[i++] = 0x61;                            /* popad                 */
-    stub[i++] = 0xe9;                            /* jmp back past the two moves */
-    { DWORD r = (DWORD)(SIZE_T)((at + 6) - (stub + i + 4));
+    stub[i++] = 0xe9;                            /* jmp back past the four moves */
+    { DWORD r = (DWORD)(SIZE_T)((at + 12) - (stub + i + 4));
       memcpy(stub + i, &r, 4); i += 4; }
 
-    BYTE det[6];
+    BYTE det[12];
     det[0] = 0xE9;
     { DWORD r = (DWORD)(SIZE_T)(stub - (at + 5)); memcpy(det + 1, &r, 4); }
-    det[5] = 0x90;
-    if (!poke(at, det, 6)) { logf_("[x] [movie] VirtualProtect failed"); return 0; }
+    memset(det + 5, 0x90, 7);
+    if (!poke(at, det, 12)) { logf_("[x] [movie] VirtualProtect failed"); return 0; }
 
     logf_("[+] [movie] class-0x040 record copy at %p detoured -> %p: the HUD panel's"
           " movie widget is marked scalable, so the engine fits the movie to the"
