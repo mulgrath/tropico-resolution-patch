@@ -8533,6 +8533,17 @@ desktop with everything matching.
 That makes this a clamp rather than a refusal: run at the size the screen really is, and
 say that the next launch gets what was asked for.
 
+**One thing this does NOT explain, and it is recorded rather than glossed.** The two
+previous Steam runs both opened with `[vdesk] inside the 1920x1080 virtual desktop`; this
+one detected no desktop at all and went down the monitor-choosing path, even though Wine
+measured 1920x1080 and the cursor probe reported a single screen at `0,0 1920x1080` — the
+shape of a virtual desktop on a multi-monitor host. `g_vd_inside` requires
+`tropico-vd.state` to match the live screen, and why that comparison failed here cannot be
+read out of the log. It does not change the fix: whatever put the process in a 1080p
+desktop, the proxy applied a 1440p mode into it without noticing, and that is what 108.3
+stops. But "one launch early" is the log's own account of itself, not something proven
+here, and if 1440p fails again from inside a 1440p desktop this is the loose end to pull.
+
 ### 108.3 The fix
 
 `launch_mode_check()`, called from the same guard block, applies the same test to the
