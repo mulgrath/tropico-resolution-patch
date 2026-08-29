@@ -8760,3 +8760,47 @@ outcome worth naming in advance:
   question becomes how to get a single-screen presentation without freezing `SM_CXSCREEN`.
 * mode still 1920x1080 with nothing in the way → s99 does not reproduce; instrument its
   six-second poll rather than reaching for a wrapper.
+
+### 109.7 CONFIRMED: removing the desktop fixes it, at both resolutions
+
+Owner, 2026-08-29: "I ran against 1440p and then 1080p and they both seemed to work from
+the Steam version without issue as long as Steam and the cursor were on the right monitor."
+
+So 109.4 holds, and the outcome is the first of 109.6's three: the mode is right and no
+DirectDraw failure appeared. No launch wrapper, no held primary, no relaunch trick, no
+manual step beyond launching from the monitor you want — which is the same rule
+`tools/tropico` has always stated on GOG, and which s90 traced to the game rather than to
+Wine.
+
+The 1080p run is `logs/steam-novdesk-1920x1080.log.gz`: no `[vdesk]` line anywhere, 18
+applied 0 failed, `slot 4 -> 1920x1080`, and nothing at all in the `[x]`/`[!]`/`DDERR`
+classes. `tropico-vd.state` is gone and `HKCU\Software\Wine\Explorer` no longer names a
+desktop, so the arming really is undone rather than merely unused.
+
+**One honest gap.** That log is the easy case — `HDMI-A-5 is already primary -- nothing to
+change` — so it does not exercise the primary switch at all, and the 1440p run that did was
+overwritten by it before it could be kept. The claim that with no desktop in the way Wine
+*notices* the switch is therefore carried by s99's own verified measurement plus the
+owner's observation, not by a log from this session. It is not unsupported; it is not
+re-confirmed here either. Next 1440p Steam run: copy the log out before launching again.
+
+### 109.8 What changes, and what does not
+
+**No code change is needed.** `[Display] VirtualDesktop` already defaults to 0 in both the
+proxy (`GetPrivateProfileIntA(..., 0, ip)`) and the shipped ini. The Steam install had it
+switched on by hand during the s100 work, and it was never the default anyone would get.
+So nothing shipped was ever broken by this — but anyone who followed the ini's own
+suggestion would have walked into it.
+
+**The shipped ini's documentation was wrong and is now fixed.** It recommended the setting
+on the grounds that inside a desktop "the game cannot see the monitor layout at all --
+which is why the GOG path has never shown the camera drift", which 614b2b9 measured and
+refuted, and it did not mention the cost at all. It now leads with the cost, says plainly
+not to reach for it in order to get a resolution, records that its original justification
+is false, and keeps 109.6's unproven DirectDraw guard as the one live reason it still
+exists rather than being deleted.
+
+**The virtual desktop is kept, not removed.** It buys nothing that has been demonstrated,
+but 109.6's reading of the PCGamingWiki advice gives it a plausible unproven job, and
+deleting a feature to prove a point is not a measurement. Off by default, documented
+against, and easy to test the day someone wants to settle it.
