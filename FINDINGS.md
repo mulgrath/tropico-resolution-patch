@@ -9387,3 +9387,404 @@ patch beside a new one, in a folder an installer walks up into. `install.bat` lo
 level up for `Tropico.EXE`, so it will not install *from* the wrong folder, but a tester who
 double-clicks the wrong `install.bat` has no way to tell. Not deleted here: they are the
 owner's files, not the patch's.
+
+## 113. The first native-Windows pass: three faults, one of them shared by all three
+
+1.2 was installed on real Windows, GOG and Steam, on a 1080p screen beside a 1440p
+primary. Three things came back, and 112.5 had predicted none of them:
+
+```
+  the GOG installer  "it complained that it couldn't find the .exe. I had to copy
+                     the files into the app folder and then run the installer"
+  the monitor        "locked to my primary 1440p monitor. I could not launch the
+                     game on my 1080p monitor"
+  Steam, launch 1    "Error opening pack file item 'setuplib.i16'"
+```
+
+The third is `setuplb.i16` — FINDINGS 98's error, verbatim, on the edition and at the
+moment 98 was written to fix. The first is unrelated. **The second and third turn out
+to be the same fault**, and the reason 112.5 missed it is worth recording: it asked
+"which of *this session's changes* run on Windows", found the answer was s106 alone,
+and stopped. The question that would have caught this is the other one — *which
+existing behaviour is reachable on Windows* — and nobody asked it.
+
+### 113.1 The installer looked up when the game was down
+
+`install.bat` checked its own folder and then one level up. The GOG edition puts the
+game in an `app` subfolder: `C:\GOG Games\Tropico` is *not* the folder holding
+`Tropico.EXE`, `C:\GOG Games\Tropico\app` is. So a player extracting into the folder
+GOG names after the game — which is also the folder our own `READ-ME-FIRST.txt` told
+them to use — lands one level **above** the game, and a search that only ever walks
+upward cannot get there from there. Reproduced under wine's cmd in a GOG-shaped
+folder before anything was changed:
+
+```
+  PROBLEM: Tropico.EXE is not here, and not in the folder above either.
+  GOG    usually  C:\GOG Games\Tropico          <- the folder it is standing in
+```
+
+The message named the wrong folder as the right one.
+
+**This was already known, on the other platform.** `tools/tropico-common.sh` has
+searched `app/` since the identical trap was hit on Linux, and its comment says so in
+as many words: *"'Extract into your Tropico folder' is ambiguous on GOG, where the
+folder named Tropico is NOT the folder holding Tropico.EXE"*. `FINDINGS` itself writes
+the path as `.../Tropico/app` in six places, 112.5's own clean-slate step included. The
+Windows half was simply never ported. The fix is that port: here, `app\`, then the same
+two questions up to three levels up, requiring **both** `Tropico.EXE` and `data\` so a
+folder with one and not the other cannot be adopted.
+
+Two smaller things went with it. `GAME` no longer carries a trailing backslash — every
+use was `"%GAME%Tropico.EXE"`, which put a `\` immediately before a closing quote, and
+that is not a shape to leave unexamined in a package that had never met real `cmd`. And
+the refusal message now names `app`, and says Downloads is the usual real mistake.
+
+Seven layouts, run under wine's cmd, all passing: GOG with the package beside `app\`;
+GOG with Explorer's "Extract All" adding another level; Steam in the game folder;
+Steam one level down; Downloads with no game anywhere near (still refused); a folder
+with `Tropico.EXE` and no `data\` (refused); and uninstall from the GOG shape,
+restoring the stock 291328-byte Bink.
+
+### 113.2 The one gate under both remaining faults
+
+`choose_monitor()` reads the monitor layout by shelling out to `xrandr` through
+`unix_sh`, which goes through `game_unix_dir`:
+
+```c
+  if (!((g_dir[0] == 'Z' || g_dir[0] == 'z') && g_dir[1] == ':')) return 0;
+```
+
+112.5 quoted exactly this and called it the reason to trust that the Linux display
+apparatus is inert on Windows. It is — and being inert is the bug. On a `C:\` install
+the call fails, `choose_monitor()` logs *"could not read the display from the host"*,
+and **`g_launch_w` is never set**. Everything downstream reads that silence as "there
+is no launch monitor", and two separate things break.
+
+**The monitor.** What is left is primary-only in three independent places:
+`pick_mode_pass()` enumerates `EnumDisplaySettings(NULL, …)`, which is the primary
+adapter; its fit gate is `SM_CXSCREEN`, which is the primary's size; and
+`pin_window_to_primary()` actively drags the window back. `[Display] Monitor=` cannot
+help, because it is consumed inside the xrandr path that never runs. There was no way
+to play on the second monitor at all. Visible in the log of a bare-host run on `C:`,
+where the picker considers seven modes and every one of them fits 1920x1080 — the
+2560x1440 panel beside it is not in the list, because it is not on the primary adapter.
+
+**The art.** `DllMain` generated art only inside `if (launch_override(&am))`, and
+`launch_override()` returns 0 unless `g_launch_w` is set. So on Windows *nothing was
+generated before the entry point*, and generation fell back to `apply_patches` — which
+on Steam defers to the first `GetDeviceCaps`, after the game has indexed `data\`. That
+is FINDINGS 98 exactly: a file that is present, valid and byte-identical to the working
+copy, and invisible because it arrived after the index. GOG never showed it because the
+unwrapped build patches from inside `DllMain` anyway and generates on the way through.
+Measured, 1.2 as shipped, on a `C:` folder with the deferred path forced:
+
+```
+  [display] could not read the display from the host -- leaving the monitor alone
+  [*] .text not readable at load time (DRM-wrapped?) -- deferring to GetDeviceCaps
+```
+
+Nothing between those two lines. **98's fix was real and was reachable only through a
+Linux-only code path** — which is why the same symptom came back, unchanged, on the
+first edition to take the other path.
+
+### 113.3 The fix, in two independent pieces
+
+**`win32_outputs()`** fills the same `xout_t` list from `EnumDisplayDevices` plus
+`EnumDisplaySettings(ENUM_CURRENT_SETTINGS)` — a name, a primary flag, a size, a
+position. `dmPosition` is in virtual-screen coordinates with the primary at (0,0),
+which is the convention `xrandr_outputs()` already reports, so `choose_monitor()`'s
+pointer arithmetic needed no case of its own and **every line of the decision is
+shared**. xrandr stays first where it answers: under Wine the Win32 view is the thing
+FINDINGS 74 is about, so this is a fallback for the platform with no host to ask, and
+on Linux nothing reaches it — confirmed by running the same harness from a `Z:` path
+before and after, and getting identical logs.
+
+Measured on the Win32 source, cursor on the 1440p panel:
+
+```
+  [display] no host display channel -- reading the layout from Windows itself (2 attached)
+  [display] launched from \\.\DISPLAY2 (launch point 2240,360 in screen space)
+[+] [display] running at \\.\DISPLAY2's own mode 2560x1440
+  [display] \\.\DISPLAY2 needs to become primary (currently \\.\DISPLAY1) -- held until
+            the patch pass
+```
+
+`Monitor=\\.\DISPLAY1`, `Monitor=<not attached>`, `SetPrimary=0` and
+`FollowLaunchMonitor=0` all behave — every `[Display]` option works on Windows for the
+first time.
+
+**`decide_mode()`** makes the mode decision once and caches it, and `DllMain` now asks
+for it whenever no monitor change is pending. That condition is the whole of FINDINGS
+99 restated: with a switch pending, `SM_CXSCREEN` is stale by construction and only the
+launch monitor's own mode is knowable, so that case still generates for the launch mode
+alone. With nothing pending — which is every Windows run before 113, and every
+single-monitor Linux run too — the ini and the picker are **already** answerable in
+`DllMain`, and were simply never asked.
+
+`ini_fit_check()` had to come out of the patch pass for this: it sets the flag
+`ini_override()` consults, and without it a `DllMain` decision would adopt an ini mode
+the patch pass was going to reject, generate art for it, and hand the game a mode
+larger than its screen. It is guarded like `choose_monitor()` — whoever gets there
+first does the work and logs it once.
+
+End to end on the native-Windows path, real archives, deferred patching:
+
+```
+  [artgen] data\ does not match 1920x1080 -- generating from your archives
+[+] artgen: 15 stock-class menu asset(s) for slots 1-3
+[+] artgen: generated 233 assets for 1920x1080 (font scale 1.000000, box), 0 skipped
+  [artgen] 233 assets in 1915 ms
+[*] .text not readable at load time (DRM-wrapped?) -- deferring to GetDeviceCaps
+```
+
+Generation finishes before the line that says patching is deferred, `setuplb.i16` is
+one of the 233, and a second run reports `already holds the ... set -- nothing to do`.
+233 rather than 267 is the harness, not a regression — `ag_exe_path` returns the running
+module, which here is the host, exactly as 98 recorded.
+
+### 113.4 Giving the primary back, without a watchdog to give it back with
+
+Making the launch monitor primary is what actually reaches the second screen —
+DirectDraw goes to whichever monitor is primary, so this is not a preference. The Linux
+side changes it with `xrandr` and leaves a **host watchdog** behind: a shell loop
+outside the process that restores the primary when a heartbeat file goes stale, crash
+included. Native Windows has nothing to leave behind, and this package ships no helper
+executable. So the guarantee is assembled from two weaker pieces:
+
+* **the watcher** — an ordinary thread that restores as soon as the game's window is
+  gone. Deliberately *not* `DLL_PROCESS_DETACH`: `ChangeDisplaySettingsEx` broadcasts
+  `WM_DISPLAYCHANGE`, and doing that under the loader lock with every other thread
+  already dead risks a process that will not exit. A desktop on the wrong primary is
+  annoying and fixable by hand; a game that will not close is neither.
+* **`tropico-primary.state`** — written *before* the change, so the next launch knows
+  which monitor was really the player's and restores to that, rather than mistaking its
+  own leftover for a choice. Verified: a hand-written state file is read, reported, and
+  honoured over the primary actually in effect.
+
+The gap between them is real and is not being hidden: kill the game outright and the
+primary stays on the game's monitor until Tropico is next started, or until the player
+changes it back. `[Display] SetPrimary=0` switches all of it off.
+
+Windows has no "set primary" call — the primary is whatever sits at (0,0) — so
+`set_primary_win32()` moves every attached display by the negative of the target's
+position. That changes the **origin and nothing else**, which is why it is exactly
+reversible rather than merely equivalent. `CDS_NORESET` on each device and one apply at
+the end, so the desktop never passes through a layout with two primaries or a hole; and
+`CDS_UPDATEREGISTRY` is what makes an interrupted restore harmless, because the registry
+then already holds the layout being restored *to*.
+
+### 113.5 What is verified and what is not
+
+Verified here, under Wine or wine's cmd: all seven installer layouts; the Win32 monitor
+read and every `[Display]` option on it; the Linux path unchanged, byte for byte in its
+log; art generation from `DllMain` on the deferred path with the game's real archives,
+including the asset from the error report.
+
+**Not verified, and it needs the owner's Windows machine:** the switch itself.
+`set_primary_win32()`, `apply_monitor_win32()` and the restore watcher have never run —
+Wine's `CDS_SET_PRIMARY` is a reimplementation, so agreement with it would not be
+evidence about the real one, and running it here would have rearranged the owner's own
+desktop to find out. This is the same caveat 112.5 raised about the `.bat` files, and it
+is the same answer: it can only be settled on Windows.
+
+**One risk this introduces, stated plainly.** A pending monitor change forces the
+deferred patch path, so on **GOG under Windows with two monitors** patching now depends
+on the `GetDeviceCaps` hook firing — a build where that has never been measured, only
+reasoned about (the game's own desktop-width gate at `0x515160` calls it). The branch
+is not new; d32cc32 added it for Linux launches that bypass `tools/tropico`. But
+Windows GOG multi-monitor is the first configuration where it is the *normal* path. If
+a log ends at `deferring to GetDeviceCaps` with no `slot 4 ->` line after it, that is
+this, and the diagnosis is one line of the log the player already has.
+
+Not changed, and noted so it stays a decision: `pin_window_to_primary()`'s log lines
+still say "Wine measures the PRIMARY at", which reads oddly on Windows. The code is
+correct there — after the switch the window and the primary agree by construction —
+and rewording well-tested diagnostics for a platform that now rarely reaches them buys
+nothing.
+
+### 113.6 The switch, measured on Windows: four mechanisms refused, one works
+
+113.5 said the switch itself could only be settled on the owner's machine. It was, and
+the answer was not the one the code assumed.
+
+**The report.** 1.3-rc1, Steam, Windows 11 24H2 (build 10.0.26100.8872), a 1920x1080
+`\\.\DISPLAY2` beside a 2560x1440 `\\.\DISPLAY1` primary. Launched twice from the 1080p
+monitor; opened on the 1440p one both times. No error, and the art was right.
+
+Detection was never the problem. From the log:
+
+```
+  [display] no host display channel -- reading the layout from Windows itself (2 monitor(s) attached)
+  [display] launched from \\.\DISPLAY2 (launch point -1316,838 in screen space)
+[+] [display] running at \\.\DISPLAY2's own mode 1920x1080
+  [display] \\.\DISPLAY2 needs to become primary (currently \\.\DISPLAY1) -- held until the patch pass
+```
+
+`win32_outputs()` worked, the pointer resolved correctly, the mode was adopted. Then:
+
+```
+[!] [display] \\.\DISPLAY2 is primary but Windows still measures 2560x1440 rather than 1920x1080.
+```
+
+That line is only reachable when `set_primary_win32()` returned **success**. It had not
+succeeded. Three independent confirmations in the same log: `SM_CXSCREEN` stayed
+2560x1440 through the full 3 s poll; the window dump two seconds later still showed
+`Shell_SecondaryTrayWnd` at `-1920,1435` and Steam at `-1775,401`, i.e. DISPLAY2 still at
+negative x and DISPLAY1 still at the origin; and the game's own window at `10,10` was
+reported "on the primary monitor". The consequence is one line further down —
+`the mode (1920x1080) is SMALLER than the screen it is running in (2560x1440)`.
+
+**Why it reported success.** `set_primary_win32()` discarded the return of every
+per-device `ChangeDisplaySettingsExA` and inspected only the final apply:
+
+```c
+    return ChangeDisplaySettingsExA(NULL, NULL, NULL, 0, NULL) == DISP_CHANGE_SUCCESSFUL;
+```
+
+That call returns `DISP_CHANGE_SUCCESSFUL` **when there is nothing staged to apply**. So a
+run in which every staging call was refused arrived there, returned 1, and the caller
+announced a primary that did not exist. `found` tracked only the name match, never
+whether the call worked.
+
+**`probes/primaryprobe.c`.** Each candidate fix needed a real 24H2 desktop with two
+monitors, and reaching one costs a reboot; testing them one per reboot is the expensive
+way to answer a question the size of one run. The probe tries every candidate in a
+single pass, checks each against what `EnumDisplayDevices` reports afterwards rather than
+against the API's return value, and restores between attempts. `--dry` uses `CDS_TEST` /
+`SDC_VALIDATE` so the whole path can be exercised under Wine, changing nothing, before a
+boot is spent on it. Measured:
+
+```
+=== baseline ===     stage DISPLAY2 -> (0,0) AS PRIMARY   ret -1 FAILED (driver refused)
+=== keepfields ===   stage DISPLAY2 -> (0,0) AS PRIMARY   ret -1 FAILED (driver refused)
+=== applytwice ===   stage DISPLAY2 -> (0,0) AS PRIMARY   ret -1 FAILED (driver refused)
+=== ccd ===          SetDisplayConfig(APPLY) ret 0        -> DISPLAY2 is NOW the primary device
+=== immediate ===    stage DISPLAY2 -> (0,0) AS PRIMARY   ret 0  SUCCESSFUL
+                     RESULT: DISPLAY2 is STILL NOT the primary device
+```
+
+`baseline` is the sequence MSDN documents, sample and all. It is refused. Widening
+`dmFields` does not help and neither does a second apply, so NirSoft MultiMonitorTool
+2.15's 24H2 workaround — "applies the monitors configuration multiple times" — addresses
+a different symptom than this one.
+
+**`immediate` is the most important line in the file.** Its staging call returned
+`DISP_CHANGE_SUCCESSFUL` and the device still did not become primary. That is the same
+lie the final apply tells, from a different call, and it is the whole argument for
+`is_primary_win32()`: *ask Windows what the state is; never take the API's word for it.*
+Had this been guessed rather than measured, "make the DEVMODE fuller" and "apply twice"
+both look plausible and both are wrong.
+
+**The fix.** `set_primary_win32()` now tries `SetDisplayConfig` first and the documented
+CDS sequence as a fallback for systems without the CCD exports, verifying after each and
+returning what Windows says rather than what the call returned. Every refusal is logged
+with its `DISP_CHANGE_*` name, because discarding them is what made the first Windows run
+undiagnosable from its own log.
+
+`cds_set_primary()` keeps its `keep_fields`/`noreset`/`applies` parameters even though
+only one shape now calls it: the probe still exercises all four, and a machine that
+answers differently is one probe run away from being understood.
+
+**The Wine guard names the mechanism, not a slot.** `if (running_under_wine()) return
+sp_baseline(dev);` — an earlier revision wrote `n = 1`, meaning "the first one", which
+silently changed what Wine does the moment CCD moved to the front of the table. Under
+Wine this function is only reachable when the xrandr read failed, and Wine forwards these
+calls to XRandR; walking failing mechanisms there would shuffle the host desktop.
+
+### 113.7 Giving the primary back: the window was the wrong signal
+
+113.4 restored when the game's window appeared and then vanished. Once the switch
+actually worked, that turned out to be wrong twice over, and both faults are visible in
+the rc1 log.
+
+**It loses the race that matters.** Window destroyed → message loop ends → `WinMain`
+returns → `ExitProcess`. That is milliseconds. The watcher polled at 500 ms and then
+needed about a second for the display call, and the thread dies with the process. **No log
+this project has collected contains the `primary put back` line, on any run** — including
+one where `start_primary_watch()` demonstrably ran and `g_prev_primary` was set. Alt+F4
+is not a special case here; a normal in-game Quit takes the identical path.
+
+**It can win the race that does not matter.** A window of class `Tropico` is created *and
+destroyed* during startup while the game runs on. rc1's log has one at `10,10 600x400`,
+and the full window dump two seconds later lists no window owned by the process at all,
+with the intro movies still playing. Catching that pair restores the primary two seconds
+into loading and undoes the switch.
+
+**The fix: ask for the exit rather than inferring it.** `Tropico.EXE` imports
+`KERNEL32!ExitProcess` — confirmed in its import table, slot `0x21fef8` — so
+`arm_primary_restore()` hooks it through the same `hook_import()` the file already uses
+for `GetDeviceCaps`, `GetCursorPos` and the fileorder probes. That is the one moment both
+late enough to be correct and still safe: every thread alive, the loader lock not held,
+and the `WM_DISPLAYCHANGE` broadcast has somewhere to go. It is precisely the moment
+`DLL_PROCESS_DETACH` is not, which is why 113.4 refused to restore there and why that
+refusal stands.
+
+**The restore is bounded.** It runs on a thread with a 5 s deadline, after which the real
+`ExitProcess` is called regardless. Moving a driver call onto the exit path is exactly
+what would put 113.4's own judgement at risk — *"a desktop on the wrong primary is
+annoying and fixable; a game that will not close is neither."* When the deadline elapses
+nothing is lost that was not already lost: `tropico-primary.state` catches it next launch.
+
+Three layers became two. The watcher is deleted. The state file keeps the job no
+in-process hook can do — `TerminateProcess`, Task Manager, a reboot — and
+`restore_primary()`'s interlocked guard makes arriving twice harmless by construction.
+
+**Status: implemented, never observed firing.** 113.8 made this path opt-in before it
+could be measured, so the claim "the hook installs and the restore completes before the
+process dies" is still unverified. The test is three launches — quit, Alt+F4, End task —
+copying `tropico-fix.log` after each, looking for `[display] ExitProcess hooked` early and
+`primary put back` late.
+
+### 113.8 SetPrimary is opt-in on Windows, and on by default under Wine
+
+Every fix in 113.6 and 113.7 is about somebody else's state. The switch is one call; the
+window watcher, the state file, the exit hook, the deadline and the question of
+`SDC_SAVE_TO_DATABASE` all exist to give back something we should not have taken by
+default. When the machinery to undo a change outgrows the change, that is the
+architecture asking a question.
+
+**The asymmetry that decides it.** Under Wine the restore lives *outside* the process — a
+detached shell watchdog on a heartbeat for the Steam path, `trap restore_primary EXIT INT
+TERM HUP` in `tools/tropico` for GOG. Neither cares how the game ended; a segfault and a
+clean quit look the same to them. And xrandr's primary is runtime state the desktop
+re-establishes at login, so even losing the watchdog self-heals. On a Wayland session it
+is smaller still: `xrandr` speaks to XWayland, whose RandR primary no native Wayland
+client consults, so the change is scoped to Wine and other X clients.
+
+On Windows there is nothing outside the process — this package ships no helper executable
+and is not going to — and the change **persists**, because making it stick at all means
+`SDC_SAVE_TO_DATABASE` / `CDS_UPDATEREGISTRY` writing it into the stored display
+configuration. The worst case is therefore not "wrong until you log in again" but "wrong
+until the player works out what did it", with nothing still running to connect it to.
+
+So on Windows the default is now off:
+
+```c
+    if (!GetPrivateProfileIntA("Display", "SetPrimary", running_under_wine() ? 1 : 0, ip))
+        return;
+```
+
+The game opens on the primary monitor at that monitor's resolution, which is the whole of
+what this patch promises; a multi-monitor player sets their main display once in Windows'
+own settings, and a single-monitor player — most of them — sees no change whatever.
+`SetPrimary=1` restores the old behaviour for someone who wants it and has read what it
+costs.
+
+**Turning it off is sufficient by itself.** `choose_monitor()` returns before setting
+`g_launch_w`, so `pick_mode()` validates against `SM_CXSCREEN` — the primary, the screen
+the game will actually run on — and no mode is adopted from a monitor it will not be shown
+on. The letterboxed 1920x1080-inside-2560x1440 of 113.6 cannot arise.
+
+**One upgrade consequence, and it is not an oversight.** Turning the feature off also
+turns off the machinery that cleaned up after it: with `SetPrimary=0`, `choose_monitor()`
+returns before `load_primary_state()`, so a `tropico-primary.state` left by 1.3-rc1 is
+never read and a leftover primary is never restored. Anyone upgrading from rc1 mid-move
+must set their main display back by hand. The installer should probably notice that file
+and say so; it does not yet.
+
+**Not settled, and left deliberately.** Whether `SDC_APPLY` without `SDC_SAVE_TO_DATABASE`
+would make the switch session-only — giving Windows the same self-healing floor Linux gets
+free — is untested. It would shrink the opt-in path's worst case considerably. The risk is
+the mirror of the benefit: a configuration Windows has not saved may be re-asserted from
+the database on a display event, such as a monitor sleeping, which would move the primary
+out from under a running game.
