@@ -9041,7 +9041,7 @@ script was extracted from the built source and run as the host would run it, rat
 eyeballed — a syntax error in a string literal fails silently and would have looked exactly
 like the bug it replaces.
 
-`binkw32.dll` sha256 `1e6b0a1a…` — **the Steam half is not yet run.**
+`binkw32.dll` sha256 `de0aef7b…` — **the Steam half is not yet run.**
 
 ### 111.7 Why this hid for so long
 
