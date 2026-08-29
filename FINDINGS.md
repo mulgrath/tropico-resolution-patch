@@ -9058,3 +9058,53 @@ bitten by an in-band value that is indistinguishable from a real answer** — s8
 cursor samples, s90.3's `0,0` from `GetCursorPos`, and now this. The rule s100.3 already
 wrote down covers it: *when a sentinel is also a legal value, get the fact from a source
 with no overlap.* A stale coordinate has no sentinel at all, so the source had to change.
+
+### 111.8 CONFIRMED on GOG: four alternating runs, no stickiness
+
+Owner, 2026-08-29: "That's running much better. I went back and forth, including not having
+the terminal open on the same monitor and only using the cursor to determine monitor and
+notice no stale effects."
+
+The append-log from s110 is what makes that checkable rather than anecdotal — four
+consecutive runs, alternating, all correct:
+
+```
+  ==== 11:18:59   launch point 3200,216 (via placement) -> DP-3      == Tropico 2560x1440
+  ==== 11:19:10   launch point  960,531 (via placement) -> HDMI-A-5  == Tropico 1920x1080
+  ==== 11:19:25   launch point 3200,216 (via placement) -> DP-3      == Tropico 2560x1440
+  ==== 11:19:35   launch point  960,531 (via placement) -> HDMI-A-5  == Tropico 1920x1080
+```
+
+Two placements, cleanly alternating, ten seconds apart. Under the old reading every one of
+those would have named DP-3. **And the terminal was NOT on the target monitor**, which is
+the sharper test: the compositor's placement follows the cursor on COSMIC, not the focused
+window — the same thing s78 measured about placement, now being asked of the compositor
+directly instead of inferred from a pointer X cannot see.
+
+`X reported the new primary immediately` on every switching run, so s110's race stays
+eliminated across four more samples.
+
+### 111.9 What is NOT tested, stated plainly
+
+* **The Steam edition.** `POINTER_PY` carries the identical fix and the identical bug
+  before it, and the embedded script was extracted from the built source and executed as
+  the host would run it — but it has not been run inside the game. `binkw32.dll` sha256
+  `de0aef7b…` is deployed to the Steam install and unexercised. The line to look for is
+  `[display] launched from … , via placement`; `via pointer` there would mean the Wayland
+  test did not fire through Wine and `start.exe`, which is exactly why the socket check
+  was added and exactly what would need looking at.
+* **A fresh install.** Not run. What *can* be checked without one, and was: every file the
+  fix touches is on `make-release.sh`'s ship list and committed, so a release built now
+  carries them rather than stale copies —
+
+```
+  committed  tools/tropico                 (append-log + settle poll + via-method line)
+  committed  tools/tropico-launchpoint.py  (placement probe)
+  committed  known-good/binkw32.dll        de0aef7b… == proxy/binkw32.dll
+```
+
+  The builder refuses to package a listed file that is not committed, so that guard holds
+  on its own. What remains untested is `install.sh` onto a clean game folder and the
+  first-run path through it — the thing this session has been repeatedly reminded it cannot
+  assume, since three separate bugs here were "the code is right and the copy being run is
+  not" (111.4's three launchers being the most recent).
