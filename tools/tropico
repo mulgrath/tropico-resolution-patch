@@ -79,7 +79,14 @@ if [ -z "$GAMEDIR" ]; then
   exit 1
 fi
 LOGF="$GAMEDIR/tropico-launcher.log"
-: > "$LOGF" 2>/dev/null || LOGF=""
+# APPEND, NEVER TRUNCATE. "It came up wrong, I ran it again and it was right" is the
+# commonest diagnostic sequence this launcher is involved in, and truncating destroyed
+# the evidence of the run that went wrong -- every time, including the run that
+# prompted this. Capped so it cannot grow without bound.
+if [ -f "$LOGF" ] && [ "$(wc -c <"$LOGF" 2>/dev/null || echo 0)" -gt 65536 ]; then
+  tail -n 300 "$LOGF" >"$LOGF.tmp" 2>/dev/null && mv "$LOGF.tmp" "$LOGF" 2>/dev/null || true
+fi
+printf '\n==== %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"$LOGF" 2>/dev/null || LOGF=""
 
 if [ "$LIST" = 1 ]; then
   echo "Monitors:"
@@ -115,6 +122,11 @@ restore_primary() {
 WANT_MONITOR_EXPLICIT="$MONITOR"
 if [ -z "$MONITOR" ]; then
   MONITOR="$(tropico_launch_output || true)"
+  # Log the raw pointer beside the output it resolved to. Without it, "it picked the
+  # wrong monitor" and "it picked the right monitor and then measured the wrong mode"
+  # produce identical logs, and they need opposite fixes.
+  _pt="$(DISPLAY="${DISPLAY:-:1}" python3 "$SELF/tropico-launchpoint.py" 2>/dev/null || true)"
+  [ -n "$_pt" ] && say "   pointer at ${_pt% *},${_pt#* } -> $MONITOR"
 fi
 if [ -n "$MONITOR" ]; then
   tropico_outputs | awk -v o="$MONITOR" '$1==o{f=1} END{exit !f}' \
@@ -135,6 +147,33 @@ if [ -n "$MONITOR" ]; then
     RESTORE_PRIMARY="$CUR"
     xrandr --output "$MONITOR" --primary || fail "Could not make $MONITOR the primary monitor."
     say "== $MONITOR is primary for this run (was $CUR; it will be put back)"
+    # WAIT FOR X TO AGREE, and say how long it took.
+    #
+    # `xrandr --output --primary` returns when the request is SENT. The property change
+    # propagates asynchronously, so the very next query can still name the old primary --
+    # and everything below measures the primary: WANT (the mode), MONITOR (re-read), the
+    # ini the proxy reads, and the size on the `wine explorer` command line. A stale read
+    # there puts the PREVIOUS run's monitor and mode into all four, which is exactly the
+    # reported symptom -- the first launch after moving monitors comes up at the last
+    # run's resolution, and a second launch is right because by then the switch landed
+    # long ago.
+    #
+    # The poll costs nothing when there is no race: it exits on the first check.
+    _seen=""; _n=0
+    while [ "$_n" -lt 50 ]; do
+      _seen="$(tropico_outputs | awk '$3=="primary"{print $1; exit}')"
+      [ "$_seen" = "$MONITOR" ] && break
+      _n=$((_n + 1))
+      sleep 0.1 2>/dev/null || sleep 1
+    done
+    if [ "$_seen" != "$MONITOR" ]; then
+      say "   [!] X still reports '${_seen:-none}' as primary after 5 s -- the mode below"
+      say "       will be that monitor's, not $MONITOR's"
+    elif [ "$_n" -gt 0 ]; then
+      say "   X took $((_n * 100)) ms to report the new primary (measured, not assumed)"
+    else
+      say "   X reported the new primary immediately"
+    fi
   fi
 fi
 # ORDER IS LOAD-BEARING: MEASURE AFTER THE PRIMARY SWITCH, NEVER BEFORE.

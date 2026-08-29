@@ -8804,3 +8804,85 @@ exists rather than being deleted.
 but 109.6's reading of the PCGamingWiki advice gives it a plausible unproven job, and
 deleting a feature to prove a point is not a measurement. Off by default, documented
 against, and easy to test the day someone wants to settle it.
+
+
+## 110. The GOG first launch uses the PREVIOUS run's monitor — and the evidence was being deleted every time
+
+Owner, 2026-08-29: "launching on 1080p when the last run was on 1440p launched at 1440p and
+I had to close and run again even though my terminal and cursor were on the 1080p monitor.
+Same thing going then to 1440p... My guess is that the last run is stickier than the cursor
+check?"
+
+Deterministic, both directions, one launch behind. Two candidate mechanisms, needing
+opposite fixes:
+
+* **the monitor is detected wrong** — `tropico_launch_output` names the previous monitor;
+* **the monitor is detected right and the MODE is measured stale** — the launcher makes the
+  chosen monitor primary and then reads *the primary's* mode. `xrandr --output --primary`
+  returns when the request is sent, not when X has applied it, so the very next query can
+  still name the old primary. Everything downstream measures the primary: `WANT`, the
+  re-read `MONITOR`, the `[Resolution]` written into the ini, and the size on the
+  `wine explorer /desktop=` command line. All four would carry the previous run's monitor.
+
+Both produce the reported symptom. Neither could be told from the other, because —
+
+### 110.1 The launcher truncated its own log on every run
+
+```sh
+LOGF="$GAMEDIR/tropico-launcher.log"
+: > "$LOGF" 2>/dev/null || LOGF=""
+```
+
+"It came up wrong, so I ran it again and it was right" is the single commonest sequence
+this launcher is involved in, and the second run **destroyed the log of the first**. Every
+time. The only run whose evidence ever survived was the one that worked.
+
+Confirmed while investigating this: the surviving log reads
+
+```
+  == running on DP-3, where your mouse pointer is
+  == DP-3 is primary for this run (was HDMI-A-5; it will be put back)
+  == Tropico  2560x1440
+```
+
+— the *correct* second launch, agreeing end to end with `ini override: 2560x1440` and
+`slot 4 -> 2560x1440` in the proxy log. The failing launch that came before it left nothing
+at all.
+
+### 110.2 Three changes, and only one of them is a guess
+
+**Append, never truncate** (capped at 64 KB, tail 300 lines kept, one `==== timestamp`
+header per run). This is not a diagnostic aid, it is the precondition for having one: a
+two-launch symptom cannot be investigated with a one-launch log.
+
+**Log the pointer beside the output it resolved to.** Without it the two candidate
+mechanisms above produce identical logs:
+
+```
+     pointer at 955,854 -> HDMI-A-5
+```
+
+**Wait for X to agree before anything measures the primary** — polling `xrandr` until it
+names the requested output, 5 s cap, and saying how long it took:
+
+```
+     X reported the new primary immediately
+     X took 300 ms to report the new primary (measured, not assumed)
+     [!] X still reports 'HDMI-A-5' as primary after 5 s -- the mode below will be
+         that monitor's, not DP-3's
+```
+
+The poll costs nothing when there is no race: it exits on the first check. **And the line
+it prints is the experiment.** If the next first-launch-after-moving-monitors reports a
+non-zero wait, the race was the mechanism and the poll has already fixed it. If it reports
+"immediately" and the mode is *still* wrong, the race is innocent and the fault is in the
+pointer detection — which the new pointer line names directly.
+
+s99's split (read the display in `DllMain`, change it in the patch pass) is the same shape
+of bug one layer down: a display change that a later read has to be *told* has landed, not
+assumed to have. The launcher never had that wait; `tools/tropico`'s own comment says
+`ORDER IS LOAD-BEARING: MEASURE AFTER THE PRIMARY SWITCH, NEVER BEFORE`, and it is right
+about the order while being silent about the latency.
+
+Deployed to `tropico-patch/tropico` in the GOG install (verified byte-identical to
+`HEAD` first, so nothing local was overwritten). **Not yet run.**
