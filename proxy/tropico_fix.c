@@ -173,6 +173,7 @@ static void vd_detect(void);
 static void vd_apply(void);
 static DWORD WINAPI xcompare_thread(LPVOID);
 static int g_cur_xcmp;                   /* s101, armed from [Cursor] XCompare */
+static int g_cur_sites;                  /* s107, armed from [Cursor] Sites   */
 static int   g_vd_want;                  /* [Display] VirtualDesktop */
 static int   g_vd_inside;                /* this process IS in the desktop we armed */
 static int   g_vd_checked;
@@ -1034,11 +1035,14 @@ static void apply_patches(void)
         g_cur_fix = GetPrivateProfileIntA("Cursor", "Fix", 0, ip);
         g_cur_msg = GetPrivateProfileIntA("Cursor", "MsgProbe", 0, ip);
         g_cur_xcmp = GetPrivateProfileIntA("Cursor", "XCompare", 0, ip);
+        g_cur_sites = GetPrivateProfileIntA("Cursor", "Sites", 0, ip);
         if (g_cur_xcmp)
             CloseHandle(CreateThread(NULL, 0, xcompare_thread, NULL, 0, NULL));
         if (GetPrivateProfileIntA("Unix", "Probe", 0, ip)) unix_probe();
         if (g_cur_msg) install_msg_probe();
-        if (GetPrivateProfileIntA("Cursor", "Probe", 0, ip) || g_cur_fix) {
+        /* Sites arms the same hook: without this, [Cursor] Sites=1 alone would set
+         * the flag and never install the hook that reads it. */
+        if (GetPrivateProfileIntA("Cursor", "Probe", 0, ip) || g_cur_fix || g_cur_sites) {
             g_cur_probe = GetPrivateProfileIntA("Cursor", "Probe", 0, ip);
             if (!install_cursor_probe())
                 logf_("[x] [cursor] probe: USER32!GetCursorPos not found in the import"
@@ -1480,6 +1484,55 @@ static GetCursorPos_t *g_gcp_slot;
 static LONG  g_cur_logged;
 static DWORD g_cur_last_ms;
 
+/* ------------------------------------ s107.3 which call sites read the cursor
+ *
+ * s107 argues the next instrument has to fire on the pan DECISION rather than on a
+ * clock, because the drift is intermittent and a clock keeps missing it.  Naming the
+ * call site that feeds the pan is the first step, and it costs one run: the hook is
+ * entered through the IAT slot, so `__builtin_return_address(0)` is the instruction
+ * after the game's own `call`, which is exactly what a detour needs and what the
+ * disassembly can be read against.
+ *
+ * A CENSUS, not a stream, for s103's reason: the game called GetCursorPos 20,000
+ * times in a few seconds of the last Steam run.  One row per distinct return address.
+ *
+ * The `edge` column is the discriminating one.  Every site sees the same coordinates,
+ * so hit counts alone would not separate them -- but the map pans when the cursor is
+ * within a margin of a screen edge, so the site that drives panning is the one whose
+ * reads land there.  A site that never sees an edge cannot be the one. */
+#define GCP_SITES 32
+#define GCP_EDGE  8
+static struct { DWORD ret; LONG hits; LONG edge; LONG lastx, lasty; } g_gcp_site[GCP_SITES];
+static LONG g_gcp_n;
+
+static void gcp_note(DWORD ret, const POINT *p)
+{
+    static int sw, sh;
+    int i, at_edge;
+    if (!sw) { sw = GetSystemMetrics(SM_CXSCREEN); sh = GetSystemMetrics(SM_CYSCREEN); }
+    at_edge = (p->x <= GCP_EDGE || p->y <= GCP_EDGE ||
+               p->x >= sw - 1 - GCP_EDGE || p->y >= sh - 1 - GCP_EDGE);
+    for (i = 0; i < g_gcp_n && i < GCP_SITES; i++)
+        if (g_gcp_site[i].ret == ret) break;
+    if (i >= GCP_SITES) return;                    /* table full -- say so at dump */
+    if (i == g_gcp_n) { g_gcp_site[i].ret = ret; g_gcp_n = i + 1; }
+    g_gcp_site[i].hits++;
+    if (at_edge) g_gcp_site[i].edge++;
+    g_gcp_site[i].lastx = p->x; g_gcp_site[i].lasty = p->y;
+}
+
+static void gcp_dump(void)
+{
+    int i;
+    logf_("[*] [cursor] call-site census -- %ld distinct site(s)%s.  A site with 0 at"
+          " an edge cannot be the one that pans.", g_gcp_n,
+          g_gcp_n >= GCP_SITES ? ", TABLE FULL so some were DROPPED" : "");
+    for (i = 0; i < g_gcp_n && i < GCP_SITES; i++)
+        logf_("  [cursor] caller %p  %ld read(s), %ld at a screen edge (last %ld,%ld)",
+              (void *)(SIZE_T)g_gcp_site[i].ret, g_gcp_site[i].hits,
+              g_gcp_site[i].edge, g_gcp_site[i].lastx, g_gcp_site[i].lasty);
+}
+
 static BOOL WINAPI hook_GetCursorPos(LPPOINT pt)
 {
     BOOL r = g_real_gcp(pt);
@@ -1498,6 +1551,9 @@ static BOOL WINAPI hook_GetCursorPos(LPPOINT pt)
      * panning into the top-left still gets what they asked for -- the only thing
      * suppressed is a jump to the corner from somewhere far away, which no hand
      * can produce. */
+    if (g_cur_sites && r && pt)
+        gcp_note((DWORD)(SIZE_T)__builtin_return_address(0), pt);
+
     if (r && pt) {
         LONG n = InterlockedIncrement(&g_cur_calls);
         if (pt->x == 0 && pt->y == 0) {
@@ -1522,6 +1578,8 @@ static BOOL WINAPI hook_GetCursorPos(LPPOINT pt)
         if ((n % 2000) == 0)
             logf_("[*] [cursor] %ld calls, %ld zero(s), %ld replaced",
                   n, g_cur_zeros, g_cur_dropped);
+        if (g_cur_sites && (n % 20000) == 0)
+            gcp_dump();
     }
 
     if (g_cur_probe && r && pt && g_cur_logged < 60) {

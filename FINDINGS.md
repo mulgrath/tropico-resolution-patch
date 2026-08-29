@@ -8431,3 +8431,40 @@ single detour away. Not built — this section is the argument for building it, 
 This is 106.10's rule again, one level up. That said: make the instrument print the state the
 fix is supposed to change. This says: make the instrument fire on the EVENT, not on a clock,
 when the event is the thing you cannot reproduce.
+
+### 107.4 BUILT: the cursor call-site census
+
+`[Cursor] Sites=1`. Read-only, and it arms the `GetCursorPos` hook by itself so it does
+not depend on `Probe`.
+
+The hook is entered through the IAT slot, so the game's own return address is the first
+thing on the stack. Verified in the emitted code under the real build flags rather than
+assumed — `__builtin_return_address(0)` compiles to a single `mov (%esp),%eax` at function
+entry:
+
+```
+00000000 <_hook@4>:
+   0:   8b 04 24        mov    (%esp),%eax        <- the instruction after the game's call
+```
+
+A census for s103's reason: the last Steam run logged 20,000 `GetCursorPos` calls in a few
+seconds, so this tallies one row per distinct return address and prints every 20,000 reads:
+
+```
+  [cursor] caller 004xxxxx  N read(s), M at a screen edge (last x,y)
+```
+
+**The `edge` column is the discriminating one, and it is why this is not just a caller
+list.** Every call site sees the same coordinates, so hit counts alone cannot separate them.
+But the map pans when the cursor is within a margin of a screen edge, so the site that
+drives panning must be one whose reads land there — and **a site with 0 at an edge is ruled
+out**, whatever its hit count. Margin is 8 px; table is 32 sites and says so if it fills.
+
+`[Cursor] XCompare` is now **off** in the Steam ini, with the reason written beside it.
+Leaving it on would add a subprocess every two seconds and a stream of verdicts that s107
+has just shown cannot be told apart from noise. It should come back only with 107.3(a)'s
+redesign, not as it stands.
+
+Next: reproduce the drift with `Sites=1`, read which caller owns the edge reads, and detour
+that call site to log the pan decision beside X's pointer. That is 107.3(b), and it is the
+first instrument in this investigation that fires on the event instead of on a clock.
