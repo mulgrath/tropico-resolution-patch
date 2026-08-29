@@ -8570,3 +8570,89 @@ against, not the quantity it names.** The comment says "the mode", the code says
 Every value that reaches the same decision needs the check, or the check needs to sit at
 the decision — here, one call at the point where the mode is finally chosen would have
 covered `launch_override`, `ini_override` and `pick_mode` together.
+
+
+## 109. Why 1440p never arrives on Steam: the desktop is clamped to a primary that is only changed afterwards
+
+Owner, 2026-08-29: "It still launched in a 1920x1080 window on my 1440p monitor."
+`logs/steam-1440p-desktop-deadlock.log.gz`.
+
+s108's guard did its job — the black screen is gone and the run is a correct 1080p one —
+but it exposed that the promise the guard makes is one the patch cannot keep. **This is a
+loop, not a delay.** 108.2's loose end is closed here, and it is worse than "one launch
+early": it is *every* launch early, forever.
+
+### 109.1 The cycle, in the order it happens
+
+```
+  1. launch          explorer.exe creates TropicoVD.  Wine CLAMPS it to the PRIMARY
+                     panel at creation (s81) -- primary is HDMI-A-5, 1920x1080.
+  2. proxy starts    screen is 1920x1080; tropico-vd.state says 2560x1440; they differ,
+                     so g_vd_inside is 0 and the monitor-choosing path runs.
+  3. patch pass      primary HDMI-A-5 -> DP-3.  Too late: the desktop already exists.
+  4.                 arms a 2560x1440 desktop "for the NEXT launch".
+  5. exit            the host watchdog restores HDMI-A-5 as primary.
+  6.                 -> step 1, unchanged, indefinitely.
+```
+
+Step 5 undoes the one thing that would make step 1 produce a 1440p desktop. Every launch
+truthfully reports that the next one gets 2560x1440, and no launch ever does.
+
+### 109.2 The evidence, not the reasoning
+
+The registry and the state file both already read `2560x1440` **before** this run, so the
+request was in place:
+
+```
+  [Software\\Wine\\Explorer\\Desktops]   "TropicoVD"="2560x1440"
+  tropico-vd.state                       2560x1440
+```
+
+and Wine still built a 1080p screen. The environment dump names the reason — at desktop
+creation the primary adapter was the 1080p one, and the 1440p panel is not even enumerated
+with a mode:
+
+```
+  adapter 0: \\.\DISPLAY1  flags=0x15 PRIMARY  current=1920x1080@32 at (0,0)
+  adapter 1: \\.\DISPLAY2  flags=0x00        current=0x0@32 at (-1920,360)
+  adapter 2: \\.\DISPLAY3  flags=0x00        current=0x0@32 at (0,0)
+```
+
+And after the run, `xrandr` shows the watchdog has put it back:
+
+```
+  DP-3      connected 2560x1440+1920+0
+  HDMI-A-5  connected primary 1920x1080+0+360
+```
+
+s81 measured the clamp against a 2560x1440 primary asking for 3840x2160 and getting
+2560x1440. This run is the second data point and sharpens it: a 2560x1440 panel was
+**present and connected**, the request was 2560x1440, and Wine still gave 1920x1080. So the
+clamp is to the **primary**, not to the largest panel available.
+
+### 109.3 Why the patch cannot fix this from inside the process
+
+The desktop is created by `explorer.exe` before the game's first instruction runs, so by
+the time any code of ours executes, its size is already decided. The only lever that
+changes the outcome is which monitor is primary **at that moment**, and the patch's own
+design deliberately gives that back on exit (the watchdog exists so the patch does not
+leave a system setting changed behind it, crash included).
+
+Those two rules are individually right and jointly a deadlock. Breaking it needs a decision
+about which one yields, and that is a decision about the product rather than about the code:
+
+* **(A) Hold the primary across exit** when a larger desktop has been armed. Converges in
+  two launches and needs no user action — at the cost of the patch leaving the primary
+  monitor changed after the game quits, which is exactly what the watchdog was written to
+  prevent.
+* **(B) Arm the desktop at the primary's size and say so.** Never touch anything the user
+  does not get back; tell them plainly that the Steam edition runs at the primary monitor's
+  resolution, and that playing at 1440p means making that monitor primary themselves. The
+  state stops churning and the log stops promising something that will not happen.
+* **(C) Hold the primary only until the next launch has built its desktop, then restore.**
+  Gets both properties and needs cross-launch state and a race-free restore; the most code
+  and the most ways to leave the display wrong if it goes wrong.
+
+**A zero-code experiment settles the diagnosis before any of them is built:** make DP-3
+primary in the desktop environment and launch. If the game comes up at 2560x1440, 109.1 is
+confirmed end to end and the only open question is which of A/B/C to implement.
