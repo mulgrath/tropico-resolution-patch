@@ -9203,3 +9203,70 @@ artefact's simplicity on the test harness's convenience.** The harness can resto
 disturbs — that is what a harness is for.
 
 With this, **nothing on 111.9's untested list remains.**
+
+
+## 112. Release 1.2
+
+Built from `steam-virtual-desktop` at `cfb29cb`. `dist/` is gitignored — `make-release.sh`
+rebuilds from `git ls-files`, so a release is a build, not a commit, and nothing on the
+ship list can be packaged unless it is committed first.
+
+```
+  tropico-resolution-patch-1.2.tar.gz          264K  4bd8d4c6e18498e9…
+  tropico-resolution-patch-1.2-windows.zip     252K  e85f9a86547b05f7…
+  proxy binkw32.dll                                  de0aef7be22c3b29…
+```
+
+### 112.1 What 1.2 carries that 1.2-vd did not
+
+* **s106** — the bottom-right panel's edict/build movie is scaled to the panel instead of
+  copied 1:1 into its corner. Two flags, not one: `+0x7a` lets the paint scale, `+0x7e` is
+  what silently resized the widget to the movie. Confirmed at 1920x1080 and 2560x1440 on
+  GOG, 1920x1080 on Steam.
+* **s108** — the adopted launch-monitor mode is now checked against the screen it will run
+  on. The guard existed and tested `[Resolution]` only, which on Steam is empty, so the
+  mode the game actually got was never checked at all.
+* **s109** — the `[Display] VirtualDesktop` documentation, which recommended the setting on
+  a justification 614b2b9 had already refuted and never mentioned that it makes a
+  non-primary monitor unreachable. The default was already 0, so nothing shipped was
+  broken — but anyone following the ini's own advice walked into it.
+* **s110/s111 — the one a player will actually notice.** The launch monitor was detected
+  with `XQueryPointer`, which is dead under Wayland: XWayland only receives pointer events
+  while the pointer is over an XWayland surface, so it returned the last position it ever
+  saw. On a Wayland desktop the game opened on whichever monitor you last played on,
+  self-reinforcingly, whatever your cursor was doing. Both editions now ask the compositor
+  where it places a 1x1 window instead, and keep the pointer first on X11 where it is
+  authoritative. Confirmed by four alternating runs per edition.
+* **s110** — the launcher appends to its log instead of truncating it, so the run that goes
+  wrong survives the run that goes right.
+
+### 112.2 Verified on the artefacts themselves, not on the tree they came from
+
+```
+  VERSION                     1.2, in both payloads
+  proxy sha256                de0aef7be22c3b29  in both payloads
+  tropico-launchpoint.py      placement() present -- and EXECUTED from the unpacked
+                              tarball: "3200 216 placement"
+  tropico                     append-log present
+  tropico-fix.ini             carries s109's corrected VirtualDesktop warning
+  source/ rebuild             ./build.sh from the SHIPPED source -> de0aef7be22c3b29,
+                              byte-identical to the shipped DLL
+```
+
+That last line is README's reproducibility promise — *"you can check the DLL in the release
+against one you build yourself and expect an exact match"* — checked against a real release
+rather than asserted. It had drifted earlier in this session (the census commits updated
+`proxy/binkw32.dll` and not `known-good/`), which is exactly the kind of thing that only
+shows up if someone runs the instruction.
+
+And the whole install path was exercised end to end at 111.11 before this build: clean
+clone, install into a GOG-shaped folder, run the installed helper, uninstall to a
+byte-identical stock folder.
+
+### 112.3 Not fixed in 1.2
+
+The s89 cursor drift. `[Cursor] Sites=1` is built and armed and has never had the symptom
+occur while it was watching; s107 established that `XCompare` cannot answer the question it
+was written for (42% misses in a run with no drift) and s107.3(b) sketches the
+event-triggered probe that could. Nothing about it changed in this release, and 1.2 does
+not claim otherwise.
