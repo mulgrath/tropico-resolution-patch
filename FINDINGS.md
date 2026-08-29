@@ -8332,3 +8332,102 @@ through the new code to exactly the deltas the old log reported:
   [*] [xcmp] X 946,1237 | wine+origin 911,1225 -> 908,1188 | OUTSIDE the bracket by 35,12
   [!] [xcmp]   ^ X and Wine disagree about where the pointer is
 ```
+
+
+## 107. XCompare cannot answer s89's question: 42% misses in a run with NO drift
+
+Owner, 2026-08-29, after a second Steam run at 1080p: "didn't notice any drift. It seems to
+be rather intermittent and I'm not sure what causes it."
+
+That run is the control nobody had run for the instrument itself, and it fails it.
+`logs/steam-xcmp-nodrift.log.gz`: **19 samples, 8 outside the bracket, and no drift at all.**
+
+```
+  X  906, 806 | wine+origin  904, 812 ->  886, 809   missed by   2, -3
+  X 1102,1414 | wine+origin 1098,1439 ->  847, 732   missed by   4,  0
+  X  852, 931 | wine+origin  933, 908 -> 1138,1005   missed by -81,  0
+  X  800, 785 | wine+origin  796, 804 -> 1034, 882   missed by   0,-19
+  X 1366,1108 | wine+origin 1826,1037 -> 1919,1020   missed by -460, 71
+  X 1157, 802 | wine+origin 1159, 807 ->  456,1248   missed by   0, -5
+  X  978, 931 | wine+origin  947, 784 ->  809, 604   missed by  31,147
+  X  631, 759 | wine+origin  479, 781 -> 1009, 868   missed by   0,-22
+```
+
+A 42% miss rate against a symptom that did not occur makes the output uninterpretable. The
+instrument does not distinguish the thing it was built to find from the thing it was built
+to tolerate.
+
+### 107.1 And it is not simply latency, which is what makes it worse
+
+614b2b9 bracketed the X read precisely because a moving pointer manufactures mismatches out
+of the half-second subprocess round trip. The obvious defence of the misses is therefore
+"the pointer was moving fast." Tabulating net travel between the two Wine reads against the
+miss says otherwise:
+
+```
+  travel   miss     verdict          travel   miss     verdict
+       0      0     inside              238     19     OUTSIDE
+       0      0     inside              282      0     inside
+      18      3     OUTSIDE             292      0     inside
+      84      0     inside              494      0     inside
+      93    460     OUTSIDE             530     22     OUTSIDE
+     107      0     inside              563      0     inside
+     180    147     OUTSIDE             613      0     inside
+     202      0     inside              703      5     OUTSIDE
+     205     81     OUTSIDE             707      4     OUTSIDE
+     227      0     inside
+
+  median net travel   inside 227   outside 238
+```
+
+The medians are the same. The largest miss (460 px) came with the *third smallest* non-zero
+travel (93 px), while the two largest travels (703, 707) missed by 5 and 4. **Net travel does
+not predict misses**, so "it was moving fast" is not the explanation either.
+
+The explanation that survives is that net travel is the wrong measure of the thing that
+breaks a bracket. A bracket assumes **monotonic** motion; what defeats it is an out-and-back
+excursion, which has large amplitude and small net travel — exactly the shape of the 460/93
+sample. The instrument aliases the pointer's path down to two endpoints and cannot see the
+excursion between them.
+
+Two properties still hold, and they are the only good news: the two stationary samples
+(travel 0) were exact, and the GOG/system-wine control was clean throughout. The instrument
+is right when nothing moves. The drift is motion-driven (s89), so that is precisely where it
+cannot help.
+
+### 107.2 What the one suggestive sample is, and why it is not evidence
+
+`X 1366,1108 | wine+origin 1826,1037 -> 1919,1020` deserves naming because it has the exact
+shape of the hypothesis: **Wine believes the pointer is at the right edge of a 1920-wide
+screen (1826..1919) while X puts it at 1366**, 460 px away. If the game asks Wine where the
+cursor is and gets "at the edge", it pans — and that is the symptom.
+
+It is still not evidence. It is one sample from an instrument with a 42% false-positive rate
+in this very run, and the owner reports no drift during it. Recorded so it is not lost, and
+so that a future run knows to look for its recurrence rather than rediscover it.
+
+### 107.3 Two designs that would work, and the cheaper one is the better one
+
+**(a) Replace the bracket with two time series.** A persistent host-side helper streaming
+`XQueryPointer` at ~50 Hz with timestamps, against the proxy streaming `GetCursorPos` at the
+same rate, correlated offline. Out-and-back motion becomes visible instead of aliased, and a
+real scale or offset shows as a persistent difference across the whole series rather than a
+verdict per sample. It removes the latency problem by not having a bracket at all. It is also
+a new subprocess protocol, a second log stream and an offline correlator.
+
+**(b) Instrument the DECISION, not the pointer.** The symptom is not "the cursor is wrong",
+it is "the map pans". Find where the game decides to scroll from the cursor position and log
+the position it used at that moment, beside X's. Then:
+
+* every drift event self-identifies — no sampling, no catching it in the act;
+* the comparison happens at the only instant that matters;
+* **intermittency stops being an obstacle**, which is the actual problem the owner named.
+
+(b) is smaller, needs no new protocol, and answers a sharper question. The cheap first step
+costs one run: the proxy already hooks `USER32!GetCursorPos`, so having that hook log its
+**caller's return address** names every call site, and the one that feeds the pan is then a
+single detour away. Not built — this section is the argument for building it, not the build.
+
+This is 106.10's rule again, one level up. That said: make the instrument print the state the
+fix is supposed to change. This says: make the instrument fire on the EVENT, not on a clock,
+when the event is the thing you cannot reproduce.
