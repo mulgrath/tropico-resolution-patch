@@ -17,22 +17,45 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 
 REM ------------------------------------------------------- find the game
-REM  Normally the ZIP was extracted straight into the Tropico folder and the
-REM  game is right here. But Windows Explorer's "Extract All" defaults to a
-REM  NEW SUBFOLDER named after the archive, so a player who does the obvious
-REM  thing -- extract into the Tropico folder -- ends up one level down. That
-REM  is the most likely way to get this wrong, so it is handled rather than
-REM  reported: look here, then look one level up.
+REM  "Extract into your Tropico folder" is ambiguous in BOTH directions, and both
+REM  of them were hit on the first install onto real Windows.
 REM
-REM  SRC stays pinned to the script's own folder either way. The game folder
-REM  becomes the working directory, so every game-relative path below is
-REM  written plainly and still resolves.
+REM  DOWN. On GOG the folder named Tropico is NOT the folder holding Tropico.EXE:
+REM  the game sits in an `app` subfolder. Extracting into C:\GOG Games\Tropico --
+REM  which is what this package's own instructions used to say -- lands one level
+REM  ABOVE the game, and a search that only ever looks upward can never find it.
+REM  Observed: "it complained that it couldn't find the .exe. I had to copy the
+REM  files into the app folder."
+REM
+REM  UP. Windows Explorer's "Extract All" defaults to a NEW SUBFOLDER named after
+REM  the archive, so extracting into exactly the right folder still lands one
+REM  level below it -- and a GUI extractor over an archive that carries its own
+REM  top-level folder makes that two.
+REM
+REM  So look where the answer can actually be: here and in app\, then the same two
+REM  questions a few levels up. Bounded and local, deliberately -- no registry, no
+REM  Steam library parsing, nothing outside this script's own neighbourhood. It is
+REM  the search tools/tropico-common.sh has done on Linux since the identical trap
+REM  was hit there; only the Windows half was missing.
+REM
+REM  BOTH Tropico.EXE and data\ must be present. A folder with one and not the
+REM  other is not a game folder, and adopting it would fail several steps later
+REM  with a message about something else entirely.
+REM
+REM  GAME NOW CARRIES NO TRAILING BACKSLASH, unlike the version this replaces, and
+REM  is written "%GAME%\..." at every use. Nothing then ends in a backslash
+REM  immediately before a closing quote -- the one quoting shape in cmd that
+REM  nobody should have to reason about, in a package that had never met real cmd.
+REM
+REM  The game folder becomes the working directory, so every game-relative path
+REM  below is written plainly and still resolves.
 set "HERE=%~dp0"
-set "GAME=%~dp0"
-if exist "%GAME%Tropico.EXE" goto :found_game
-for %%D in ("%~dp0..") do set "GAME=%%~fD\"
-if exist "%GAME%Tropico.EXE" goto :found_game
-goto :err_nogame
+set "GAME="
+call :look "%~dp0."
+call :look "%~dp0.."
+call :look "%~dp0..\.."
+call :look "%~dp0..\..\.."
+if not defined GAME goto :err_nogame
 
 :found_game
 cd /d "%GAME%"
@@ -105,6 +128,10 @@ echo   - removed tropico-fix.ini
 
 :log
 if exist "tropico-fix.log" del /q "tropico-fix.log" >nul 2>&1
+REM  Run-time scratch. tropico-primary.state is how the patch remembers which
+REM  monitor was your primary when it borrowed it (FINDINGS 113); it only exists
+REM  if the game was killed before it could hand it back.
+if exist "tropico-primary.state" del /q "tropico-primary.state" >nul 2>&1
 
 echo.
 echo   Done. The game is back to how it was.
@@ -127,13 +154,40 @@ del /q "data\%~1" >nul 2>&1
 set /a NART+=1
 goto :eof
 
+REM ------------------------------------------------------------------ :look
+REM  Sets GAME the first time it finds a game folder and is a no-op afterwards,
+REM  so the ORDER OF THE CALLS ABOVE IS THE SEARCH ORDER: nearest first, and the
+REM  script's own folder beats anything found by walking up.
+REM
+REM  `call` to a label at top level, never a label inside a parenthesised block --
+REM  see the note at the top of this file for what that costs.
+REM
+REM  %~f1 resolves the ".." segments the caller passes and strips the trailing
+REM  separator, so "%~dp0.." arrives here as a plain absolute path.
+:look
+if defined GAME goto :eof
+set "L=%~f1"
+if exist "%L%\Tropico.EXE" if exist "%L%\data" set "GAME=%L%"
+if defined GAME goto :eof
+if exist "%L%\app\Tropico.EXE" if exist "%L%\app\data" set "GAME=%L%\app"
+goto :eof
+
 REM ============================================================================
 REM  Failure handlers.
 REM ============================================================================
 
 :err_nogame
-echo   PROBLEM: Tropico.EXE is not in this folder, so this is not the place
-echo   the patch was installed. Nothing was changed.
+echo   PROBLEM: could not find Tropico near this folder.
+echo.
+echo   Looked for a folder holding both Tropico.EXE and data\ -- here, in an
+echo   "app" subfolder, and in those same two places up to three folders up.
+echo.
+echo   Move this whole folder into your Tropico installation and run it again.
+echo   Nothing was changed.
+echo.
+echo   GOG    usually  C:\GOG Games\Tropico\app    ^(the game is inside "app"^)
+echo   Steam  usually  C:\Program Files ^(x86^)\Steam\steamapps\common\Tropico
+echo           ^(in Steam: right-click the game, Manage, Browse local files^)
 goto :fail
 
 :err_badbackup

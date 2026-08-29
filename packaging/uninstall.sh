@@ -95,6 +95,7 @@ rm -rf "$GAMEDIR/artsets"
 #   tropico-xrandr.txt     the proxy's copy of the display layout it read
 #   tropico-pointer.py     dropped on the host so xrandr_query can find the pointer
 #   tropico-primary.lock   the heartbeat the primary-restoring watchdog watches
+#   tropico-primary.state  which monitor was primary before the proxy borrowed it
 #   unix-probe-*.txt       from the [Unix] probe, which is off unless asked for
 #   tropico-vd.state       the size of the virtual desktop the proxy last armed
 #   tropico-vd-fs.py       dropped on the host to fullscreen that desktop
@@ -105,6 +106,7 @@ rm -f "$GAMEDIR/tropico-fix.ini" \
       "$GAMEDIR/tropico-xrandr.txt" \
       "$GAMEDIR/tropico-pointer.py" \
       "$GAMEDIR/tropico-primary.lock" \
+      "$GAMEDIR/tropico-primary.state" \
       "$GAMEDIR/tropico-vd.state" \
       "$GAMEDIR/tropico-vd-fs.py"
 rm -f "$GAMEDIR"/unix-probe-*.txt
