@@ -8192,8 +8192,9 @@ and a scan of every rel8/rel32 branch in `.text` finds none landing inside
 
 ### 106.9 CONFIRMED
 
-Owner, 2026-08-29: "confirmed that the movies appear correct on 1080p now."
-`logs/hudmovie-1920x1080-fixed.log.gz`, and the probe line is 106.7's prediction verbatim:
+Owner, 2026-08-29: "confirmed that the movies appear correct on 1080p now," and then
+again at **2560x1440**. `logs/hudmovie-1920x1080-fixed.log.gz`, and the probe line is
+106.7's prediction verbatim:
 
 ```
   [movie] HUD panel widget (virtual 2572,1481 560x560): obj+0x7a 0 -> 1, obj+0x7e 1 -> 0
@@ -8223,6 +8224,13 @@ movie is now resampled by a percent or two instead of drawn 1:1 with a small gap
 Arguably better in all three — the movie now fills the panel art exactly instead of falling
 a few pixels short — but it is a change from stock, and `[Menu] FixHudMovie=0` restores the
 old behaviour for anyone who wants it.
+
+**Mode-independent, and confirmed so.** 1440p was checked because nothing in the fix knows
+a resolution: it clears a flag and lets the engine's own per-axis conversion do the rest, so
+a second mode is the cheap test of whether any constant slipped in. At 2560x1440 the rect is
+`560 x 0.8 = 448` by `560 x 0.6 = 336`, and the owner confirms it. The only literals in the
+patch are the widget's own authored rect, which is a property of `mainwin.win`, not of the
+display.
 
 ### 106.10 What the three runs cost, and what actually paid for them
 
