@@ -7927,6 +7927,12 @@ non-bug that motivated it.
 
 ## 106. The bottom-right panel's movie is copied 1:1, because its asset used to fit
 
+> **106.2 and 106.4 are WRONG about the mechanism — corrected in 106.7 by the run
+> they predicted.** The symptom, the asset table (106.1) and the flag survey (106.3)
+> all hold. What was missed is a SECOND flag, and it is the one that matters. Kept
+> in full because the probe that caught it was written on the strength of the wrong
+> reading, and 106.6's predictions are what made the error legible in one run.
+
 Owner, 2026-08-29: "the little movies that play in the bottom right corner where the build
 preview and 'Tropico' placeholder graphic are not adjusted properly... I noticed especially
 that the Economic Edicts were visually offset."
@@ -8067,3 +8073,85 @@ confirmed. If it prints 276x276 for both, this whole section is wrong and the of
 somewhere else.**
 
 Built and deployed (`binkw32.dll` sha256 `3bb26bc8…`), probe armed, not yet run.
+
+### 106.7 CORRECTED: there are two flags, and the bug is the other one
+
+Owner ran it at 1920x1080 and issued an economic edict: **the movie was still not resized.**
+`logs/hudmovie-1920x1080-control.log.gz`. The probe earned its place immediately — it did
+not merely say "still broken", it said where the reading was wrong:
+
+```
+  [movie] HUD panel widget (virtual 2572,1481 560x560) marked scalable -- obj+0x7a forced 0 -> 1
+  [bink] BinkOpen(".\movies\16permit.BIK", 0x00002000) -> 01343800   caller=00531516
+  [movie] widget virtual 2572,1481 460x614 -> destination 1543,666 276x276; movie 276x276;
+          scalable=1 -> copied 1:1 and clamped to the movie's own size
+```
+
+The fix fired. `scalable=1` took. And it changed nothing, because by paint time the widget
+is **460x614, not the 560x560 it was constructed with**. Something resizes it, and 106.6's
+predicted `336x252` never had a chance: at 460x614 the scaled destination is
+`460 x 0.6 = 276` by `614 x 0.45 = 276.3` — *exactly* the movie, so `needScale` is 0 no
+matter what the scalable flag says.
+
+The writer is eleven instructions after `BinkOpen`, gated on the class-0x040 record's
+**second** dword:
+
+```asm
+531545  cmp   [obj+0x7e],0        ; record +0x44
+531548  je    531593              ; not set -> keep the authored rect
+53154a  mov   eax,[obj+0x96]      ; the Bink handle
+531550  fild  [eax]               ; movie WIDTH in pixels
+531559  fdiv  [0x5a0ffc]          ; / (W/3200)
+53155f  fsub  0.1  / fadd 1.0 / __ftol
+531574  mov   [obj+0x0f],ax       ; widget CX := movie width, in VIRTUAL units
+        ... and the same for [eax+4] / [0x5a1004] -> [obj+0x11]
+```
+
+Which reproduces the probe's numbers to the unit: `276/0.6 - 0.1 + 1 = 460.9 -> 460`, and
+`276/0.45 - 0.1 + 1 = 614.2 -> 614`. **The engine does not fail to scale the movie to the
+widget; it deliberately resizes the widget to the movie.**
+
+With that, 106.3's survey reads cleanly instead of as four loose "flags", and the two
+columns are complementary rather than incidental:
+
+```
+                          +0x40 (obj+0x7a)        +0x44 (obj+0x7e)
+                          scale movie to widget   resize widget to movie
+  videowin / videowi2 /
+  setupe   (full screen)          1                       0
+  mainwin  (the HUD panel)        0                       1     <- 1:1 by construction
+  credits / videowi4              0                       0
+```
+
+`mainwin` is the *only* widget in the game that asks to be sized to its movie, and that is
+a perfectly good design as long as the asset is authored per resolution — which 106.1
+shows it was, for all five PopTop shipped. It stops being good the moment the mode is not
+one of those five, because the conversion is per-axis: a 276x276 movie becomes a 460x614
+widget on a 16:9 screen, i.e. a rect that is no longer square in a panel that is.
+
+`obj+0x7e` is read in exactly one place in the whole image — that `cmp` — so clearing it is
+complete, not a suppression with side effects elsewhere.
+
+**The fix is therefore both flags, not one:** clear `+0x7e` so the panel keeps its authored
+560x560, and set `+0x7a` so the paint scales the movie into it. Same detour, same single
+widget, one extra store. `binkw32.dll` sha256 `6334af19…`, deployed, not yet run.
+
+Prediction for the next run, in the probe's own words — and note the new
+`sizedtomovie=` field exists precisely because its absence is what hid this:
+
+```
+  widget virtual 2572,1481 560x560 -> destination 1543,666 336x252; movie 276x276;
+  scalable=1 sizedtomovie=0 -> SCALED to fit the widget
+```
+
+If the widget still reports 460x614, the resize has a second writer and this is wrong
+again. If it reports 560x560 and the destination is still 276x276, the fault is in
+`needScale` rather than the rect.
+
+**The lesson, and it is not a small one.** 106.3 printed `[0, 1, 0, 1]` for this widget and
+called the column "flags @rec+0x40". The value that mattered was on the screen, in the
+right file, at the right offset, and was not followed because a story that explained the
+symptom already existed. s105 says a report of "X is offset" needs a control before a
+mechanism; this is the companion: **a mechanism that explains the symptom is not thereby
+the mechanism.** The probe cost one run and settled it. The disassembly alone had already
+had two chances and taken the wrong branch both times.

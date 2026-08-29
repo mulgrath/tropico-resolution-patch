@@ -5423,11 +5423,18 @@ static void __cdecl hm_fix_hook(BYTE *obj)
     short cx = *(short *)(obj + 0x0f);
     short cy = *(short *)(obj + 0x11);
     if (x != 2572 || y != 1481 || cx != 560 || cy != 560) return;
-    if (*(DWORD *)(obj + 0x7a)) return;            /* already scalable -- leave it */
-    *(DWORD *)(obj + 0x7a) = 1;
+    /* TWO flags, and the second one is the whole bug (s106.7).  obj+0x7e is read in
+     * exactly one place -- 0x531545, right after BinkOpen -- where it means "resize
+     * this widget to the movie", and it overwrites the authored 560x560 with the
+     * movie's own size in virtual units.  Clearing it keeps the panel's rect;
+     * setting obj+0x7a then lets the paint scale the movie into that rect. */
+    if (*(DWORD *)(obj + 0x7a) == 1 && *(DWORD *)(obj + 0x7e) == 0) return;
+    *(DWORD *)(obj + 0x7a) = 1;                    /* scale the movie to the widget */
+    *(DWORD *)(obj + 0x7e) = 0;                    /* do NOT resize widget to movie */
     if (!g_hm_fixed++)
-        logf_("  [movie] HUD panel widget (virtual %d,%d %dx%d) marked scalable"
-              " -- obj+0x7a forced 0 -> 1", x, y, cx, cy);
+        logf_("  [movie] HUD panel widget (virtual %d,%d %dx%d): obj+0x7a 0 -> 1"
+              " (scale the movie to the panel), obj+0x7e 1 -> 0 (stop resizing the"
+              " panel to the movie)", x, y, cx, cy);
 }
 
 static int patch_hud_movie(void)
@@ -5492,6 +5499,7 @@ static void __cdecl hm_probe_hook(BYTE *obj, int destL, const DWORD *fr)
     int destW  = (int)fr[0x14 / 4];
     int destH  = (int)fr[0x38 / 4];
     DWORD flag = *(DWORD *)(obj + 0x7a);
+    DWORD rsz  = *(DWORD *)(obj + 0x7e);
     DWORD *bk  = *(DWORD **)(obj + 0x96);
     int mw = bk ? (int)bk[0] : 0;
     int mh = bk ? (int)bk[1] : 0;
@@ -5502,10 +5510,11 @@ static void __cdecl hm_probe_hook(BYTE *obj, int destL, const DWORD *fr)
     if (n >= (int)(sizeof seen / sizeof seen[0])) return;
     seen[n].w = destW; seen[n].h = destH; seen[n].mw = mw; seen[n].mh = mh; n++;
     logf_("  [movie] widget virtual %d,%d %dx%d -> destination %d,%d %dx%d;"
-          " movie %dx%d; scalable=%lu -> %s",
+          " movie %dx%d; scalable=%lu sizedtomovie=%lu -> %s",
           *(short *)(obj + 0x0b), *(short *)(obj + 0x0d),
           *(short *)(obj + 0x0f), *(short *)(obj + 0x11),
-          destL, destT, destW, destH, mw, mh, (unsigned long)flag,
+          destL, destT, destW, destH, mw, mh,
+          (unsigned long)flag, (unsigned long)rsz,
           (flag && (destW != mw || destH != mh))
               ? "SCALED to fit the widget"
               : "copied 1:1 and clamped to the movie's own size");
