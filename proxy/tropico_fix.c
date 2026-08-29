@@ -2525,6 +2525,7 @@ static DWORD WINAPI xcompare_thread(LPVOID unused)
     for (sample = 0; sample < 40; sample++) {
         POINT w1, w2;
         long xr = -1, yr = -1, e1, e2, lo, hi, dx = 0, dy = 0;
+        char verdict[64];
         int out = 0;
         Sleep(2000);
         if (!GetCursorPos(&w1)) continue;
@@ -2538,13 +2539,15 @@ static DWORD WINAPI xcompare_thread(LPVOID unused)
         lo = e1 < e2 ? e1 : e2; hi = e1 < e2 ? e2 : e1;
         if (yr < lo) { dy = yr - lo; out = 1; } else if (yr > hi) { dy = yr - hi; out = 1; }
 
-        logf_("[*] [xcmp] X %ld,%ld | wine+origin %ld,%ld -> %ld,%ld | %s%s",
-              xr, yr, (long)w1.x + ox, (long)w1.y + oy, (long)w2.x + ox, (long)w2.y + oy,
-              out ? "OUTSIDE the bracket by " : "inside the bracket",
-              out ? "" : "");
         if (out)
-            logf_("[!] [xcmp]   ^ missed by %ld,%ld -- X and Wine disagree about where"
-                  " the pointer is", dx, dy);
+            snprintf(verdict, sizeof verdict, "OUTSIDE the bracket by %ld,%ld", dx, dy);
+        else
+            snprintf(verdict, sizeof verdict, "inside the bracket");
+        logf_("[*] [xcmp] X %ld,%ld | wine+origin %ld,%ld -> %ld,%ld | %s",
+              xr, yr, (long)w1.x + ox, (long)w1.y + oy, (long)w2.x + ox, (long)w2.y + oy,
+              verdict);
+        if (out)
+            logf_("[!] [xcmp]   ^ X and Wine disagree about where the pointer is");
     }
     logf_("[*] [xcmp] done -- 40 samples");
     return 0;

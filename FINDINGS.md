@@ -8321,6 +8321,14 @@ Three reasons that is not yet a negative result:
 
 What it needs is a run that deliberately provokes the drift and samples through it.
 
-Cosmetic defect noticed in passing: the miss line prints `OUTSIDE the bracket by ` with the
-value missing, then the amount on the following `[!]` line. The number is not lost, but the
-first line is malformed.
+Cosmetic defect noticed in passing and since **fixed**: the miss line printed `OUTSIDE the
+bracket by ` with the value missing, then the amount on the following `[!]` line. The format
+string ended `"| %s%s"` and the second argument was `out ? "" : ""` — a slot left for the
+amount and never filled. The verdict is now composed with `snprintf` and carries its own
+number, the `[!]` line keeps the interpretation, and the three real samples above replay
+through the new code to exactly the deltas the old log reported:
+
+```
+  [*] [xcmp] X 946,1237 | wine+origin 911,1225 -> 908,1188 | OUTSIDE the bracket by 35,12
+  [!] [xcmp]   ^ X and Wine disagree about where the pointer is
+```
