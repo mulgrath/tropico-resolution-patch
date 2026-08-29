@@ -7927,8 +7927,8 @@ non-bug that motivated it.
 
 ## 106. The bottom-right panel's movie is copied 1:1, because its asset used to fit
 
-> **106.2 and 106.4 are WRONG about the mechanism — corrected in 106.7 by the run
-> they predicted.** The symptom, the asset table (106.1) and the flag survey (106.3)
+> **RESOLVED and confirmed in game at 1920x1080 (106.9).** 106.2 and 106.4 are WRONG
+> about the mechanism — corrected in 106.7 by the run they predicted. The symptom, the asset table (106.1) and the flag survey (106.3)
 > all hold. What was missed is a SECOND flag, and it is the one that matters. Kept
 > in full because the probe that caught it was written on the strength of the wrong
 > reading, and 106.6's predictions are what made the error legible in one run.
@@ -8189,3 +8189,60 @@ and a scan of every rel8/rel32 branch in `.text` finds none landing inside
 
 `binkw32.dll` sha256 `4b57fbe9…`. 106.7's prediction is unchanged and still the test:
 `560x560 -> 336x252` against a `276x276` movie, `scalable=1 sizedtomovie=0`.
+
+### 106.9 CONFIRMED
+
+Owner, 2026-08-29: "confirmed that the movies appear correct on 1080p now."
+`logs/hudmovie-1920x1080-fixed.log.gz`, and the probe line is 106.7's prediction verbatim:
+
+```
+  [movie] HUD panel widget (virtual 2572,1481 560x560): obj+0x7a 0 -> 1, obj+0x7e 1 -> 0
+  [movie] widget virtual 2572,1481 560x560 -> destination 1543,666 336x252; movie 276x276;
+          scalable=1 sizedtomovie=0 -> SCALED to fit the widget
+```
+
+The widget keeps its authored 560x560, the destination is the per-axis scaling of it
+(`560 x 0.6 = 336`, `560 x 0.45 = 252`), and the 276x276 `16*.bik` is scaled into it by the
+engine's own scaler. The edict movie now sits in the panel the way the panel art does,
+distorted per-axis by the same 1.2/0.9 as everything else in the HUD — which is PopTop's
+own rule for these assets, established from their 220x236 `12*.bik` in 106.1.
+
+**One honest side effect at stock resolutions.** The fix removes the resize unconditionally
+for this widget, so where PopTop's asset was *nearly* rather than exactly the rect, the
+movie is now resampled by a percent or two instead of drawn 1:1 with a small gap:
+
+```
+  mode        rect    movie      before          after
+  640x480     112     112x112    1:1             1:1 (needScale is 0 -- untouched)
+  800x600     140     140x140    1:1             1:1 (untouched)
+  1024x768    179     176x176    1:1, 3px gap    scaled 176 -> 179
+  1280x1024   224x239 220x236    1:1, 4px gap    scaled 220x236 -> 224x239
+  1600x1200   280     276x276    1:1, 4px gap    scaled 276 -> 280
+```
+
+Arguably better in all three — the movie now fills the panel art exactly instead of falling
+a few pixels short — but it is a change from stock, and `[Menu] FixHudMovie=0` restores the
+old behaviour for anyone who wants it.
+
+### 106.10 What the three runs cost, and what actually paid for them
+
+Three runs, and the static reading was wrong in two different ways before the instrument
+was right once:
+
+1. **Wrong mechanism.** Read `obj+0x7a` as the whole story because it explained the
+   symptom. The survey in 106.3 had already printed `[0, 1, 0, 1]` for this widget; the
+   `1` that mattered was in the column labelled "flags" and was never followed.
+2. **Wrong placement.** Relocated six bytes because six is what `jmp rel32` needs, which
+   put the hook between the two stores it had to sit after.
+
+Both were caught by the same thing, and not by re-reading disassembly: **the probe printed
+the widget's live geometry next to the movie's, every run.** Run 1's `460x614` named the
+resize. Run 2's `sizedtomovie=1` — a field added in passing, for completeness, one round
+earlier — named the overwrite. Neither would have been visible from a screenshot, and
+"still offset" three times in a row is indistinguishable without them.
+
+The rule this earns, alongside s105's ("a report of X is offset needs a control before a
+mechanism") and 106.7's ("a mechanism that explains the symptom is not thereby the
+mechanism"): **make the instrument print the state the fix is supposed to change, not just
+the symptom it is supposed to remove.** A probe that had only reported the destination rect
+would have said `276x276` three times and named nothing.
