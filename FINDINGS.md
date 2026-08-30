@@ -10349,3 +10349,173 @@ instead of an admission.**
 
 Both runs are kept: `logs/fps-software-2560x1440-gog-wine.log.gz` and
 `logs/fps-presenter-2560x1440-gog-wine.log.gz`.
+
+## 118. SOLVED: DirectDraw CAN be pointed at a monitor -- measured on Windows 11
+
+s114 asked whether the game could be changed instead of the computer: point
+DirectDraw at a device rather than make the player's chosen monitor primary. Wine
+said no on two generations. s115.1 recorded the rule that a negative result from a
+reimplementation is not a negative result about the thing it reimplements, and
+staged a probe. This is that probe's answer, and it is **yes**.
+
+Measured 2026-08-30, Windows 11, AMD Radeon RX 7900 XT, `\\.\DISPLAY1` 2560x1440
+primary at (0,0) beside `\\.\DISPLAY2` 1920x1080 at (-1920,357).
+
+### 118.1 Per-head GUIDs exist, and they select the head
+
+`DirectDrawEnumerateExA(DDENUM_ATTACHEDSECONDARYDEVICES)` returns a **different
+GUID per monitor**, where Wine returns one adapter GUID for both:
+
+```
+guid={67685559-3106-11d0-b971-00aa00342f9f}  driver="\\.\DISPLAY1"  PRIMARY
+guid={6768555a-3106-11d0-b971-00aa00342f9f}  driver="\\.\DISPLAY2"
+```
+
+They differ in one hex digit of `Data1`, which is the adapter GUID plus a head
+index -- a detail worth knowing only because it makes the pair easy to confuse at
+a glance in a log.
+
+`DirectDrawCreateEx` with the secondary's GUID returns a device that reports **that
+monitor's own mode**, not the primary's. Under Wine every arm reported the
+primary's mode, which is precisely the difference that made a real machine
+necessary.
+
+### 118.2 The full arm table, and the OS primary never moves
+
+| arm | device | window | exclusive | surface | panel lit |
+|---|---|---|---|---|---|
+| 0 CONTROL | NULL | DISPLAY1 | yes | 2560x1440 | 1440p |
+| 1 CONTROL | DISPLAY1 | DISPLAY1 | yes | 2560x1440 | 1440p |
+| **2** | **DISPLAY2** | **DISPLAY2** | **yes** | **1920x1080** | **1080p** |
+| 3 | NULL | DISPLAY2 | yes | 2560x1440 | 1440p |
+| **4** | **DISPLAY2** | **DISPLAY1** | **yes** | **1920x1080** | **1080p** |
+
+Arm 2 meets every criterion the probe set for itself, and the two lines that
+matter most are the ones about what did *not* happen:
+
+```
+MOVED   \\.\DISPLAY2   now 1920x1080 32bpp  <- the window AND the GUID
+unmoved \\.\DISPLAY1       2560x1440 32bpp
+SM_CXSCREEN=2560 (the OS primary -- it must NOT have moved)
+primary surface is 1920x1080 32bpp   (this device's own mode is 1920x1080)
+```
+
+Seven in-bounds blits succeeded, all three deliberately out-of-bounds controls
+failed with `DDERR_INVALIDRECT` as designed, `Flip` succeeded, and **no arm
+produced an unexpected #150 anywhere in the run**. Every arm restored the layout
+on exit.
+
+### 118.3 The discriminator pair, and it is the GUID
+
+s114.2 built arms 3 and 4 because each has two explanations alone and one
+explanation together. Together they say:
+
+* **Arm 3** -- NULL device, window on the secondary. Windows **moved the window
+  back**: `our window is on \\.\DISPLAY1`, surface 2560x1440, pixels on the 1440p
+  panel. Fullscreen does not follow the window, on real Windows exactly as on
+  Wine (s114.3).
+* **Arm 4** -- secondary GUID, window on the **primary**. Surface 1920x1080,
+  pixels on the **1080p** panel.
+
+**The device GUID decides which monitor gets the pixels. Window placement does
+not.** That is the whole finding, and arm 4 is what proves it: the window could
+not have been the cause, because it was somewhere else.
+
+### 118.4 What the probe got wrong, recorded so its logs are not misread
+
+Two defects, neither affecting the result above, both capable of misleading a
+later reader:
+
+* **Arm 4's `mode-set=NO` is an artifact, not a result.** The mode ladder is built
+  from the **window's** monitor, so arm 4 asked the DISPLAY2 device for 2560x1440
+  -- a mode DISPLAY2 does not have -- and was correctly refused. The refusal is
+  itself confirmation that the device really was DISPLAY2.
+* **`THE SURFACE DOES NOT MATCH THE DEVICE` fires wrongly on arms 3 and 4**, for
+  the same reason: it compares the surface against the window's monitor rather
+  than the device's. On arm 4 the surface matched the device perfectly.
+
+Both should be fixed to compare against the device before this probe is run
+again.
+
+### 118.5 The visual check, and one lesson about it
+
+The colours were `RED, GREEN, BLUE, YELLOW, RED` by arm. The owner recorded
+`Red, Green, Blue, GREEN, Red` -- position 4 read as green where the probe showed
+yellow. It changed nothing, because **each arm's target is independently pinned by
+its log** (the surface size, and which adapter `MOVED`), and all five observations
+agree with the logs. But it is luck that the corroboration existed.
+
+`RGB(255,255,32)` is an acid yellow that reads green on a wide-gamut panel. The
+lesson is small and real: **a visual check's colours must be unconfusable to a
+tired human at 1 a.m., not merely distinct in RGB.** Magenta replaces yellow.
+
+### 118.6 16bpp is refused -- on EVERY arm, including the primary controls
+
+```
+SetDisplayMode(640,480,16)   -> DDERR_UNSUPPORTED
+SetDisplayMode(1024,768,16)  -> DDERR_UNSUPPORTED
+SetDisplayMode(<native>,16)  -> DDERR_UNSUPPORTED
+SetDisplayMode(<native>,32)  -> DD_OK
+```
+
+Tropico asks for 16bpp (s115.4). This looks alarming and is not, for one reason:
+**arm 0, the primary control, behaves identically**, and the game demonstrably
+reached a map on this machine at 2560x1440 on the previous trip. So whatever the
+game does about 16bpp on Windows already works, and it will do the same on the
+secondary -- the refusal does not differentiate the two, which is the only thing
+this run had to establish about it.
+
+It remains an open question in its own right, and it is not this section's.
+
+### 118.7 What this retires, and what it does not
+
+**On Windows, all of it.** `[Display] SetPrimary`, `tropico-primary.state`, the
+`ExitProcess` hook, the 5 s deadline and the window watcher exist to make a
+monitor primary and give it back. A device GUID substituted at one call site does
+the same job without touching the player's computer at all, which is what s113.8
+settled for the absence of.
+
+**On Linux, none of it.** Wine reports one adapter GUID for both heads (s114.3),
+so there is nothing to substitute and the xrandr watchdog stays exactly as it is.
+The hoped-for "delete both halves" does not survive the measurement, and saying so
+plainly is worth more than the half that did.
+
+### 118.8 The implementation
+
+`[Display] DeviceSelect`, **default 0**, Windows-only in effect -- armed on Wine
+it logs why it cannot work there and disables itself.
+
+The mechanism is three small pieces on machinery s114 already built:
+
+* `choose_monitor()` decides **which** monitor, exactly as it does for
+  `SetPrimary`, and records the `\\.\DISPLAYn` name. s114's gate is split again:
+  `SetPrimary` now gates only the **write** at the bottom, and the early return
+  survives for the case where neither feature is on -- so with both off, s113.8's
+  guarantee holds literally and `pick_mode()` still validates against
+  `SM_CXSCREEN`.
+* `devsel_resolve()` turns that name into a GUID by asking
+  `DirectDrawEnumerateExA` the same question the probe asked. It runs at
+  `DirectDrawCreateEx` time and **not from DllMain**: the lookup needs ddraw.dll,
+  and `LoadLibrary` under the loader lock is a hazard s99's display reads never
+  faced.
+* `ddp_createex()` substitutes the GUID for `NULL` -- **one argument, at the one
+  call site the game uses**, and only when the game asked for the default device.
+
+If resolution fails the game is left on the primary and the log says so. The
+degraded case is bounded: the adopted mode is the target monitor's, so a failure
+renders that mode on the primary, and `launch_mode_check()` already refuses the
+dangerous direction (a mode larger than the screen it will land on -- s108).
+
+### 118.9 What is NOT yet measured
+
+**The game itself has never run through this.** Everything above is a probe. The
+substitution is written and compiles clean, its gating is verified on Wine (armed
+-> refused with an explanation; off -> the default path byte-for-byte unchanged),
+and that is the whole of what has been tested.
+
+The next run is the first one where Tropico renders through a substituted device.
+The things to watch, in order: whether the game's own `SetDisplayMode` succeeds on
+that device; whether the HUD and mouse agree, since **pixels follow the GUID but
+input follows the window** and arm 2's configuration -- window and device on the
+same monitor -- is the one to reproduce; and whether anything in the engine reads
+`SM_CXSCREEN` and disagrees with the device it is drawing on.

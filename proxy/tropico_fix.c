@@ -123,8 +123,44 @@ static DWORD WINAPI pin_thread(LPVOID);
 static DWORD g_preset_ret;   /* return address of the preset-apply call site */
 static int g_slot_log;
 static int patch_force_fullscreen(void);
+/* s118: maybe_install_ddprobe() asks this, and it sits far below. */
+static int running_under_wine(void);
 static int g_force_fs = 1;   /* s79: never let the engine enter windowed mode */
 static int g_fs_clamped;     /* how many times the clamp has fired */
+/* -------------------------------------------- s118: choose the DEVICE, not the primary
+ *
+ * MEASURED ON WINDOWS 11, and it is the result the whole s113/s114 apparatus was
+ * waiting for. DirectDrawEnumerateExA(DDENUM_ATTACHEDSECONDARYDEVICES) hands back
+ * a DIFFERENT GUID per head, and DirectDrawCreateEx with the secondary's GUID
+ * produces a device that takes exclusive fullscreen on that monitor, sets THAT
+ * monitor's mode, and blits without #150 -- while the OS primary is never touched.
+ *
+ * The discriminator pair settles which lever it is. Arm 4 put the WINDOW on the
+ * primary and the secondary's GUID on the device: the pixels went to the
+ * SECONDARY. Arm 3 did the opposite -- NULL device, window on the secondary --
+ * and Windows moved the window back to the primary and rendered there. So the
+ * GUID decides and window placement does not, on real Windows exactly as on Wine.
+ *
+ * WHAT THIS REPLACES. s113's whole apparatus exists to make the player's chosen
+ * monitor primary for the length of the game and give it back afterwards: the
+ * state file, the ExitProcess hook, the window watcher, the 5 s deadline. None of
+ * it is needed if the game simply renders on the right device. That is a change
+ * to the GAME rather than to the PLAYER'S COMPUTER, which is what s114 set out to
+ * find and what s113.8 settled for the absence of.
+ *
+ * WINDOWS ONLY, and not by policy. Wine hands back ONE adapter GUID for both
+ * heads (s114.3) -- it names the adapter, not the head -- so there is nothing to
+ * substitute there and the xrandr path stays exactly as it is. This is the
+ * Windows half of the prize and the Linux half is not on offer.
+ *
+ * OFF BY DEFAULT for now: the mechanism is measured, but it has not yet been
+ * measured THROUGH THE GAME. See the ini note. */
+static int   g_devsel;              /* [Display] DeviceSelect */
+static char  g_devsel_want[64];     /* the \\.\DISPLAYn choose_monitor picked */
+static GUID  g_devsel_guid;
+static int   g_devsel_have;         /* the GUID was resolved */
+static int   g_devsel_tried;        /* resolution has been attempted; do not repeat */
+
 static int g_ini_mode_unusable;
 static int g_artgen_enabled = 1;   /* [Art] Generate -- see artgen.c */
 static int g_pin_primary = 1;
@@ -1796,15 +1832,85 @@ static HRESULT WINAPI ddp_create(GUID *guid, void **out, IUnknown *unk)
     return hr;
 }
 
+/* Name -> GUID, by asking DirectDraw the same question the probe asked.
+ *
+ * Deliberately NOT done from DllMain. The lookup needs ddraw.dll, and loading a
+ * library under the loader lock is the one hazard s99 did not have to face --
+ * reading the display from there is safe, LoadLibrary is not. By the time the
+ * game calls DirectDrawCreateEx it has loaded ddraw itself, so the module is
+ * already there and this costs nothing.
+ *
+ * The match is on the DRIVER name -- \\.\DISPLAY1, \\.\DISPLAY2 -- because that is
+ * the namespace win32_outputs() reports in and the one the player writes in the
+ * ini. HMONITOR would work equally well and is not used only because the name is
+ * the thing a human can check against the log. */
+static WINBOOL CALLBACK devsel_cb(GUID *guid, char *desc, char *drv, void *ctx, HMONITOR hm)
+{
+    (void)desc; (void)ctx; (void)hm;
+    if (!guid || !drv || !drv[0]) return TRUE;      /* the NULL primary-driver entry */
+    if (_stricmp(drv, g_devsel_want)) return TRUE;
+    g_devsel_guid = *guid;
+    g_devsel_have = 1;
+    return FALSE;                                    /* found it; stop enumerating */
+}
+
+static void devsel_resolve(void)
+{
+    HMODULE m;
+    ddenumex_t ex;
+
+    if (g_devsel_tried) return;
+    g_devsel_tried = 1;
+    if (!g_devsel || !g_devsel_want[0]) return;
+
+    m = g_ddp_mod ? g_ddp_mod : GetModuleHandleA("ddraw.dll");
+    if (!m) m = LoadLibraryA("ddraw.dll");
+    if (!m) { logf_("[x] [devsel] ddraw.dll is not loadable -- cannot resolve %s",
+                    g_devsel_want); return; }
+
+    /* The real export, never the wrapper: this enumeration is ours and must not
+     * be mistaken for the game's in the log, nor run the game's callback. */
+    ex = (ddenumex_t)(void *)GetProcAddress(m, "DirectDrawEnumerateExA");
+    if (!ex) { logf_("[x] [devsel] DirectDrawEnumerateExA is missing -- this build of"
+                     " DirectDraw cannot name a monitor"); return; }
+
+    ex((void *)devsel_cb, NULL, DDENUM_ATTACHEDSECONDARYDEVICES);
+    if (g_devsel_have)
+        logf_("[+] [devsel] %s resolves to device %s", g_devsel_want,
+              ddp_guid(&g_devsel_guid));
+    else
+        logf_("[x] [devsel] no enumerated device is named %s. The game will be left on"
+              " the primary, at the mode already chosen -- check the [ddprobe] device"
+              " lines, or set [Display] Monitor to a name that appears there.",
+              g_devsel_want);
+}
+
 static HRESULT WINAPI ddp_createex(GUID *guid, void **out, const IID *iid, IUnknown *unk)
 {
     HRESULT hr;
     logf_("[ddprobe] DirectDrawCreateEx(guid=%s, out=%p, iid=%s, unk=%p) from %p",
           ddp_guid(guid), (void *)out, ddp_guid((const GUID *)iid), (void *)unk,
           DDP_CALLER());
+    /* s118: THE SUBSTITUTION. One argument, at the one call site, and only when
+     * the game asked for the default device -- a game that named a device itself
+     * has an opinion we have no business overriding. */
+    if (g_devsel && !guid) {
+        devsel_resolve();
+        if (g_devsel_have) {
+            guid = &g_devsel_guid;
+            logf_("[+] [devsel] DirectDrawCreateEx: NULL -> %s (%s). The game will render"
+                  " on that monitor; the OS primary is NOT being changed.",
+                  ddp_guid(guid), g_devsel_want);
+        }
+    }
+
     hr = g_ddp_real_createex(guid, out, iid, unk);
     logf_("[ddprobe]   -> 0x%08lx%s, object %p", (unsigned long)hr,
           hr == 0 ? " (DD_OK)" : "", out ? *out : NULL);
+    if (g_devsel && g_devsel_have && hr != 0)
+        logf_("[x] [devsel] the substituted device FAILED to create. The game is now"
+              " without a DirectDraw object; if it starts at all it will be on the"
+              " primary. Set [Display] DeviceSelect=0 and report this log.");
     if (!guid)
         logf_("[ddprobe]   NOTE: NULL device.");
     /* s117: this is the only moment the object exists and nothing has been asked
@@ -2121,6 +2227,18 @@ static void maybe_install_ddprobe(void)
     char ip[MAX_PATH];
     snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
     g_ddp_enable = GetPrivateProfileIntA("DDProbe", "Enable", 0, ip);
+    /* s118 rides it too, and for it the interception is not a probe but the whole
+     * feature: DirectDrawCreateEx is where the device GUID is chosen, and this is
+     * the only code that sees the call. Read here rather than from g_devsel,
+     * because maybe_install_ddprobe() runs BEFORE choose_monitor() sets that --
+     * the hook has to exist before the game resolves anything. */
+    g_devsel = GetPrivateProfileIntA("Display", "DeviceSelect", 0, ip);
+    if (g_devsel && running_under_wine()) {
+        logf_("[!] [devsel] DeviceSelect=1 but this is Wine, which reports ONE adapter"
+              " GUID for every head (FINDINGS 114.3). There is nothing to substitute;"
+              " the xrandr path handles the monitor here. Ignoring it.");
+        g_devsel = 0;
+    }
     /* s117 rides the same GetProcAddress interception, because this is the code that
      * sees the IDirectDraw7 being created and the game hands it to no one else. */
     g_fc = GetPrivateProfileIntA("FrameCount", "Enable", 0, ip);
@@ -2129,7 +2247,7 @@ static void maybe_install_ddprobe(void)
     if (g_fc)
         logf_("[*] [fps] frame counting armed, reporting every %d s. It intercepts"
               " nothing the game relies on; Blt is forwarded untouched.", g_fc_interval);
-    if (!g_ddp_enable && !g_fc) return;
+    if (!g_ddp_enable && !g_fc && !g_devsel) return;
 
     if (!hook_import("KERNEL32.dll", "LoadLibraryA", (void *)hook_LoadLibraryA,
                      (void **)&g_ddp_loadlib))
@@ -3111,7 +3229,7 @@ static void choose_monitor(void)
     if (done) return;               /* called from DllMain, and again from the patch pass */
     done = 1;
     xout_t outs[8];
-    int n, i, chosen = -1, prim = -1;
+    int n, i, chosen = -1, prim = -1, set_primary;
     char ip[MAX_PATH], want[64], want2[64];
     POINT pt;
     long px, py;
@@ -3158,7 +3276,18 @@ static void choose_monitor(void)
      * GetPrivateProfileInt cannot tell "absent" from "set to the default" and
      * FollowLaunchMonitor's default is 1 -- so an int read would stay silent for the
      * player who set it explicitly, which is exactly the player being addressed. */
-    if (!GetPrivateProfileIntA("Display", "SetPrimary", running_under_wine() ? 1 : 0, ip)) {
+    /* s118 splits this gate. Everything above the "RECORD IT" block at the bottom
+     * only READS the display, and DeviceSelect needs those reads -- which monitor
+     * was launched from and what mode it is in -- while wanting the primary left
+     * exactly where it is. So SetPrimary gates the WRITE at the bottom, and this
+     * early return survives only for the case where neither feature is on.
+     *
+     * That preserves s113.8's guarantee literally: with SetPrimary=0 and
+     * DeviceSelect=0 -- both the Windows defaults -- the function still returns
+     * here, g_launch_w is still never set, and pick_mode() still validates against
+     * SM_CXSCREEN. Nothing about the default path moves. */
+    set_primary = GetPrivateProfileIntA("Display", "SetPrimary", running_under_wine() ? 1 : 0, ip);
+    if (!set_primary && !g_devsel) {
         char m[64], f[64];
         const char *what;
         GetPrivateProfileStringA("Display", "Monitor", "", m, sizeof m, ip);
@@ -3181,9 +3310,10 @@ static void choose_monitor(void)
               " being chosen at all. Tropico's fullscreen always goes to whichever"
               " monitor is primary, so reaching another one means MAKING it primary,"
               " and that is what SetPrimary gates.", what);
-        logf_("    Either make the monitor you want your main display in your desktop's"
-              " own settings -- it costs nothing and is the recommended answer -- or set"
-              " SetPrimary=1 after reading what it costs in tropico-fix.ini.");
+        logf_("    Either set [Display] DeviceSelect=1, which reaches the monitor without"
+              " touching your primary at all, or make it your main display in your"
+              " desktop's own settings. SetPrimary=1 is the third way and the ini says"
+              " what it costs.");
         return;
     }
     GetPrivateProfileStringA("Display", "Monitor", "", want, sizeof want, ip);
@@ -3292,10 +3422,33 @@ static void choose_monitor(void)
               (unsigned long)g_launch_w, (unsigned long)g_launch_h);
     }
 
+    /* s118: the target, as the name DirectDraw will be asked for. Recorded here
+     * because this is where "which monitor" is decided; resolved to a GUID much
+     * later, at DirectDrawCreateEx, where loading ddraw.dll is safe. */
+    if (g_devsel) {
+        if (!g_mon_win32) {
+            logf_("[x] [devsel] the monitor list did not come from Windows, so these"
+                  " names are not \\\\.\\DISPLAYn and DirectDraw cannot be asked for one."
+                  " DeviceSelect is OFF for this run.");
+            g_devsel = 0;
+        } else if (chosen == prim) {
+            logf_("  [devsel] %s is already the primary -- the game renders there by"
+                  " default and there is no device to substitute.", outs[prim].name);
+            g_devsel = 0;
+        } else {
+            snprintf(g_devsel_want, sizeof g_devsel_want, "%s", outs[chosen].name);
+            logf_("[+] [devsel] target %s %lux%lu -- the game will be pointed at that"
+                  " DEVICE and the primary %s is NOT being changed (FINDINGS 118)",
+                  outs[chosen].name, (unsigned long)outs[chosen].w,
+                  (unsigned long)outs[chosen].h, outs[prim].name);
+        }
+    }
+
     if (chosen == prim) {
         logf_("  [display] %s is already primary -- nothing to change", outs[prim].name);
         return;
     }
+    if (!set_primary) return;   /* devsel: the device does the work, not the display */
 
     /* RECORD IT; DO NOT DO IT. Everything above this line only reads the display,
      * and reading is safe from DllMain -- measured on Steam, where the pointer was

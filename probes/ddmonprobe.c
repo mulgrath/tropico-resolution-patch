@@ -442,8 +442,21 @@ static void add_arm(const dev_t *guid_src, const dev_t *win_tgt, const char *lab
     d->rc       = win_tgt->rc;
     d->hmon     = win_tgt->hmon;
     d->primary  = win_tgt->primary;
-    d->native_w = win_tgt->native_w;
-    d->native_h = win_tgt->native_h;
+    /* s118.4: THE LADDER AND THE SURFACE CHECK ARE ABOUT THE DEVICE, NOT THE
+     * WINDOW. Taking these from win_tgt made arm 4 -- secondary GUID, window on
+     * the primary -- ask the DISPLAY2 device for the PRIMARY's 2560x1440. It was
+     * correctly refused, and the summary then read mode-set=NO as though the
+     * device had failed. It had not: it was asked for a mode it does not have.
+     * The spurious "THE SURFACE DOES NOT MATCH THE DEVICE" on arms 3 and 4 is the
+     * same mistake, compared the other way round. Neither changed s118's result,
+     * and both would mislead the next person to read that log. */
+    if (guid_src && guid_src->have_guid && guid_src->native_w) {
+        d->native_w = guid_src->native_w;
+        d->native_h = guid_src->native_h;
+    } else {
+        d->native_w = win_tgt->native_w;
+        d->native_h = win_tgt->native_h;
+    }
     snprintf(d->label, sizeof d->label, "%s", label);
 }
 
@@ -1006,7 +1019,12 @@ static void phase_visual(ctx_t *c, int idx)
         { "RED",     255,  32,  32 },
         { "GREEN",    32, 255,  32 },
         { "BLUE",     64,  64, 255 },
-        { "YELLOW",  255, 255,  32 },
+        /* s118.5: this was YELLOW at 255,255,32 -- an acid yellow the owner
+         * recorded as green on a wide-gamut panel. The observation still matched
+         * its log, but only because the surface sizes corroborated it. A visual
+         * check's colours have to be unconfusable to a tired human, not merely
+         * distinct in RGB. */
+        { "MAGENTA", 255,  32, 255 },
     };
     IDirectDrawSurface7 *prim = NULL;
     DDSURFACEDESC2 sd;
