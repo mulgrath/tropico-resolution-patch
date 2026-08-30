@@ -63,6 +63,28 @@ if [ "$STRICT" = "--byte-identical" ]; then
     || { note "byte-identical" "FAIL — a move changed the binary"; fail=1; }
 fi
 
+# Comments that still name an ini key the code no longer reads. Informational, not
+# a failure: some comments deliberately record what was removed and why. Task 16
+# works from this list, which is why it prints the names rather than a bare count.
+STALE=""
+while read -r sec key; do
+  sec=${sec#[}; sec=${sec%]}
+  grep -q "GetPrivateProfile.*\"$sec\", *\"$key\"" proxy/tropico_fix.c && continue
+  if grep -qE "\[$sec\] *$key|$sec\] $key" proxy/tropico_fix.c; then
+    STALE="$STALE $sec.$key"
+  fi
+done < <(printf '%s\n' "[HudProbe] Enable" "[HudProbe] Chrome" "[Menu] HudMovieProbe" \
+         "[Menu] BlitProbe" "[Menu] PreviewProbe" "[Menu] SurfaceProbe" "[Menu] SlotProbe" \
+         "[Menu] Probe" "[Menu] W" "[Menu] H" "[Menu] Fit" "[Blit] Census" "[DDProbe] Enable" \
+         "[TextProbe] Enable" "[VText] Probe" "[Scan] Find" "[Watch] Auto" "[WatchFB] X" \
+         "[Poke] Repeat" "[Cursor] Fix" "[Cursor] Probe" "[Unix] Probe" "[FileOrder] Enable" \
+         "[Display] VirtualDesktop" "[Debug] ClampW")
+if [ -n "$STALE" ]; then
+  note "stale key comments" "$(echo $STALE | wc -w) ->$STALE"
+else
+  note "stale key comments" "none"
+fi
+
 LEAK=$(grep -rniE 'FINDINGS|\bs[0-9]{2,3}[.: ]|§[0-9]+' \
         README.md known-good/tropico-fix.ini packaging/ 2>/dev/null | wc -l)
 note "user-facing leaks" "$LEAK $([ "$LEAK" -eq 0 ] && echo OK || echo '(expected until Workstream B)')"
