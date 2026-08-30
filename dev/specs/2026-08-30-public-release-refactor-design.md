@@ -134,7 +134,7 @@ warnings under `-Wall -Wextra`.**
    `binkw32.def`, taking it to 77 forwards + 1 wrapper. Note that `FixMoviePitch`
    defaults to `0`, so the surviving fix ships dormant exactly as it does today —
    this is behaviour-preserving.
-3. **The cursor probes are deleted** (620 lines) even though they are the only
+3. **The cursor probes are deleted** (324 lines) even though they are the only
    instruments for the map-pan drift listed as an open issue. The recovery commit SHA
    is recorded in `dev/README.md` so `git show` revives them in one command.
 
