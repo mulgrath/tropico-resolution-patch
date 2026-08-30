@@ -52,11 +52,9 @@ second. Nothing is downloaded, and no game files are changed.
 
 **Two monitors?** On Linux, start the game from the screen you want to play on: it
 matches itself to that screen and puts your desktop back the way it was when you quit.
-On Windows the game opens on your main monitor, at that monitor's resolution — make the
-one you want your main display in Windows' Display settings. The patch can follow your
-launch monitor there too (`[Display] SetPrimary=1`), but moving your main display is a
-change to your desktop that nothing can undo if the game crashes, so it is not the
-default. `tropico-fix.ini` explains the trade in full.
+On Windows, the game opens on whichever monitor you started it from too, at that
+monitor's own resolution — nothing to set, and your desktop's main display is never
+touched.
 
 **Changing your resolution later** needs nothing from you. The patch checks the display
 every time the game starts.
@@ -96,8 +94,8 @@ the running game in memory. It never modifies `Tropico.EXE` or the game archives
 
 - `proxy/` — the C source of everything that ships
 - `tools/` — the Linux launcher, and the research scripts
-- `dev/FINDINGS.md` — the reverse-engineering notes: every address, with the evidence
-- `dev/TESTING.md` — how to test this without fooling yourself
+- `dev/` — the reverse-engineering notes behind every fix, and `dev/TESTING.md`
+  for how to test this without fooling yourself
 
 The build is reproducible, so you can check the DLL in the release against one you
 build yourself and expect an exact match (needs `mingw-w64`):
