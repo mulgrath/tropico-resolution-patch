@@ -25,7 +25,7 @@ command -v git >/dev/null 2>&1 || { echo "!! git is required to build a release"
 command -v zip >/dev/null 2>&1 || { echo "!! zip is required for the Windows package" >&2; exit 1; }
 [ -d "$ROOT/.git" ] || { echo "!! not a git checkout; refusing to guess what to ship" >&2; exit 1; }
 
-# The proxy must be current: this is the bug that shipped once already (FINDINGS 88.2).
+# The proxy must be current: this is the bug that shipped once already.
 # mingw stamps each build, so two builds of identical source never compare equal --
 # rebuilding unconditionally would churn the shipped binary on every release for no
 # reason. Rebuild only when the source is actually newer than the artifact.
@@ -64,7 +64,7 @@ scan_or_die() {
 # script exists to guard it. (Linux filenames are case-sensitive so readme.txt is safe
 # here, but the Windows package shares this layout and there it is not.)
 #
-# A release is not a checkout: FINDINGS/TESTING and the experiment scripts are
+# A release is not a checkout: the internal notes, test docs, and experiment scripts are
 # development history, and putting them in front of someone who just wants the game at
 # 1080p is noise. They stay in the repository, which the README points at.
 #
@@ -89,7 +89,7 @@ echo "$VER" > "$OUT/$NAME/tropico-patch/VERSION"
 # never meant for them.
 #
 # The Python art pipeline in particular MUST NOT ship. It is the oracle the C
-# generator is diffed against (FINDINGS 93-96) and it stays in the repository for
+# generator is diffed against, and it stays in the repository for
 # exactly that reason, but the proxy does the work now. A copy in a release would
 # be a second implementation for a user to find, run, and be confused by.
 #
@@ -135,7 +135,7 @@ cp "$ROOT/known-good/binkw32.dll" "$OUT/$NAME/tropico-patch/binkw32.dll"
 
 # Source of the one binary we ship, so it can be rebuilt and compared.
 #
-# artgen.c/.h ARE PART OF THIS, since FINDINGS 96 moved art generation into the
+# artgen.c/.h ARE PART OF THIS, since art generation moved into the
 # proxy. Leaving them out was silent: the tarball built, and the source it shipped
 # simply did not compile -- which defeats the entire point of shipping it, because
 # the reproducibility check in README is what lets someone verify the binary.

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Print "X Y METHOD" for the screen point the game is being launched from.
 
-THE POINTER WINS ON X11, and that is measured, not assumed (FINDINGS 78). This helper
+THE POINTER WINS ON X11, measured rather than assumed. This helper
 first asked _NET_ACTIVE_WINDOW, on the reasoning that a desktop places a new window on
 the FOCUSED output. It does not: hovering a second monitor without clicking anything --
 focus left behind on the first -- still opens the game under the mouse.
 
-THE POINTER IS DEAD ON WAYLAND, and that is measured too (FINDINGS 111). XWayland is
+THE POINTER IS DEAD ON WAYLAND, measured too. XWayland is
 only sent pointer events while the pointer is over an XWayland surface, so once it
 moves onto a native Wayland window -- a terminal, say -- XQueryPointer returns the last
 position it ever saw, forever. Measured on COSMIC: twelve identical samples in six

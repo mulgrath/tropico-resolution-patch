@@ -8,7 +8,7 @@
 #                                     is configured against a smaller screen, which is
 #                                     how the fallback path is reached deliberately
 #
-# WHY THIS EXISTS (FINDINGS 81/83)
+# WHY THIS EXISTS
 # A Wine virtual desktop cannot be larger than the host panel -- Wine clamps it at
 # creation, so asking for 3840x2160 on a 1440p screen silently gives you 2560x1440
 # and there is no oversized desktop to pan around. The way past that is not to fight
@@ -19,15 +19,15 @@
 # matter. `tropico-rigshot.sh` captures the ROOT WINDOW of the nested server, i.e. the
 # whole framebuffer, whatever is visible. The capture is the point of the rig.
 #
-# WHAT IT TESTS, AND WHAT IT CANNOT (FINDINGS 83.1)
+# WHAT IT TESTS, AND WHAT IT CANNOT
 #   tests:  art sets, HUD geometry, world extents, clipping, text overhang, VText
-#           dials -- everything positional. This is how FINDINGS 82 was found.
+#           dials -- everything positional. This is how a real bug was caught before.
 #   cannot: anything about real graphics hardware. There is no GPU behind a nested
 #           server, so GL runs on llvmpipe: far slower, and every texture lives in the
 #           win32 process's 2-3 GB address space instead of VRAM. A clean run here is
 #           NOT evidence that a mode works on real hardware.
 #
-# KNOWN, EXPECTED, NOT A BUG (FINDINGS 84)
+# KNOWN, EXPECTED, NOT A BUG
 # Toggling Hardware 3D -> Software 3D -> Hardware 3D in the rig crashes, in Wine's
 # wined3d, and it does NOT reproduce on real hardware. Do not spend a day on it.
 #
@@ -99,7 +99,7 @@ echo "   $DISP reports: $(DISPLAY=$DISP xdpyinfo | awk '/dimensions:/{print $2; 
 # TROPICO_KEEP_MODE=1 runs whatever the ini and data/ already say, instead of matching
 # them to the rig's screen size. That is the only way to reach the FALLBACK path on
 # purpose: a nested screen SMALLER than the configured mode makes the mode not fit, which
-# is the situation the staged-art fallback exists for (FINDINGS 85). Useless for a normal
+# is the situation the staged-art fallback exists for. Useless for a normal
 # layout run -- the art would not match the screen, which is the whole point.
 if [ -n "${TROPICO_KEEP_MODE:-}" ]; then
   echo "== KEEPING the configured mode: ini=$(awk -F= '/^Width=/{w=$2} /^Height=/{h=$2} END{print w"x"h}' "$GAMEDIR/tropico-fix.ini" 2>/dev/null)  art=$(cat "$GAMEDIR/data/ARTSET-MODE.txt" 2>/dev/null)"
@@ -151,7 +151,7 @@ fi
     sleep 0.5
   done ) &
 
-# FINDINGS 84: the address-space sampler. A 64 MB GL allocation failing on a machine
+# The address-space sampler. A 64 MB GL allocation failing on a machine
 # with 21 GB free is not host memory exhaustion, it is the 32-bit process running out of
 # ADDRESS SPACE -- llvmpipe has no VRAM, so every texture is in-process. This has to be
 # sampled while the game is alive; the number is gone the moment it faults.

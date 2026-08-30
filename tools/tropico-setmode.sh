@@ -7,7 +7,7 @@
 # THIS USED TO BE THE ART STAGER. It generated a set in Python (~13 s), wrote it into
 # artsets/<WxH>/, and copied all 267 files into data/ -- 132 MB written twice at 4K,
 # before the game had started. All of that is gone: the proxy generates the set itself,
-# in C, once it has measured the display for real, straight into data/ (FINDINGS 96/97).
+# in C, once it has measured the display for real, straight into data/.
 #
 # What is left is the one thing that must happen OUTSIDE the game: naming the mode in
 # the ini. Clearing the marker is how this asks the proxy to rebuild -- the proxy

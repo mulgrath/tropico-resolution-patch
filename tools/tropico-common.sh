@@ -108,12 +108,12 @@ tropico_validate_mode() {
   _w="$1"; _h="$2"
   case "$_w" in *[!0-9]*|'') echo "width '$_w' is not a number" >&2; return 1;; esac
   case "$_h" in *[!0-9]*|'') echo "height '$_h' is not a number" >&2; return 1;; esac
-  # FINDINGS 10: a width that is not a multiple of 4 pads the row pitch and shears.
-  [ $((_w % 4)) -eq 0 ] || { echo "width $_w is not a multiple of 4 (FINDINGS 10: it would shear)" >&2; return 1; }
-  # FINDINGS 9: the mode compare-chain dispatches on width, so ours must not
-  # collide with a stock slot's or it becomes unreachable.
+  # A width that is not a multiple of 4 pads the row pitch and shears.
+  [ $((_w % 4)) -eq 0 ] || { echo "width $_w must be a multiple of 4" >&2; return 1; }
+  # The mode compare-chain dispatches on width, so ours must not collide
+  # with a stock slot's or it becomes unreachable.
   case "$_w" in 640|800|1024|1280)
-      echo "width $_w collides with stock slot width $_w (FINDINGS 9: it would be unreachable)" >&2; return 1;; esac
+      echo "width $_w is one the game already uses -- pick another" >&2; return 1;; esac
   return 0
 }
 
@@ -184,7 +184,7 @@ tropico_layout() {
 # --------------------------------------------------- which monitor am I launched from
 # The output the game is being launched from -- which is what the desktop uses to
 # decide where to open the window, and therefore what the primary has to be made
-# to match (FINDINGS 77).
+# to match.
 #
 # The point comes from tropico-launchpoint.py: the ACTIVE WINDOW's centre, falling
 # back to the pointer. Not the pointer alone -- the mouse can rest on a monitor that

@@ -7,7 +7,7 @@
 #
 # `import -window root` grabs the ROOT window of the nested server, so the result is the
 # full 3840x2160 frame even though only a corner was ever on screen. That is the entire
-# reason the rig is worth having (FINDINGS 83).
+# reason the rig is worth having.
 #
 # Shots land in <gamedir>/rig-shots/ so they sit next to the run that produced them and
 # never inside the repo.

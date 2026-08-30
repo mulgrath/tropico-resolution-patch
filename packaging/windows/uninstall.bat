@@ -129,7 +129,7 @@ echo   - removed tropico-fix.ini
 :log
 if exist "tropico-fix.log" del /q "tropico-fix.log" >nul 2>&1
 REM  Run-time scratch. tropico-primary.state is how the patch remembers which
-REM  monitor was your primary when it borrowed it (FINDINGS 113); it only exists
+REM  monitor was your primary when it borrowed it; it only exists
 REM  if the game was killed before it could hand it back.
 if exist "tropico-primary.state" del /q "tropico-primary.state" >nul 2>&1
 

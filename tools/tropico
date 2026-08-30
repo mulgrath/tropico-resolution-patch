@@ -8,8 +8,7 @@
 #
 # THE RULE: LAUNCH IT FROM THE MONITOR YOU WANT TO PLAY ON.
 #
-# Two different things decide the outcome and they must be made to agree
-# (FINDINGS 76):
+# Two different things decide the outcome and they must be made to agree:
 #
 #   PLACEMENT  the desktop opens the window on the monitor you launched from --
 #              the terminal, or the screen whose applications menu you clicked.
@@ -27,7 +26,7 @@
 # The virtual desktop is what makes this reliable rather than hopeful. Inside it
 # the game sees ONE screen whose origin is (0,0), so the multi-monitor geometry
 # that produces DirectDraw #150 -- a window on a monitor Wine did not measure,
-# sitting at negative coordinates -- cannot arise at all (FINDINGS 76). Placement
+# sitting at negative coordinates -- cannot arise at all. Placement
 # stops being a correctness problem and becomes at worst a cosmetic one, and
 # nothing has to touch your display layout to achieve it.
 #
@@ -35,7 +34,7 @@
 # NOT interchangeable: it exposes a dozen research knobs TESTING.md depends on.
 set -eu
 
-# s90: tell the proxy that this launcher has already chosen the monitor, so it
+# Tell the proxy that this launcher has already chosen the monitor, so it
 # does not choose a second time from inside the game (they would disagree).
 export TROPICO_LAUNCHER=1
 
@@ -98,7 +97,7 @@ if [ "$LIST" = 1 ]; then
   exit 0
 fi
 
-# Two mechanisms, and the whole job is making them agree (FINDINGS 78):
+# Two mechanisms, and the whole job is making them agree:
 #
 #   PLACEMENT  the desktop opens the window on the monitor you are launching from
 #              -- measured on COSMIC as the one under the POINTER
@@ -128,7 +127,7 @@ if [ -z "$MONITOR" ]; then
   _pt="$(DISPLAY="${DISPLAY:-:1}" python3 "$SELF/tropico-launchpoint.py" 2>/dev/null || true)"
   if [ -n "$_pt" ]; then
     # "X Y METHOD". Say WHICH method: on Wayland the pointer is stale and the answer
-    # comes from where the compositor places a probe window instead (FINDINGS 111), and
+    # comes from where the compositor places a probe window instead, and
     # a report that does not say which one was used cannot be diagnosed.
     _rest="${_pt#* }"
     say "   launch point ${_pt%% *},${_rest%% *} (via ${_rest#* }) -> $MONITOR"
@@ -199,7 +198,7 @@ if [ -z "$WANT" ]; then
   fail "Could not read any monitor's resolution. Is xrandr installed, and is DISPLAY set?"
 fi
 # A monitor whose own mode the patch cannot use -- a width that is not a multiple of
-# 4 shears (FINDINGS 10), 1366x768 being the common case -- stops here.
+# 4 shears, 1366x768 being the common case -- stops here.
 #
 # There used to be a fallback on this branch: `tropico_best_mode` was to pick the
 # largest mode the monitor actually offers. It is DEFINED NOWHERE and never was, and
@@ -225,7 +224,7 @@ tropico_set_ini_mode "$GAMEDIR" "${WANT%x*}" "${WANT#*x}" \
 #
 # The proxy now generates it in C once it has measured the display for real, in about
 # a second, straight into data/. Measured at 3840x2160: 20 s of launcher became 1.09 s
-# in-process (FINDINGS 97). So the first launch at a new resolution spends a second
+# in-process. So the first launch at a new resolution spends a second
 # inside the game rather than twenty in front of it, and this script is left with the
 # job only it can do: choosing the monitor and putting the primary back.
 

@@ -16,13 +16,13 @@
 # mode enumerator at 0x514d60 keeps a resolution only if width < that value.
 set -u
 
-# s90: the harness picks the monitor too -- keep the proxy from choosing a second
+# The harness picks the monitor too -- keep the proxy from choosing a second
 # time from inside the game.
 export TROPICO_LAUNCHER=1
 DESK="${1:-1280x1024}"
 shift 2>/dev/null || true
 
-# TROPICO_DISPLAY=<xrandr output>  -- run on a specific monitor (FINDINGS section 18).
+# TROPICO_DISPLAY=<xrandr output>  -- run on a specific monitor.
 #
 # Wine measures ONLY the primary monitor: GetDeviceCaps(HORZRES) returns the primary's
 # width, not the virtual-screen width, and EnumDisplaySettings lists the primary's modes.
@@ -96,16 +96,16 @@ echo "== prefix : $WINEPREFIX"
 #
 # This runs AFTER the TROPICO_DISPLAY switch above, deliberately: that switch is
 # what decides which monitor is primary, and Wine measures only the primary
-# (FINDINGS 18). So by this point "the primary's mode" is the mode the game will
+# So by this point "the primary's mode" is the mode the game will
 # actually come up in.
 #
-# Art is authored per resolution and the engine will not scale it (FINDINGS
-# 11/50/60/61), so running at a mode whose art is not installed gives a correct
+# Art is authored per resolution and the engine will not scale it, so running
+# at a mode whose art is not installed gives a correct
 
 # THE ART SWAP THAT USED TO LIVE HERE IS GONE. It compared the display against
 # data/ARTSET-MODE.txt and either copied a staged set in or printed a 30 s warning.
 # The proxy now measures the display itself and generates matching art before the menu
-# opens, so there is nothing to compare and nothing to warn about (FINDINGS 96/97).
+# opens, so there is nothing to compare and nothing to warn about.
 
 if [ -n "${TROPICO_NODESK:-}" ]; then
   # No Wine virtual desktop: the game talks to the real display. Measured 2026-08-19 --
