@@ -93,10 +93,25 @@ reason that has nothing to do with that task, and a real failure hides in the
 noise.
 
 ```bash
+./proxy/build.sh /tmp/w0.dll 2>&1 | grep -c 'warning:'  # expect 6 -- the tree is NOT clean
 grep -n 'g_slot_out' proxy/tropico_fix.c   # expect one hit: the declaration
 sed -i '/^static DWORD g_slot_out;$/d' proxy/tropico_fix.c
-./proxy/build.sh /tmp/w.dll 2>&1 | grep -c 'warning:'   # expect 0
+./proxy/build.sh /tmp/w.dll 2>&1 | grep -c 'warning:'   # expect 5
 ```
+
+**The tree carries six warnings, not one.** Five are not yours to fix here:
+
+| Line | Warning | Fate |
+|---|---|---|
+| 173 | `g_slot_out` unused | **you delete it now** |
+| 2747 | no return, `heartbeat_thread` | `for(;;)` thread — never returns. Kept code; fixed in Task 11 |
+| 5536 | no return, chrome watcher thread | deleted with the HUD shrink probe in Task 5 |
+| 7693/7694 | unused `a_z`, `z1` | kept code; fixed in Task 11 |
+| 7898 | no return, `hudprobe_thread` | deleted in Task 6 (see Step 3's 22nd range) |
+
+None of the `-Wreturn-type` three is a bug: each is an infinite `for(;;)` loop that
+never falls out. The gate is therefore **"the count never rises above the baseline"**,
+not "zero", until Task 11 drives it to zero deliberately.
 
 - [ ] **Step 3: Write the baseline capture**
 
@@ -115,8 +130,9 @@ cd "$(git rev-parse --show-toplevel)"
 B=dev/tools/baseline
 mkdir -p "$B"
 
-./proxy/build.sh /tmp/refactor-baseline.dll >/dev/null
+./proxy/build.sh /tmp/refactor-baseline.dll 2>/tmp/refactor-baseline.log >/dev/null
 sha256sum /tmp/refactor-baseline.dll | awk '{print $1}' > "$B/dll.sha256"
+grep -c 'warning:' /tmp/refactor-baseline.log > "$B/warnings.count" || echo 0 > "$B/warnings.count"
 
 i686-w64-mingw32-objdump -p /tmp/refactor-baseline.dll \
   | sed -n '/\[Ordinal\/Name Pointer\] Table/,/^$/p' \
@@ -134,7 +150,21 @@ BANNERS = ["the cursor probe","which call sites read the cursor","the virtual de
  "s65 probe","rotated-text ENTRY probe","horizontal-text probe","apply-video probe",
  "the movie blit probe","the HUD movie probe","the map-preview probe",
  "sweep every surface access","the blit census","file-order probe","Bink instrumentation"]
+# A 22nd range that is NOT a whole section: patch_hud_probe and hudprobe_thread
+# are HUD probe code living inside the kept scaling-mode section. Their callers
+# are deleted by Tasks 5 and 6, after which the compiler names them as unused --
+# but the address baseline must know now, or their addresses would be recorded as
+# "kept" and reported missing once they go.
 DEL = []
+_src = open("proxy/tropico_fix.c").read().rstrip("\n").split("\n")
+# Exact match, not startswith: line 145 is the forward declaration
+# `static int patch_hud_probe(void);` and would otherwise win.
+_hp = next(i for i, l in enumerate(_src, 1)
+           if l.rstrip() == "static int patch_hud_probe(void)")
+_sm = subprocess.run(["./dev/tools/sections.py", "--range", "scaling mode"],
+                     capture_output=True, text=True)
+assert _sm.returncode == 0, _sm.stderr
+DEL.append((_hp, int(_sm.stdout.split()[1])))
 for b in BANNERS:
     out = subprocess.run(["./dev/tools/sections.py","--range",b],
                          capture_output=True, text=True)
@@ -142,7 +172,7 @@ for b in BANNERS:
     a, z = map(int, out.stdout.split())
     DEL.append((a, z))
 total = sum(z - a + 1 for a, z in DEL)
-assert total == 3523, f"delete ranges cover {total} lines, expected 3523"
+assert total == 3823, f"delete ranges cover {total} lines, expected 3823"
 lines = open("proxy/tropico_fix.c").read().rstrip("\n").split("\n")
 inr = lambda n: any(a <= n <= z for a, z in DEL)
 rx = re.compile(r"0x[0-9a-fA-F]{6,8}")
@@ -174,7 +204,10 @@ if ! ./proxy/build.sh "$OUT" > /tmp/refactor-build.log 2>&1; then
   note "build" "FAIL — see /tmp/refactor-build.log"; exit 1
 fi
 W=$(grep -c 'warning:' /tmp/refactor-build.log || true)
-[ "$W" -eq 0 ] && note "warnings" "0 OK" || { note "warnings" "$W FAIL"; fail=1; }
+WB=$(cat "$B/warnings.count")
+if [ "$W" -le "$WB" ]; then note "warnings" "$W (baseline $WB) OK"
+else note "warnings" "$W > baseline $WB FAIL"
+     grep 'warning:' /tmp/refactor-build.log | sed 's/^/      /'; fail=1; fi
 
 i686-w64-mingw32-objdump -p "$OUT" \
   | sed -n '/\[Ordinal\/Name Pointer\] Table/,/^$/p' \
@@ -572,7 +605,17 @@ The world viewport width and the readout colour are shipped fixes and stay."
 Sections, by banner: `the movie blit probe`, `the HUD movie probe`, `the map-preview probe`, `sweep every surface access`, `the blit census`.
 ini keys removed: `[Menu] BlitProbe, HudMovieProbe, PreviewProbe, Probe, SlotProbe, SurfaceProbe, W, H, Fit`; `[Blit] Census, Delay, Every, MinY`; `[DDProbe] Enable`.
 
-**Keep:** `let the movie blit MAGNIFY`, `the HUD panel's movie is copied 1:1`, `the scenario map preview`, `scaling mode` — all shipped fixes, all adjacent to the deletions.
+**Keep:** `let the movie blit MAGNIFY`, `the HUD panel's movie is copied 1:1`, `the scenario map preview` — all shipped fixes, all adjacent to the deletions.
+
+**`scaling mode` is kept but is NOT all fix.** Its first ~190 lines are the scaling
+fix; from `static int patch_hud_probe(void)` to the end of the section (~300 lines)
+is HUD probe code that happens to live there. Its two callers are the
+`[HudProbe] Enable` branch removed in Task 5 and the `CreateThread(hudprobe_thread,
+...)` inside the blit census removed in this task — so once both are gone the
+compiler reports `patch_hud_probe` and `hudprobe_thread` as defined-but-not-used.
+**Delete both functions and the forward declaration of `patch_hud_probe` near the
+top of the file.** The address baseline already excludes this range, so leaving it
+in would show up as a *surplus*, not a missing address.
 
 - [ ] **Step 1: Confirm ranges and keepers**
 
@@ -854,8 +897,26 @@ Expected: about 34 keys. Anything from `[Scan] [Watch] [WatchFB] [Poke] [ClipLog
 ./proxy/build.sh /tmp/t11.dll 2>&1 | grep -E 'warning|error' || echo "  clean"
 ```
 
-`g_slot_out` was retired in Task 1. Anything reported here is a global left
-behind by Tasks 4–10 — delete each one the compiler names.
+`g_slot_out` was retired in Task 1. Anything else reported is a global left behind
+by Tasks 4–10 — delete each one the compiler names.
+
+Then drive the count to zero. Four warnings survive the deletions, all in kept code
+and none of them a bug:
+
+- `heartbeat_thread` and any other `for(;;)` thread flagged `-Wreturn-type`: the loop
+  never exits, so add `return 0;` after it. Unreachable, and it silences a warning
+  that would otherwise mask a real one later.
+- the unused locals `a_z` and `z1` in the scaling-mode code: delete the declarations.
+
+```bash
+./proxy/build.sh /tmp/t11b.dll 2>&1 | grep 'warning:' || echo "  zero warnings"
+```
+
+Expected: `zero warnings`. Update the baseline so later tasks hold the new bar:
+
+```bash
+echo 0 > dev/tools/baseline/warnings.count
+```
 
 - [ ] **Step 4: Confirm the surviving set matches the spec's two tiers**
 
