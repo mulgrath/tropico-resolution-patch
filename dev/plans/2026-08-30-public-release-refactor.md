@@ -356,9 +356,17 @@ Expected: **all checks pass**, including `byte-identical OK`. Nothing here touch
 ```bash
 ./tools/make-release.sh 2>&1 | tail -5
 find dist -newer dev/README.md -name '*.tar.gz' | head -1 | xargs -I{} tar tzf {} | grep -iE 'dev/|FINDINGS|HANDOFF|probes/' || echo "  OK: nothing from dev/ ships"
+git checkout -- known-good/binkw32.dll proxy/binkw32.dll
+git status --short -- known-good proxy | grep -E '\.dll' && echo "  FAIL: a DLL is still modified" || echo "  OK: DLLs restored"
 ```
 
-Expected: `OK: nothing from dev/ ships`.
+Expected: `OK: nothing from dev/ ships`, then `OK: DLLs restored`.
+
+**Why the checkout:** Task 1 edited `proxy/tropico_fix.c`, which makes the source
+newer than `known-good/binkw32.dll`. `make-release.sh` rebuilds the reference DLL
+whenever that is true, so running it here leaves two rebuilt DLLs in the working
+tree. This task must not commit them — its whole claim is that it touched no C.
+Task 17 owns the reference DLL and rebuilds it deliberately.
 
 - [ ] **Step 10: Commit**
 
