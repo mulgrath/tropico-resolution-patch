@@ -92,8 +92,11 @@ DEAD=$(python3 dev/tools/ini-doc-check.py 2>/dev/null | tr '\n' ' ')
 if [ -z "$DEAD" ]; then note "ini advertises dead" "none"
 else note "ini advertises dead" "$DEAD"; fi
 
+# tools/ is in scope: tropico-common.sh prints errors a player reads, e.g.
+# "width 1366 is not a multiple of 4 (FINDINGS 10: it would shear)" -- which tells
+# them to consult a document they do not have.
 LEAK=$(grep -rniE 'FINDINGS|\bs[0-9]{2,3}[.: ]|§[0-9]+' \
-        README.md known-good/tropico-fix.ini packaging/ 2>/dev/null | wc -l)
+        README.md known-good/tropico-fix.ini packaging/ tools/ 2>/dev/null | wc -l)
 note "user-facing leaks" "$LEAK $([ "$LEAK" -eq 0 ] && echo OK || echo '(expected until Workstream B)')"
 
 exit $fail
