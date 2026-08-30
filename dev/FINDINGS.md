@@ -5246,7 +5246,7 @@ measurement, not an evaluation of a formula, and rescaling it is not meaningful.
 Attempting to reconstruct the frozen numbers from the notes alone lands around -67..-81
 virtual against the dialled -99, and closing that gap needs `[VText] Probe=1` geometry
 per label per site, which only an in-game session produces. No probe log from §65/§66
-survives in `logs/`.
+survives in `dev/logs/`.
 
 **So the dials stay measurements** — that much still holds, they are hand-fitted rather
 than evaluated. What §86 changed is that a measurement can be TRANSPORTED. At the time of
@@ -7698,7 +7698,7 @@ candidates both remain live.
 ## 104. The census verdict: NEITHER moved. Every widget class scales by the same rule
 
 The run s103.4 asked for exists. Owner, 2026-08-29: "to me, they actually seemed fine."
-The census agrees, and it agrees to the pixel. `logs/blit-census-3840x2160.log.gz` is the
+The census agrees, and it agrees to the pixel. `dev/logs/blit-census-3840x2160.log.gz` is the
 run, preserved because the proxy `DeleteFileA`s its own log at every launch
 (`proxy/tropico_fix.c:6450-6451`) — a second launch would have destroyed it.
 
@@ -7829,7 +7829,7 @@ That is the answer, and it is checkable rather than merely plausible. s102 spent
 sections killing mechanisms that could have *introduced* an offset without ever asking
 whether the offset was introduced at all. The button is not centred in its plate in the
 art PopTop shipped, at any of the five resolutions they shipped. Nothing moved it; it was
-authored there. `logs/blit-census-1920x1080.log.gz` is the run (six dumps, 1562 distinct
+authored there. `dev/logs/blit-census-1920x1080.log.gz` is the run (six dumps, 1562 distinct
 tuples across them), preserved for the same reason as s104's.
 
 ### 105.1 The 1920x1080 census matches the model, exactly as 3840x2160 did
@@ -8077,7 +8077,7 @@ Built and deployed (`binkw32.dll` sha256 `3bb26bc8…`), probe armed, not yet ru
 ### 106.7 CORRECTED: there are two flags, and the bug is the other one
 
 Owner ran it at 1920x1080 and issued an economic edict: **the movie was still not resized.**
-`logs/hudmovie-1920x1080-control.log.gz`. The probe earned its place immediately — it did
+`dev/logs/hudmovie-1920x1080-control.log.gz`. The probe earned its place immediately — it did
 not merely say "still broken", it said where the reading was wrong:
 
 ```
@@ -8193,7 +8193,7 @@ and a scan of every rel8/rel32 branch in `.text` finds none landing inside
 ### 106.9 CONFIRMED
 
 Owner, 2026-08-29: "confirmed that the movies appear correct on 1080p now," and then
-again at **2560x1440**. `logs/hudmovie-1920x1080-fixed.log.gz`, and the probe line is
+again at **2560x1440**. `dev/logs/hudmovie-1920x1080-fixed.log.gz`, and the probe line is
 106.7's prediction verbatim:
 
 ```
@@ -8258,7 +8258,7 @@ would have said `276x276` three times and named nothing.
 ### 106.11 CONFIRMED on the Steam edition — and the signatures earned their keep
 
 Owner, 2026-08-29: "confirmed fixed videos on Steam 1080p."
-`logs/steam-hudmovie-1920x1080.log.gz`.
+`dev/logs/steam-hudmovie-1920x1080.log.gz`.
 
 Worth recording for what it says about method, not just about the movie. The Steam build's
 `.text` is **encrypted on disk** — 0.4% zero bytes, and even the s103 census signature that
@@ -8340,7 +8340,7 @@ Owner, 2026-08-29, after a second Steam run at 1080p: "didn't notice any drift. 
 be rather intermittent and I'm not sure what causes it."
 
 That run is the control nobody had run for the instrument itself, and it fails it.
-`logs/steam-xcmp-nodrift.log.gz`: **19 samples, 8 outside the bracket, and no drift at all.**
+`dev/logs/steam-xcmp-nodrift.log.gz`: **19 samples, 8 outside the bracket, and no drift at all.**
 
 ```
   X  906, 806 | wine+origin  904, 812 ->  886, 809   missed by   2, -3
@@ -8473,7 +8473,7 @@ first instrument in this investigation that fires on the event instead of on a c
 ## 108. The 1440p Steam launch renders nothing: the fit guard never covered the path that supplies the mode
 
 Owner, 2026-08-29: "I just tried to run at 1440p and it didn't work?"
-`logs/steam-1440p-mode-mismatch.log.gz`. It is in the log twice, three lines apart, and
+`dev/logs/steam-1440p-mode-mismatch.log.gz`. It is in the log twice, three lines apart, and
 nothing in the code compared them:
 
 ```
@@ -8575,7 +8575,7 @@ covered `launch_override`, `ini_override` and `pick_mode` together.
 ## 109. Why 1440p never arrives on Steam: the desktop is clamped to a primary that is only changed afterwards
 
 Owner, 2026-08-29: "It still launched in a 1920x1080 window on my 1440p monitor."
-`logs/steam-1440p-desktop-deadlock.log.gz`.
+`dev/logs/steam-1440p-desktop-deadlock.log.gz`.
 
 s108's guard did its job — the black screen is gone and the run is a correct 1080p one —
 but it exposed that the promise the guard makes is one the patch cannot keep. **This is a
@@ -8772,7 +8772,7 @@ manual step beyond launching from the monitor you want — which is the same rul
 `tools/tropico` has always stated on GOG, and which s90 traced to the game rather than to
 Wine.
 
-The 1080p run is `logs/steam-novdesk-1920x1080.log.gz`: no `[vdesk]` line anywhere, 18
+The 1080p run is `dev/logs/steam-novdesk-1920x1080.log.gz`: no `[vdesk]` line anywhere, 18
 applied 0 failed, `slot 4 -> 1920x1080`, and nothing at all in the `[x]`/`[!]`/`DDERR`
 classes. `tropico-vd.state` is gone and `HKCU\Software\Wine\Explorer` no longer names a
 desktop, so the arming really is undone rather than merely unused.
@@ -9113,7 +9113,7 @@ eliminated across four more samples.
 
 Owner, 2026-08-29: "Ran the 4 alternating tests again, and it followed the cursor instead
 of launching on the same monitor as Steam. So Steam is working correctly as far as I can
-tell." `logs/steam-placement-1920x1080.log.gz`:
+tell." `dev/logs/steam-placement-1920x1080.log.gz`:
 
 ```
   [display] launched from HDMI-A-5 (launch point 960,531 in screen space, via placement)
@@ -10194,7 +10194,7 @@ the diff against that revision is now **purely additive** -- 441 lines added to
 for `g_bl_clamped`, which was borderless's own.
 
 **Where it is.** Commit `4c180cf`, on branch 1.3, with the DLL that produced
-`logs/fps-presenter-2560x1440-gog-wine.log.gz` committed beside it as
+`dev/logs/fps-presenter-2560x1440-gog-wine.log.gz` committed beside it as
 `proxy/binkw32_borderless.dll`, so 117.1's numbers stay reproducible without a
 rebuild. `git show 4c180cf:proxy/tropico_fix.c` is the whole of it. Anyone reviving
 this should start from **115.4's specification**, not from that code -- 115.8's
@@ -10347,8 +10347,8 @@ multi-monitor Windows players who decline a one-click workaround Windows itself
 provides. **`Borderless` stays default 0, and the file now says why with a number
 instead of an admission.**
 
-Both runs are kept: `logs/fps-software-2560x1440-gog-wine.log.gz` and
-`logs/fps-presenter-2560x1440-gog-wine.log.gz`.
+Both runs are kept: `dev/logs/fps-software-2560x1440-gog-wine.log.gz` and
+`dev/logs/fps-presenter-2560x1440-gog-wine.log.gz`.
 
 ## 118. SOLVED: DirectDraw CAN be pointed at a monitor -- measured on Windows 11
 

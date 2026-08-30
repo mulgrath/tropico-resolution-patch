@@ -33,3 +33,7 @@ __pycache__/
 # Release tarballs. tools/make-release.sh rebuilds them from `git ls-files` at any
 # time, so keeping them in history would only add a copy of the tree per release.
 dist/
+
+# Scratch builds of the proxy. Only proxy/binkw32.dll and known-good/binkw32.dll
+# are real artifacts; anything else is a variant from an experiment.
+proxy/binkw32_*.dll

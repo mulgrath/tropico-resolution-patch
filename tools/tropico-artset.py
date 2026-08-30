@@ -441,7 +441,7 @@ def main():
     #
     # Worth having even though this tool is no longer shipped: it is the ORACLE the
     # C port is diffed against at every stage, so its runtime is paid on every run of
-    # probes/artgen_oracle.py.
+    # dev/probes/artgen_oracle.py.
     _blobs = {}
     for name, e in names:
         blob = _blobs.get(e['archive'])

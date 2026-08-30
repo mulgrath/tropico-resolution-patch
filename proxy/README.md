@@ -1,10 +1,10 @@
 # tropico_fix — runtime patcher (binkw32.dll proxy)
 
-Applies every fix from `../FINDINGS.md` to a **stock, unmodified** `Tropico.EXE` at
+Applies every fix from `../dev/FINDINGS.md` to a **stock, unmodified** `Tropico.EXE` at
 runtime, so nothing of PopTop's is redistributed and the DRM-wrapped Steam build is
 covered too. Nothing on disk is patched: the game is adjusted in memory, each run.
 
-Every address below is derived in `FINDINGS.md` — that file, not this one, is the
+Every address below is derived in `../dev/FINDINGS.md` — that file, not this one, is the
 record of how each was found.
 
 ## Install
@@ -94,7 +94,7 @@ Force=1
 
 Beyond those, the proxy reads a large number of **research knobs** — `[VText]`,
 `[Menu]`, `[Chrome]`, `[Hardware]`, probe and logging switches — used to vary things
-under test. `TESTING.md` depends on them. They are not part of the supported surface,
+under test. `../dev/TESTING.md` depends on them. They are not part of the supported surface,
 and players never set them.
 
 ## Why binkw32, and why not DllMain

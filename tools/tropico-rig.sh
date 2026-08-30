@@ -66,7 +66,7 @@ cleanup() {
   echo
   echo "== cleaning up"
   # The wineserver is bound to the display it started on. Leaving one attached to a
-  # dead nested server is the stale-wineserver trap in TESTING.md, and it breaks the
+  # dead nested server is the stale-wineserver trap in dev/TESTING.md, and it breaks the
   # NEXT normal launch rather than this one -- which is what makes it so confusing.
   DISPLAY="$DISP" wineserver -k 2>/dev/null || true
   [ -n "$XPID" ]  && kill "$XPID"  2>/dev/null || true

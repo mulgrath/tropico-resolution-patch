@@ -96,8 +96,8 @@ the running game in memory. It never modifies `Tropico.EXE` or the game archives
 
 - `proxy/` — the C source of everything that ships
 - `tools/` — the Linux launcher, and the research scripts
-- `FINDINGS.md` — the reverse-engineering notes: every address, with the evidence
-- `TESTING.md` — how to test this without fooling yourself
+- `dev/FINDINGS.md` — the reverse-engineering notes: every address, with the evidence
+- `dev/TESTING.md` — how to test this without fooling yourself
 
 The build is reproducible, so you can check the DLL in the release against one you
 build yourself and expect an exact match (needs `mingw-w64`):

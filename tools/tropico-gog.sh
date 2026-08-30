@@ -3,7 +3,7 @@
 #
 # This script exists to vary things under test, and its defaults reflect that: it
 # brings up a Wine VIRTUAL DESKTOP unless TROPICO_NODESK=1, and exposes a dozen
-# research knobs (TROPICO_RES, TROPICO_LOG, TROPICO_FIX_DISABLE, ...). TESTING.md
+# research knobs (TROPICO_RES, TROPICO_LOG, TROPICO_FIX_DISABLE, ...). dev/TESTING.md
 # depends on all of it. Do not "clean it up" into a launcher, and do not hand it
 # to anyone who just wants to play -- the virtual-desktop default alone is the
 # configuration section 13 proved we do not need.
@@ -128,7 +128,7 @@ wineserver -k 2>/dev/null; wineserver -w 2>/dev/null
 if [ -n "${TROPICO_RES:-}" ]; then
   # The GOG build keeps the live CFG in data2/; the Steam build has one in BOTH the
   # root and data2/. Write every copy that exists -- writing the wrong one looks exactly
-  # like a test that failed, which is trap #1 in TESTING.md.
+  # like a test that failed, which is trap #1 in dev/TESTING.md.
   CFGS=""
   for c in "$GAMEDIR/data2/TROPICO.CFG" "$GAMEDIR/TROPICO.CFG"; do
     [ -f "$c" ] && CFGS="$CFGS|$c"
