@@ -181,6 +181,39 @@ static int patch_force_fullscreen(void);
 static int running_under_wine(void);
 static int g_force_fs = 1;   /* s79: never let the engine enter windowed mode */
 static int g_fs_clamped;     /* how many times the clamp has fired */
+/* ------------------------------------------------------------ shared primitives
+ *
+ * hook_import redirects one entry in the main module's import table. It was written
+ * inside the cursor investigation because that is what first needed it, but it is
+ * general and has callers that outlive that code, so it lives here.
+ */
+static int poke(void *dst, const void *src, SIZE_T len);  /* defined below */
+
+/* Same IAT walk as the GetDeviceCaps hook, parameterised. */
+static void *hook_import(const char *dll, const char *fn, void *replacement, void **real)
+{
+    BYTE *base = (BYTE *)GetModuleHandleA(NULL);
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
+    IMAGE_NT_HEADERS *nt  = (IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+    DWORD rva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (!rva) return NULL;
+    for (IMAGE_IMPORT_DESCRIPTOR *imp = (IMAGE_IMPORT_DESCRIPTOR *)(base + rva); imp->Name; imp++) {
+        if (_stricmp((const char *)(base + imp->Name), dll)) continue;
+        IMAGE_THUNK_DATA *oft = (IMAGE_THUNK_DATA *)(base + imp->OriginalFirstThunk);
+        IMAGE_THUNK_DATA *ft  = (IMAGE_THUNK_DATA *)(base + imp->FirstThunk);
+        for (; oft->u1.AddressOfData; oft++, ft++) {
+            IMAGE_IMPORT_BY_NAME *ibn;
+            if (oft->u1.Ordinal & IMAGE_ORDINAL_FLAG) continue;
+            ibn = (IMAGE_IMPORT_BY_NAME *)(base + oft->u1.AddressOfData);
+            if (strcmp((const char *)ibn->Name, fn)) continue;
+            *real = (void *)ft->u1.Function;
+            if (!poke(&ft->u1.Function, &replacement, sizeof replacement)) return NULL;
+            return (void *)&ft->u1.Function;
+        }
+    }
+    return NULL;
+}
+
 /* -------------------------------------------- s118: choose the DEVICE, not the primary
  *
  * MEASURED ON WINDOWS 11, and it is the result the whole s113/s114 apparatus was
@@ -1792,31 +1825,6 @@ static BOOL WINAPI hook_GetCursorPos(LPPOINT pt)
         }
     }
     return r;
-}
-
-/* Same IAT walk as the GetDeviceCaps hook, parameterised. */
-static void *hook_import(const char *dll, const char *fn, void *replacement, void **real)
-{
-    BYTE *base = (BYTE *)GetModuleHandleA(NULL);
-    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
-    IMAGE_NT_HEADERS *nt  = (IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
-    DWORD rva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
-    if (!rva) return NULL;
-    for (IMAGE_IMPORT_DESCRIPTOR *imp = (IMAGE_IMPORT_DESCRIPTOR *)(base + rva); imp->Name; imp++) {
-        if (_stricmp((const char *)(base + imp->Name), dll)) continue;
-        IMAGE_THUNK_DATA *oft = (IMAGE_THUNK_DATA *)(base + imp->OriginalFirstThunk);
-        IMAGE_THUNK_DATA *ft  = (IMAGE_THUNK_DATA *)(base + imp->FirstThunk);
-        for (; oft->u1.AddressOfData; oft++, ft++) {
-            IMAGE_IMPORT_BY_NAME *ibn;
-            if (oft->u1.Ordinal & IMAGE_ORDINAL_FLAG) continue;
-            ibn = (IMAGE_IMPORT_BY_NAME *)(base + oft->u1.AddressOfData);
-            if (strcmp((const char *)ibn->Name, fn)) continue;
-            *real = (void *)ft->u1.Function;
-            if (!poke(&ft->u1.Function, &replacement, sizeof replacement)) return NULL;
-            return (void *)&ft->u1.Function;
-        }
-    }
-    return NULL;
 }
 
 /* ------------------------------------------------- s114: the DirectDraw probe
