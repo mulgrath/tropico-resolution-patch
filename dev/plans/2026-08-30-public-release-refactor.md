@@ -48,7 +48,7 @@ import re, sys, argparse
 SRC = "proxy/tropico_fix.c"
 
 def sections(path=SRC):
-    lines = open(path).read().split("\n")
+    lines = open(path).read().rstrip("\n").split("\n")
     hits = [(i + 1, l) for i, l in enumerate(lines)
             if re.match(r"^/\* (-{3,}|={3,})", l)]
     out = []
@@ -100,6 +100,11 @@ sed -i '/^static DWORD g_slot_out;$/d' proxy/tropico_fix.c
 
 - [ ] **Step 3: Write the baseline capture**
 
+It resolves the 21 delete ranges through `sections.py`, so removing `g_slot_out`
+in Step 2 — or any other edit above line 1634 — cannot shift a range out from
+under it. It asserts the ranges total 3,523 lines, which fails loudly if a banner
+stops matching.
+
 The delete ranges are hard-coded here **once**, against the original file, and are never used again after this task. They exist only to compute which addresses belong to kept code.
 
 ```bash
@@ -119,11 +124,27 @@ i686-w64-mingw32-objdump -p /tmp/refactor-baseline.dll \
   | awk '{print $NF}' | sort > "$B/exports.txt"
 
 python3 - <<'PY' > "$B/addresses-kept.txt"
-import re
-DEL = [(1634,1822),(3744,4173),(4276,5180),(5220,6072),(6140,6276),
-       (6908,6977),(7161,7379),(7900,8157),(8161,8478),(8479,8622)]
-lines = open("proxy/tropico_fix.c").read().split("\n")
-inr = lambda n: any(a <= n <= b for a, b in DEL)
+# Ranges come from the section banners, never from hard-coded line numbers:
+# ANY edit before a section shifts its lines, and a baseline that is off by one
+# silently misclassifies a boundary line's addresses.
+import re, subprocess
+BANNERS = ["the cursor probe","which call sites read the cursor","the virtual desktop",
+ "Wine's cursor vs X's cursor","the live-memory scan","targeted poke","write watch",
+ "framebuffer pixel watch","telemetry for the viewport fix","the HUD shrink probe",
+ "s65 probe","rotated-text ENTRY probe","horizontal-text probe","apply-video probe",
+ "the movie blit probe","the HUD movie probe","the map-preview probe",
+ "sweep every surface access","the blit census","file-order probe","Bink instrumentation"]
+DEL = []
+for b in BANNERS:
+    out = subprocess.run(["./dev/tools/sections.py","--range",b],
+                         capture_output=True, text=True)
+    assert out.returncode == 0, f"banner not unique: {b}\n{out.stderr}"
+    a, z = map(int, out.stdout.split())
+    DEL.append((a, z))
+total = sum(z - a + 1 for a, z in DEL)
+assert total == 3523, f"delete ranges cover {total} lines, expected 3523"
+lines = open("proxy/tropico_fix.c").read().rstrip("\n").split("\n")
+inr = lambda n: any(a <= n <= z for a, z in DEL)
 rx = re.compile(r"0x[0-9a-fA-F]{6,8}")
 kept = {m.lower() for i, l in enumerate(lines, 1) if not inr(i) for m in rx.findall(l)}
 print("\n".join(sorted(kept)))
