@@ -49,7 +49,7 @@ Three things, in order of risk:
 | `FINDINGS` citations in C source | 54 (+10 in `artgen.c`) |
 | `FINDINGS` citations in shipped `tropico-fix.ini` | 16 |
 | Shipped ini length | 225 lines, mostly essay |
-| Stale scratch DLLs tracked in `proxy/` | 12 (~1.3 MB) |
+| Stale scratch DLLs tracked in `proxy/` | 16 (~1.9 MB) |
 | Current build | clean but for one warning (`g_slot_out` unused) |
 | Build reproducibility | confirmed — identical source gives identical bytes |
 
@@ -250,7 +250,7 @@ dev/
   WINDOWS-TRIP.bat       moved from packaging/windows/ (not shipped; verified)
 ```
 
-**Deleted:** the 12 scratch DLLs in `proxy/` (`binkw32_chrome2..8`, `_hudprobe`,
+**Deleted:** the 16 scratch DLLs in `proxy/` (`binkw32_chrome2..8`, `_hudprobe`,
 `_hudstyle`, `_scan`, `_test`, `_prev_s36`, `_prev_s43`, `_ddprobe`, `_vtext`), the
 four `HANDOFF*.md`, and `WINDOWS-TRIP.md`.
 
