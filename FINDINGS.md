@@ -10612,3 +10612,58 @@ consecutive launches, three headers, 13.6 KB.
 **The general lesson is s110.2's and it did not travel:** a fix filed against one
 component of a project is not a fix, if the same defect lives in a sibling. Both
 logs are now searched for `NEW RUN` and both survive a relaunch.
+
+### 118.14 The first in-game run: everything worked, and every frame was #150
+
+Owner, Windows, four launches with `DeviceSelect=1`. Every link fired:
+
+```
+  [display] launched from \\.\DISPLAY2 (launch point -1040,920, via the focused window)
+[+] [display] running at \\.\DISPLAY2's own mode 1920x1080
+[+] [devsel] \\.\DISPLAY2 resolves to device {6768555a-3106-11d0-b971-00aa00342f9f}
+[+] [devsel] DirectDrawCreateEx: NULL -> {6768555a-...}
+  [display] DeviceSelect owns the monitor, so PinToPrimary is standing down
+```
+
+118.10's focused-window detection answered correctly, the GUID resolved, the
+substitution happened, the art matched the adopted mode, and the run on the
+primary correctly reported *"already the primary -- no device to substitute"* and
+played normally. **The mechanism is not the problem.** The game still showed #150
+on every frame on the secondary.
+
+**The launch point names the cause: `-1040`.** `\\.\DISPLAY2` sits at
+`(-1920,357)` in virtual-screen space. s115.4 measured how this engine presents --
+`Blt(primary <- offscreen)` with **the destination rect being the game's window
+rect in SCREEN coordinates**. That is correct on the primary, where the monitor
+origin *is* (0,0), and wrong everywhere else. With the device substituted, the
+destination surface is DISPLAY2's own `(0,0)-(1920,1080)` while the game is still
+asking for `(-1920,357)-(0,1437)`. Entirely outside it. Every frame.
+
+The sign is irrelevant -- a monitor at `+2560` fails identically. **The game
+assumes the monitor origin is (0,0), which is only ever true for the primary.**
+
+**s114's probe could not have caught this, and that is the lesson.** Its blits used
+explicit surface-relative rects (`dst(0,0,1920,1080)`), so it proved the DEVICE
+works and never exercised the one thing the GAME does differently. A probe that
+models the caller's *capability* but not the caller's *arguments* proves less than
+it appears to. It ranks with s115.1: the gap between "the API supports this" and
+"this program does this" is where both of this project's expensive detours lived.
+
+**The fix is the translation the game cannot do for itself.** `hook_Blt` -- already
+present for s117 -- subtracts the target monitor's origin from the destination
+rect, and only when DeviceSelect placed the game on a monitor whose origin is not
+(0,0). A `NULL` destination means "the whole surface" and is left exactly as it is.
+On the primary, and with DeviceSelect off, `g_devsel_xlate` is 0 and the hook is
+the forwarding one it always was.
+
+The first three translations are logged before and after, deliberately: if the
+incoming rects are not the off-surface ones predicted here, the theory was wrong
+and the log says so rather than quietly succeeding for some other reason.
+
+**What this makes the feature.** Not the clean answer -- the clean answer would be
+an engine that asks for surface coordinates, and it does not exist. This is a
+compromise: one substituted argument, one translated rectangle, both confined to
+the case where the player asked to play on a non-primary monitor. Against that, it
+retires the whole of s113's apparatus on Windows and changes nothing about the
+player's computer. That trade is worth making, and calling it a compromise rather
+than a solution is the honest description.

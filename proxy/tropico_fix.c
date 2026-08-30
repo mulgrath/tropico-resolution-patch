@@ -215,6 +215,25 @@ static char  g_devsel_want[64];     /* the \\.\DISPLAYn choose_monitor picked */
 static GUID  g_devsel_guid;
 static int   g_devsel_have;         /* the GUID was resolved */
 static int   g_devsel_tried;        /* resolution has been attempted; do not repeat */
+/* s118.14: the target monitor's origin in VIRTUAL-SCREEN space, and the reason the
+ * first in-game run of this feature failed with #150 on every frame.
+ *
+ * s115.4 measured how this engine presents: Blt(primary <- offscreen), with the
+ * destination rect being the game's window rect IN SCREEN COORDINATES. That is
+ * fine on the primary, where the monitor origin IS (0,0) -- and it is wrong
+ * everywhere else. Point the game at \\.\DISPLAY2 sitting at (-1920,357) and its
+ * destination rect is (-1920,357)-(0,1437) inside a surface that spans
+ * (0,0)-(1920,1080). Entirely out of bounds, every frame, which is #150.
+ *
+ * The sign is not the point: a monitor at +2560 fails identically. THE GAME
+ * ASSUMES THE MONITOR ORIGIN IS (0,0), WHICH IS ONLY EVER TRUE FOR THE PRIMARY.
+ *
+ * s114's probe could not have caught this. Its blits used explicit
+ * surface-relative rects, so it proved the DEVICE works and never exercised the
+ * one thing the GAME does differently. */
+static long  g_devsel_ox, g_devsel_oy;
+static int   g_devsel_xlate;        /* the translation is armed */
+static int   g_devsel_logged;
 
 static int g_ini_mode_unusable;
 static int g_artgen_enabled = 1;   /* [Art] Generate -- see artgen.c */
@@ -1869,9 +1888,9 @@ static const char *ddp_guid(const GUID *g)
  * is how that claim gets extended to the resolutions and the creation itself. */
 #define DDP_CALLER() (__builtin_return_address(0))
 
-/* s117, defined below with the frame counter: the createex wrapper is the only
- * place that sees the IDirectDraw7 before the game uses it. */
-static void fc_attach(IDirectDraw7 *dd);
+/* Defined below: the createex wrapper is the only place that sees the
+ * IDirectDraw7 before the game uses it. s117 and s118.14 both ride it. */
+static void dd_attach(IDirectDraw7 *dd);
 
 static HRESULT WINAPI ddp_create(GUID *guid, void **out, IUnknown *unk)
 {
@@ -1956,6 +1975,15 @@ static HRESULT WINAPI ddp_createex(GUID *guid, void **out, const IID *iid, IUnkn
             logf_("[+] [devsel] DirectDrawCreateEx: NULL -> %s (%s). The game will render"
                   " on that monitor; the OS primary is NOT being changed.",
                   ddp_guid(guid), g_devsel_want);
+            if (g_devsel_ox || g_devsel_oy) {
+                g_devsel_xlate = 1;
+                logf_("[+] [devsel] %s is at (%ld,%ld) in screen space and this device's"
+                      " surface is 0,0-based, so every Blt destination is translated by"
+                      " (%ld,%ld). Without this the game blits outside its own surface"
+                      " and every frame is #150 (FINDINGS 118.14).",
+                      g_devsel_want, g_devsel_ox, g_devsel_oy,
+                      -g_devsel_ox, -g_devsel_oy);
+            }
         }
     }
 
@@ -1970,7 +1998,7 @@ static HRESULT WINAPI ddp_createex(GUID *guid, void **out, const IID *iid, IUnkn
         logf_("[ddprobe]   NOTE: NULL device.");
     /* s117: this is the only moment the object exists and nothing has been asked
      * of it yet, so it is the only safe moment to patch its vtable. */
-    if (hr == 0 && out && *out) fc_attach((IDirectDraw7 *)*out);
+    if (hr == 0 && out && *out) dd_attach((IDirectDraw7 *)*out);
     return hr;
 }
 
@@ -2152,27 +2180,57 @@ static void fc_tick(void)
     memset(g_fc_hist, 0, sizeof g_fc_hist);
 }
 
-/* s117: note that a frame happened, and forward the blit untouched. The arguments
- * are not read and not rewritten -- the hook exists to count, and a counter that
- * changed what it counted would be worthless. */
+/* Two jobs, and only one of them touches anything.
+ *
+ * s117 counts: the arguments are not read and not rewritten, because a counter
+ * that changed what it counted would be worthless.
+ *
+ * s118.14 translates, and ONLY when DeviceSelect put the game on a monitor whose
+ * origin is not (0,0). A NULL destination means "the whole surface" and is left
+ * exactly as it is -- rewriting it would invent a rectangle the game did not ask
+ * for. On the primary, and with DeviceSelect off, g_devsel_xlate is 0 and this is
+ * the same forwarding hook it was before. */
 static HRESULT WINAPI hook_Blt(IDirectDrawSurface7 *self, RECT *dst, IDirectDrawSurface7 *src,
                                RECT *srcr, DWORD flags, DDBLTFX *fx)
 {
-    if (g_fc && self && self == g_fc_primary) fc_tick();
+    RECT r;
+
+    if (self && self == g_fc_primary) {
+        if (g_fc) fc_tick();
+        if (g_devsel_xlate && dst) {
+            r = *dst;
+            r.left   -= g_devsel_ox; r.right  -= g_devsel_ox;
+            r.top    -= g_devsel_oy; r.bottom -= g_devsel_oy;
+            /* The first few, before and after. This is the measurement that proves
+             * the diagnosis as well as the fix: if the incoming rects are not the
+             * off-surface ones 118.14 predicts, the theory was wrong and the log
+             * says so rather than quietly succeeding for another reason. */
+            if (g_devsel_logged < 3) {
+                logf_("  [devsel] Blt dst (%ld,%ld)-(%ld,%ld) -> (%ld,%ld)-(%ld,%ld)",
+                      dst->left, dst->top, dst->right, dst->bottom,
+                      r.left, r.top, r.right, r.bottom);
+                if (++g_devsel_logged == 3)
+                    logf_("  [devsel] (further translations not logged)");
+            }
+            dst = &r;
+        }
+    }
     return g_real_blt(self, dst, src, srcr, flags, fx);
 }
 
-/* s117: the only thing the counter needs from CreateSurface -- which surface the
- * per-frame Blt will be aimed at. The descriptor is forwarded EXACTLY as the game
- * wrote it and the surface that comes back is the game's own; all this does is
- * remember it and hook Blt on it, once. */
+/* Which surface the per-frame Blt will be aimed at -- the one thing both consumers
+ * need from CreateSurface. The descriptor is forwarded EXACTLY as the game wrote
+ * it and the surface that comes back is the game's own; all this does is remember
+ * it and hook Blt on it, once. s117 then counts on it, s118.14 translates on it,
+ * and with both off it is never hooked at all. */
 static HRESULT WINAPI hook_CreateSurface(IDirectDraw7 *self, DDSURFACEDESC2 *desc,
                                          IDirectDrawSurface7 **out, IUnknown *unk)
 {
     DDSURFACEDESC2 sd;
     HRESULT hr = g_real_cs(self, desc, out, unk);
 
-    if (!g_fc || g_fc_primary || hr != DD_OK || !desc || !out || !*out) return hr;
+    if ((!g_fc && !g_devsel_xlate) || g_fc_primary || hr != DD_OK || !desc || !out || !*out)
+        return hr;
     if (!(desc->dwFlags & DDSD_CAPS) || !(desc->ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE))
         return hr;
 
@@ -2186,38 +2244,46 @@ static HRESULT WINAPI hook_CreateSurface(IDirectDraw7 *self, DDSURFACEDESC2 *des
     /* &lpVtbl->Blt, not vt[5]: the member is checked by the compiler against
      * ddraw.h, an index is a number I could miscount, and a wrong one would corrupt
      * an unrelated method. */
-    if (hook_slot((void **)&(*out)->lpVtbl->Blt, (void *)hook_Blt, (void **)&g_real_blt))
-        logf_("[+] [fps] counting frames on the primary %lux%lu %lubpp (%p)."
-              " A report follows every %d s.",
-              (unsigned long)g_fc_w, (unsigned long)g_fc_h,
-              (unsigned long)g_fc_bpp, (void *)*out, g_fc_interval);
-    else {
-        logf_("[x] [fps] could not hook Blt -- no frames will be counted");
+    if (hook_slot((void **)&(*out)->lpVtbl->Blt, (void *)hook_Blt, (void **)&g_real_blt)) {
+        if (g_fc)
+            logf_("[+] [fps] counting frames on the primary %lux%lu %lubpp (%p)."
+                  " A report follows every %d s.",
+                  (unsigned long)g_fc_w, (unsigned long)g_fc_h,
+                  (unsigned long)g_fc_bpp, (void *)*out, g_fc_interval);
+        if (g_devsel_xlate)
+            logf_("[+] [devsel] Blt hooked on the primary surface %lux%lu (%p) --"
+                  " destinations will be translated into it.",
+                  (unsigned long)g_fc_w, (unsigned long)g_fc_h, (void *)*out);
+    } else {
+        logf_("[x] [fps/devsel] could not hook Blt. Frame counting is off, and if"
+              " DeviceSelect is on the game will blit outside its surface and show"
+              " DirectDraw error #150 -- set [Display] DeviceSelect=0.");
         g_fc = 0;
+        g_devsel_xlate = 0;
     }
     return hr;
 }
 
-/* s117: attach the counter to the IDirectDraw7 the moment it is created, which is
- * the only moment it can be reached -- the game keeps it in a global at 0x61c80c
- * and never hands it to anyone. One method is patched. The cooperative level, both
- * mode calls and the blit itself stay the game's own, so nothing being measured
- * has been altered by measuring it. */
-static void fc_attach(IDirectDraw7 *dd)
+/* Attach to the IDirectDraw7 the moment it is created, which is the only moment it
+ * can be reached -- the game keeps it in a global at 0x61c80c and never hands it to
+ * anyone. ONE method is patched, and only to learn which surface is the primary.
+ * The cooperative level and both mode calls stay the game's own. */
+static void dd_attach(IDirectDraw7 *dd)
 {
-    if (!g_fc || !dd || g_real_cs) return;
+    if ((!g_fc && !g_devsel_xlate) || !dd || g_real_cs) return;
 
     /* By member, not by index -- see the note in hook_CreateSurface. */
     if (!hook_slot((void **)&dd->lpVtbl->CreateSurface, (void *)hook_CreateSurface,
                    (void **)&g_real_cs)) {
-        logf_("[x] [fps] could not patch IDirectDraw7::CreateSurface --"
-              " frame counting is OFF");
+        logf_("[x] [fps/devsel] could not patch IDirectDraw7::CreateSurface --"
+              " frame counting is OFF, and so is the DeviceSelect translation");
         g_fc = 0;
+        g_devsel_xlate = 0;
         return;
     }
-    logf_("[*] [fps] IDirectDraw7::CreateSurface hooked, to find the primary."
-          " Nothing else is intercepted -- the cooperative level, both mode calls"
-          " and the blit itself are all forwarded untouched.");
+    logf_("[*] [dd] IDirectDraw7::CreateSurface hooked, to find the primary."
+          " Nothing else is intercepted -- the cooperative level and both mode"
+          " calls are forwarded untouched.");
 }
 
 static HMODULE WINAPI hook_LoadLibraryA(LPCSTR name)
@@ -3549,6 +3615,8 @@ static void choose_monitor(void)
             g_devsel = 0;
         } else {
             snprintf(g_devsel_want, sizeof g_devsel_want, "%s", outs[chosen].name);
+            g_devsel_ox = outs[chosen].x;
+            g_devsel_oy = outs[chosen].y;
             logf_("[+] [devsel] target %s %lux%lu -- the game will be pointed at that"
                   " DEVICE and the primary %s is NOT being changed (FINDINGS 118)",
                   outs[chosen].name, (unsigned long)outs[chosen].w,
