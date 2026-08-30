@@ -1374,6 +1374,33 @@ The largest prose task. Comments must stand on their own: drop the markers, **re
 **Files:**
 - Modify: `proxy/tropico_fix.c`, `proxy/artgen.c`, `proxy/artgen.h`, `proxy/build.sh`, `proxy/README.md`
 
+**PRIORITY: 11 of these citations are inside `logf_()` strings, not comments.**
+They are printed into `tropico-fix.log` — the file the README tells users to attach
+to a bug report — so they are user-facing output, not developer prose. Fix these
+first. They include the log's opening line:
+
+```c
+logf_("tropico_fix (binkw32 proxy) -- see FINDINGS.md for every address used here");
+```
+
+which points a user at a document that is not in their package. Find them all with:
+
+```bash
+python3 - <<'EOF'
+import re
+src = open('proxy/tropico_fix.c').read()
+code = re.sub(r'/\*.*?\*/', '', src, flags=re.S)   # comments stripped
+for l in code.split('\n'):
+    if re.search(r'FINDINGS|\bs[0-9]{2,3}[.: ]|§[0-9]+', l):
+        print(l.strip())
+EOF
+```
+
+Rewrite each so the message still says what happened and what to do, without naming
+a document the reader does not have. Where a citation was the only thing explaining
+*why*, put the reason in the message instead — these lines exist to be read by
+someone whose game just misbehaved.
+
 - [ ] **Step 1: Measure what is left after the deletions**
 
 ```bash
