@@ -10161,6 +10161,51 @@ the last.
 real.** s114's kit is staged. That trip should happen before any of this is
 reconsidered.
 
+### 115.10 REMOVED from the source, and where it went
+
+s117.1 measured the one objection this section had left unmeasured, and the
+verdict did not survive it. So on 2026-08-30 the presenter and the borderless
+window placement were **deleted** rather than left sitting behind `Borderless=0`:
+roughly 670 lines that no default path reaches, out of a file that was 8,891 long,
+documenting a design this section recommends against. Dormant code that argues
+for something the findings argue against is a cost paid by every future reader.
+
+**What went.** The `IDirectDraw7` mode interceptions (`SetCooperativeLevel`,
+`Set`/`GetDisplayMode`), the substituted primary surface and `pr_force_format`,
+`present_frame` and its convert-and-`StretchDIBits`, `hook_Unlock`,
+`place_window_borderless` and the `g_bl_*` state, the `choose_monitor` gate split,
+the `vd_detect` exclusion, the `launch_mode_check` override, and
+`tools/tropico-gog.sh`'s `TROPICO_NODESK` auto-arming. `[Display] Borderless` is
+read nowhere and setting it now does nothing.
+
+**What stayed.** s114's `[DDProbe]` interception, and s117's frame counter, which
+rides it. The counter came out **simpler rather than poorer**, which is the test
+115.9's independence claim always had to pass: `CreateSurface` forwards the
+descriptor verbatim and `Blt` forwards untouched, which is exactly what both did
+with `Borderless=0`. `present_attach` is now `fc_attach` and patches one method.
+
+**The check that this disturbed nothing else** is worth stating, because "removed
+a feature" and "removed a feature and something else with it" look identical in a
+diff this size: `choose_monitor`, `vd_detect`, `launch_mode_check`,
+`pin_window_to_primary`, `pin_thread` and `slotprobe_hook` are all **byte-identical
+to their pre-s115 text**, `tools/tropico-gog.sh` is byte-identical to its own, and
+the diff against that revision is now **purely additive** -- 441 lines added to
+`proxy/tropico_fix.c`, none removed. The compiler's warning set is unchanged but
+for `g_bl_clamped`, which was borderless's own.
+
+**Where it is.** Commit `4c180cf`, on branch 1.3, with the DLL that produced
+`logs/fps-presenter-2560x1440-gog-wine.log.gz` committed beside it as
+`proxy/binkw32_borderless.dll`, so 117.1's numbers stay reproducible without a
+rebuild. `git show 4c180cf:proxy/tropico_fix.c` is the whole of it. Anyone reviving
+this should start from **115.4's specification**, not from that code -- 115.8's
+`GetDeviceCaps` gate was never measured, and the presenter has never once rendered
+a non-primary monitor at that monitor's own resolution, which is the only thing it
+existed to do.
+
+**The recommendation is unchanged from 115.9's last paragraph.** s114's kit is
+staged in the Steam folder and the cheap routes are still untested on the platform
+where the problem is real. That trip, not this code, is the next step.
+
 ## 117. The frame counter, and the number that should have come first
 
 s115.9 closed the presenter on a cost objection and then admitted, in its own last

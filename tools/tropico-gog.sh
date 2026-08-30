@@ -107,19 +107,6 @@ echo "== prefix : $WINEPREFIX"
 # The proxy now measures the display itself and generates matching art before the menu
 # opens, so there is nothing to compare and nothing to warn about (FINDINGS 96/97).
 
-# s115. Borderless lays the game's own window over the chosen monitor, which needs
-# the REAL display: inside a virtual desktop the process sees one screen at 0,0 and
-# there is no second monitor to target. So Borderless=1 in the ini implies
-# TROPICO_NODESK -- otherwise the launcher would quietly arm the one thing that stops
-# the feature working, and the proxy would refuse and say so on every launch.
-# An explicit TROPICO_NODESK= still wins; this only supplies a default.
-if [ -z "${TROPICO_NODESK:-}" ] &&
-   grep -qiE '^[[:space:]]*Borderless[[:space:]]*=[[:space:]]*[1-9]' \
-        "$GAMEDIR/tropico-fix.ini" 2>/dev/null; then
-  echo "== borderless: running on the real display (no virtual desktop)"
-  TROPICO_NODESK=1
-fi
-
 if [ -n "${TROPICO_NODESK:-}" ]; then
   # No Wine virtual desktop: the game talks to the real display. Measured 2026-08-19 --
   # 16bpp modes enumerate and set fine without one; only modes the monitor lacks (notably
