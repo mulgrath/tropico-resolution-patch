@@ -56,6 +56,61 @@ static void logf_(const char *fmt, ...)
     fclose(f);
 }
 
+/* APPEND, NEVER TRUNCATE -- the proxy's half of FINDINGS 110.2.
+ *
+ * DllMain used to DeleteFileA() this log on every run. That is exactly the defect
+ * 110.1 names in the launcher and 110.2 fixed there, left standing in the other
+ * component: "it came up wrong, so I ran it again and it was right" is the single
+ * commonest sequence this patch is involved in, and the second run destroyed the
+ * log of the first. Every time. The only run whose evidence ever survived was the
+ * one that worked.
+ *
+ * Monitor selection is a TWO-LAUNCH symptom by nature -- launch on one screen,
+ * then the other -- so it cannot be investigated with a one-launch log at all.
+ * Same cap and shape as the launcher's, so the two files read alike.
+ *
+ * The cap matters as much as the appending: a log that grows without bound is one
+ * nobody will attach to a bug report. */
+#define LOG_CAP  (64 * 1024)
+#define LOG_KEEP (48 * 1024)
+
+static void log_begin(void)
+{
+    char *buf = NULL;
+    long sz = 0;
+    SYSTEMTIME st;
+    FILE *f = fopen(g_logpath, "rb");
+
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        sz = ftell(f);
+        if (sz > LOG_CAP && (buf = (char *)malloc(LOG_KEEP)) != NULL) {
+            fseek(f, sz - LOG_KEEP, SEEK_SET);
+            if (fread(buf, 1, LOG_KEEP, f) != LOG_KEEP) { free(buf); buf = NULL; }
+        }
+        fclose(f);
+    }
+    if (buf) {
+        /* Resume at a line boundary. A log that begins mid-sentence reads as
+         * corruption and invites the wrong question. */
+        long i = 0;
+        while (i < LOG_KEEP && buf[i] != '\n') i++;
+        if (i < LOG_KEEP) i++;
+        f = fopen(g_logpath, "wb");
+        if (f) {
+            fprintf(f, "[... earlier runs trimmed; this file is capped at %d KB ...]\n",
+                    LOG_CAP / 1024);
+            fwrite(buf + i, 1, (size_t)(LOG_KEEP - i), f);
+            fclose(f);
+        }
+        free(buf);
+    }
+    GetLocalTime(&st);
+    logf_("");
+    logf_("==== %04d-%02d-%02d %02d:%02d:%02d  NEW RUN ====",
+          st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+}
+
 /* --------------------------------------------------------- module / sections */
 
 static BYTE *g_base;
@@ -8206,7 +8261,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     char *slash = strrchr(g_dir, '\\');
     if (slash) *slash = 0;
     snprintf(g_logpath, sizeof g_logpath, "%s\\tropico-fix.log", g_dir);
-    DeleteFileA(g_logpath);
+    log_begin();
     logf_("tropico_fix (binkw32 proxy) -- see FINDINGS.md for every address used here");
 
     /* USER32 is initialised before us: the exe's import descriptors are ordered

@@ -10591,3 +10591,24 @@ single frame of Tropico rendered through a substituted device.
 and the evidence for doing so is one green run: the game opens on the launch
 monitor at that monitor's resolution, the mouse agrees with the picture, and the
 primary is untouched. Until that run exists, the default is the honest one.
+
+### 118.13 The proxy truncated its own log on every run, too
+
+s110.1 found the launcher doing this and s110.2 fixed it there. The proxy was
+still calling `DeleteFileA()` on `tropico-fix.log` from `DllMain` -- the same
+defect, left standing in the other component, for another six weeks.
+
+It surfaced when the owner asked whether the DeviceSelect check could just be
+"run it from Steam and alternate between displays". It can, and that is a better
+test than any harness because it is the real user journey -- but **every launch
+would have destroyed the evidence of the one before it**, and monitor selection
+is a two-launch symptom by nature.
+
+`log_begin()` now appends, caps the file at 64 KB by keeping the last 48 KB from a
+line boundary, and writes one `==== <timestamp> NEW RUN ====` header per launch.
+Same shape as the launcher's, so the two files read alike. Measured: three
+consecutive launches, three headers, 13.6 KB.
+
+**The general lesson is s110.2's and it did not travel:** a fix filed against one
+component of a project is not a fix, if the same defect lives in a sibling. Both
+logs are now searched for `NEW RUN` and both survive a relaunch.
