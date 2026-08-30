@@ -32,6 +32,7 @@
  */
 
 #include <windows.h>
+#include <ddraw.h>
 #include <stdio.h>
 #include "artgen.h"
 #include <tlhelp32.h>
@@ -124,6 +125,48 @@ static int g_slot_log;
 static int patch_force_fullscreen(void);
 static int g_force_fs = 1;   /* s79: never let the engine enter windowed mode */
 static int g_fs_clamped;     /* how many times the clamp has fired */
+
+/* ------------------------------------------------------- s115: borderless
+ *
+ * THE PROBLEM IT EXISTS FOR. DirectDraw fullscreen goes to the primary monitor
+ * and nothing this patch can say changes that -- s114 measured the two candidate
+ * levers, a per-device GUID and the window's monitor, and Wine honours neither on
+ * either of the two generations tested. So a player whose game monitor is not
+ * their primary has had exactly one option: let the patch make it primary, which
+ * on Windows writes the display database and is why s113.8 made it opt-in.
+ *
+ * Lying about the display is not a third option, and the reason is already in
+ * TESTING.md as trap 7: hooking GetDeviceCaps and friends changes what the game
+ * MEASURES without changing where the pixels GO, and the two disagreeing is
+ * exactly what produces #150. Which scanout a surface lands on is decided below
+ * user32, in the driver.
+ *
+ * SO STOP ASKING FOR FULLSCREEN. The game already contains a windowed renderer --
+ * s6 measured it: DDSCL_NORMAL, no SetDisplayMode, a clipper blit into an
+ * offscreen surface. Point that at a borderless window covering the chosen
+ * monitor and it is fullscreen in every way a player cares about, while asking
+ * the display system for nothing at all. No mode change, no primary, nothing to
+ * restore, and no watchdog to restore it with -- on either platform.
+ *
+ * WHY THIS IS NOT s79 COMING BACK. s79's brick has two causes and this path
+ * avoids both. The startup gate at 0x47c375 that skips the entire video bring-up
+ * is already gone -- patch_force_fullscreen() overwrites it with a store, so the
+ * branch does not exist to be taken. And the flag it stores stays 0, so nothing
+ * windowed is ever written to TROPICO.CFG; the windowed-ness is forced at the
+ * apply-video call site only, on the stack, for the life of the process.
+ *
+ * ONE CAVEAT, RECORDED RATHER THAN ENGINEERED AROUND. apply-video does write its
+ * arg3 into the settings object, so a session that SAVES settings while borderless
+ * leaves a windowed flag in the CFG. patch_force_fullscreen() heals that on every
+ * subsequent launch (s79.3), so the exposure is "enabled borderless, then removed
+ * the patch entirely" -- the same landmine a stock player gets from the checkbox.
+ * Worth fixing properly if this graduates from experiment; not worth it before. */
+static int   g_borderless;      /* [Display] Borderless */
+static int   g_bl_have;         /* a target monitor was chosen */
+static long  g_bl_ptx, g_bl_pty;/* target's centre, in WIN32 screen coordinates */
+static DWORD g_bl_w, g_bl_h;    /* target monitor size, for the fit check */
+static RECT  g_bl_rect;         /* resolved target rect; zero until first placement */
+static int   g_bl_placed, g_bl_moves, g_bl_clamped;
 static int g_ini_mode_unusable;
 static int g_artgen_enabled = 1;   /* [Art] Generate -- see artgen.c */
 static int g_pin_primary = 1;
@@ -1244,9 +1287,14 @@ static void apply_patches(void)
         /* s74: keep the window on the monitor Wine measures. On by default --
          * the failure it prevents is DDERR_INVALIDRECT, which is unreadable. */
         g_pin_primary = GetPrivateProfileIntA("Display", "PinToPrimary", 1, ip);
-        if (g_pin_primary) {
-            logf_("[+] [display] watching for the game window, to keep it on the monitor"
-                  " Wine measures (FINDINGS 74)");
+        /* s115: borderless needs the same watcher, for the opposite destination, so
+         * it arms the thread even when PinToPrimary is off. The dispatch is inside
+         * pin_window_to_primary(); only one of the two ever acts. */
+        if (g_pin_primary || g_borderless) {
+            logf_("[+] [display] watching for the game window, to %s (FINDINGS %s)",
+                  g_borderless ? "lay it over the chosen monitor"
+                               : "keep it on the monitor Wine measures",
+                  g_borderless ? "115" : "74");
             CloseHandle(CreateThread(NULL, 0, pin_thread, NULL, 0, NULL));
         }
         /* s79: windowed mode is the documented failure path (FINDINGS 6), and one
@@ -1707,6 +1755,812 @@ static void *hook_import(const char *dll, const char *fn, void *replacement, voi
         }
     }
     return NULL;
+}
+
+/* ------------------------------------------------- s114: the DirectDraw probe
+ *
+ * WHICH ENTRY POINT DOES THE GAME ACTUALLY OBTAIN, AND WITH WHAT ARGUMENTS?
+ *
+ * The question matters because of what it would license. If DirectDraw can be
+ * pointed at a monitor, the patch could open the game on the player's chosen
+ * screen WITHOUT making it primary -- retiring s113's whole apparatus: the
+ * SetPrimary opt-in, the state file, the ExitProcess hook, the 5 s deadline and
+ * the Linux xrandr watchdog. Substituting the device at creation is where that
+ * interception would go, so the first thing to establish is what there is to
+ * intercept.
+ *
+ * STATIC ANALYSIS IS ALREADY SPENT ON THIS. The binary carries the strings --
+ * "DDraw.dll", "DirectDrawCreate", "DirectDrawCreateEx", "DirectDrawEnumerateExA",
+ * adjacent at 0x5a8b6c -- but nothing in .text, .rdata or .data holds a pointer
+ * anywhere in that range, so the call site cannot be reached from the file. The
+ * file header above already records WHERE the library is loaded (0x52dbd0,
+ * called from 0x514e55) but not WHICH export is then resolved, nor with what.
+ * Only the running game can say.
+ *
+ * SO IT LOGS THE WHOLE CHAIN, AND WRAPS THE ENDS. Hooking GetProcAddress alone
+ * would report which names were LOOKED UP; the game asks for three and can only
+ * use one. So the returned pointers are replaced with wrappers that log the call
+ * and forward it unchanged. The GUID argument is the answer to the question that
+ * matters -- whether the game passes NULL, and therefore whether substituting a
+ * device GUID is a one-line change or a fight.
+ *
+ * IT CHANGES NOTHING. Every wrapper forwards its arguments untouched and returns
+ * what the real function returned. Off unless [DDProbe] Enable=1 asks for it.
+ *
+ * IT IS INSTALLED FROM DllMain, which the file header licenses: the IAT lives in
+ * .idata, which SteamStub leaves in the clear, and the ddraw load happens at
+ * 0x514e55 -- after the GetDeviceCaps that arms the patch pass, but there is no
+ * reason to cut it that fine when .idata is readable at load time. */
+
+static int g_ddp_enable;
+
+typedef HMODULE  (WINAPI *loadlib_t)(LPCSTR);
+typedef FARPROC  (WINAPI *getproc_t)(HMODULE, LPCSTR);
+typedef BOOL     (WINAPI *freelib_t)(HMODULE);
+typedef HRESULT  (WINAPI *ddc_t)   (GUID *, void **, IUnknown *);
+typedef HRESULT  (WINAPI *ddcex_t) (GUID *, void **, const IID *, IUnknown *);
+typedef HRESULT  (WINAPI *ddenumex_t)(void *, void *, DWORD);
+
+static loadlib_t  g_ddp_loadlib;
+static getproc_t  g_ddp_getproc;
+static freelib_t  g_ddp_freelib;
+static ddc_t      g_ddp_real_create;
+static ddcex_t    g_ddp_real_createex;
+static ddenumex_t g_ddp_real_enumex;
+static HMODULE    g_ddp_mod;          /* the ddraw the game loaded */
+
+static const char *ddp_guid(const GUID *g)
+{
+    static char b[80];
+    if (!g) return "NULL";
+    snprintf(b, sizeof b, "{%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}",
+             (unsigned long)g->Data1, g->Data2, g->Data3,
+             g->Data4[0], g->Data4[1], g->Data4[2], g->Data4[3],
+             g->Data4[4], g->Data4[5], g->Data4[6], g->Data4[7]);
+    return b;
+}
+
+/* The caller's return address, so the log names the call site in the game rather
+ * than merely the fact of a call. The header says the load is at 0x514e55; this
+ * is how that claim gets extended to the resolutions and the creation itself. */
+#define DDP_CALLER() (__builtin_return_address(0))
+
+/* s116, defined below with the rest of the presenter: the createex wrapper is the
+ * only place that sees the IDirectDraw7 before the game uses it. */
+static void present_attach(IDirectDraw7 *dd);
+
+static HRESULT WINAPI ddp_create(GUID *guid, void **out, IUnknown *unk)
+{
+    HRESULT hr;
+    logf_("[ddprobe] DirectDrawCreate(guid=%s, out=%p, unk=%p) from %p",
+          ddp_guid(guid), (void *)out, (void *)unk, DDP_CALLER());
+    hr = g_ddp_real_create(guid, out, unk);
+    logf_("[ddprobe]   -> 0x%08lx%s, object %p", (unsigned long)hr,
+          hr == 0 ? " (DD_OK)" : "", out ? *out : NULL);
+    if (!guid)
+        logf_("[ddprobe]   NOTE: NULL device. A device GUID substituted here is exactly"
+              " the interception s114 is asking about.");
+    return hr;
+}
+
+static HRESULT WINAPI ddp_createex(GUID *guid, void **out, const IID *iid, IUnknown *unk)
+{
+    HRESULT hr;
+    logf_("[ddprobe] DirectDrawCreateEx(guid=%s, out=%p, iid=%s, unk=%p) from %p",
+          ddp_guid(guid), (void *)out, ddp_guid((const GUID *)iid), (void *)unk,
+          DDP_CALLER());
+    hr = g_ddp_real_createex(guid, out, iid, unk);
+    logf_("[ddprobe]   -> 0x%08lx%s, object %p", (unsigned long)hr,
+          hr == 0 ? " (DD_OK)" : "", out ? *out : NULL);
+    if (!guid)
+        logf_("[ddprobe]   NOTE: NULL device.");
+    /* s116: this is the only moment the object exists and nothing has been asked
+     * of it yet, so it is the only safe moment to patch its vtable. */
+    if (hr == 0 && out && *out) present_attach((IDirectDraw7 *)*out);
+    return hr;
+}
+
+/* The game enumerates for itself -- measured, GOG, twice, with flags 3 and 7
+ * from 0x52dc9c and 0x52dcb4, into its own callback at 0x52e300. That changes
+ * the shape of any fix from "substitute a device the game never asked about" to
+ * "steer a choice the game is already making", so the interesting question is
+ * no longer whether the call happens but WHAT IT HANDS THE GAME.
+ *
+ * Hence the trampoline: the game's callback is still called, with the arguments
+ * DirectDraw gave it, entirely unmodified -- this only reads them on the way
+ * past. Its return value is logged too, because FALSE means the game stopped
+ * the enumeration early, and stopping early is what choosing looks like from
+ * out here. */
+typedef WINBOOL (CALLBACK *ddp_cb_t)(GUID *, char *, char *, void *, HMONITOR);
+static ddp_cb_t g_ddp_gamecb;
+
+static WINBOOL CALLBACK ddp_enum_tramp(GUID *guid, char *desc, char *drv,
+                                       void *ctx, HMONITOR hm)
+{
+    WINBOOL r;
+    MONITORINFOEXA mi;
+    memset(&mi, 0, sizeof mi);
+    mi.cbSize = sizeof mi;
+    logf_("[ddprobe]   device: guid=%s desc=\"%s\" driver=\"%s\" hmonitor=%p",
+          ddp_guid(guid), desc ? desc : "", drv ? drv : "", (void *)hm);
+    if (hm && GetMonitorInfoA(hm, (MONITORINFO *)&mi))
+        logf_("[ddprobe]           -> %s at (%ld,%ld)-(%ld,%ld)%s", mi.szDevice,
+              mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom,
+              (mi.dwFlags & MONITORINFOF_PRIMARY) ? "  PRIMARY" : "");
+    r = g_ddp_gamecb ? g_ddp_gamecb(guid, desc, drv, ctx, hm) : TRUE;
+    if (!r)
+        logf_("[ddprobe]           the game returned FALSE -- it STOPPED the enumeration"
+              " here, which is what making a choice looks like");
+    return r;
+}
+
+static HRESULT WINAPI ddp_enumex(void *cb, void *ctx, DWORD flags)
+{
+    HRESULT hr;
+    logf_("[ddprobe] DirectDrawEnumerateExA(cb=%p, ctx=%p, flags=0x%08lx) from %p"
+          " -- THE GAME IS ENUMERATING DEVICES ITSELF",
+          cb, ctx, (unsigned long)flags, DDP_CALLER());
+    g_ddp_gamecb = (ddp_cb_t)cb;
+    hr = g_ddp_real_enumex(cb ? (void *)ddp_enum_tramp : NULL, ctx, flags);
+    logf_("[ddprobe]   -> 0x%08lx", (unsigned long)hr);
+    return hr;
+}
+
+/* The game spells it "DDraw.dll"; other callers spell it "ddraw.dll". Matching
+ * case-sensitively would make the whole probe silent on a capitalisation. */
+static int ddp_names_ddraw(const char *s)
+{
+    for (; *s; s++)
+        if ((s[0] | 32) == 'd' && (s[1] | 32) == 'd' && (s[2] | 32) == 'r' &&
+            (s[3] | 32) == 'a' && (s[4] | 32) == 'w') return 1;
+    return 0;
+}
+
+/* ------------------------------------------- s116: present it ourselves
+ *
+ * WHAT THE TRACE SETTLED. A `WINEDEBUG=+ddraw` run through a map load shows the
+ * whole of what this game asks DirectDraw for, and it is very little:
+ *
+ *     SetCooperativeLevel(window, FULLSCREEN|ALLOWREBOOT|EXCLUSIVE)
+ *     SetDisplayMode(1920, 1080, 16)
+ *     CreateSurface(DDSCAPS_PRIMARYSURFACE)                    -- 16bpp RGB565
+ *     CreateSurface(DDSCAPS_OFFSCREENPLAIN|DDSCAPS_SYSTEMMEMORY)
+ *     loop:  Lock(offscreen) -> software render -> Unlock -> Blt(primary <- offscreen)
+ *
+ * No Flip. No back buffer. No video-memory surface. No Direct3D device of its
+ * own. The game renders in software into a system-memory buffer and asks
+ * DirectDraw to move it to the screen exactly once per frame. The
+ * `ddraw_surface1_Blt` lines beside each `ddraw_surface7_Blt` are Wine
+ * forwarding internally, not a second call -- the game uses v7 only, which
+ * removes the dual-interface problem this design was scoped around.
+ *
+ * WHY THAT ONE Blt IS THE WHOLE BUG. Measured, first-hand, on the owner's
+ * machine:
+ *
+ *     Blt dst_rect (0,0)-(1920,1080)         -- fine
+ *     Blt dst_rect (1920,-360)-(4480,1080)   -- DDERR_INVALIDRECT, i.e. #150
+ *
+ * The destination is the game's WINDOW RECT IN SCREEN COORDINATES, and the
+ * destination surface is the primary, which is bounded by the primary monitor.
+ * Put the window on another screen and every frame lands outside the surface.
+ * That is s17/s18/s74's #150, s114's question 3, and the black screen the
+ * borderless experiment produced, all of them, in two lines.
+ *
+ * SO STOP ASKING DIRECTDRAW TO PUT IT ON THE SCREEN. Three interceptions:
+ *
+ *   SetCooperativeLevel  EXCLUSIVE|FULLSCREEN is downgraded to DDSCL_NORMAL, so
+ *                        DirectDraw never takes over a display. The GAME still
+ *                        believes it is fullscreen -- its own path is chosen by
+ *                        the +0x1c flag, not by what DirectDraw does -- so it
+ *                        runs the code path s6 measured as the working one and
+ *                        s79's brick never comes near it.
+ *   SetDisplayMode       swallowed. Returning DD_OK without forwarding is what
+ *                        makes this change no display state at all.
+ *   CreateSurface        a request for the primary is answered with a plain
+ *                        system-memory surface of the requested mode. The game
+ *                        blits into a buffer instead of into a screen.
+ *
+ * and then Blt on that surface is intercepted and the source is drawn to our own
+ * window with GDI -- which has no primary-monitor bound, on any platform.
+ *
+ * WHY VTABLE HOOKS AND NOT COM WRAPPERS. A wrapper would have to implement
+ * QueryInterface/AddRef/Release correctly for two interface versions and stay
+ * consistent about identity. Patching the shared vtable needs none of that: the
+ * hook compares `this` against the one surface it cares about and forwards
+ * everything else untouched, so every other surface in the process behaves
+ * exactly as before.
+ */
+static int   g_present;                 /* armed together with Borderless */
+static IDirectDrawSurface7 *g_pr_fake;  /* the surface the game thinks is the screen */
+static DWORD g_pr_w, g_pr_h, g_pr_bpp;  /* the mode it asked for */
+static long  g_pr_frames;
+static int   g_pr_logged;
+
+static HRESULT (WINAPI *g_real_scl)(IDirectDraw7 *, HWND, DWORD);
+static HRESULT (WINAPI *g_real_sdm)(IDirectDraw7 *, DWORD, DWORD, DWORD, DWORD, DWORD);
+static HRESULT (WINAPI *g_real_cs) (IDirectDraw7 *, DDSURFACEDESC2 *,
+                                    IDirectDrawSurface7 **, IUnknown *);
+static HRESULT (WINAPI *g_real_blt)(IDirectDrawSurface7 *, RECT *, IDirectDrawSurface7 *,
+                                    RECT *, DWORD, DDBLTFX *);
+
+static int hook_slot(void **slot, void *replacement, void **real)
+{
+    *real = *slot;
+    return poke(slot, &replacement, sizeof replacement);
+}
+
+/* ------------------------------------------------------ s117: the frame counter
+ *
+ * s115.9 stopped the presenter on a cost objection and then admitted the cost had
+ * never been measured -- "the performance number should have come before any
+ * cosmetic fix". This is that number. It also answers a second question: whether
+ * the software renderer is still fast enough at the resolutions this patch now
+ * reaches, which is the only argument for restoring Hardware 3D that s91's
+ * deterministic refusal does not already dispose of.
+ *
+ * WHERE A FRAME IS. Measured on the STOCK path, no presenter, from a WINEDEBUG
+ * ddraw trace of a real map load:
+ *
+ *     CreateSurface(DDSCAPS_PRIMARYSURFACE)                 -- no FLIP, no COMPLEX
+ *     CreateSurface(DDSCAPS_OFFSCREENPLAIN|DDSCAPS_SYSTEMMEMORY)
+ *     loop:  Lock(offscreen) -> render -> Unlock -> Blt(primary <- offscreen)
+ *
+ * There is no flipping chain in this engine, so there is no Flip to count and no
+ * ambiguity about which call ends a frame: ONE Blt on the primary IS one frame.
+ * That is why this counts Blt rather than something cleverer.
+ *
+ * It rides the presenter's vtable interception because that is the only code in
+ * the proxy that already sees the IDirectDraw7 -- but it is INDEPENDENT of it.
+ * With Borderless=0 the mode calls are not hooked at all, CreateSurface forwards
+ * the descriptor untouched, and Blt is forwarded to the real one; the counter
+ * changes nothing about what it is measuring. With Borderless=1 it counts the
+ * presenter's frames instead, which is s115.9's missing number for free.
+ */
+static int   g_fc;                 /* [FrameCount] Enable */
+static int   g_fc_interval;        /* seconds between report lines */
+static IDirectDrawSurface7 *g_fc_primary;
+static DWORD g_fc_w, g_fc_h, g_fc_bpp;
+
+#define FC_BUCKET_MS 0.5           /* histogram resolution, milliseconds */
+#define FC_BUCKETS   201           /* 0..100 ms; the last bucket is the overflow */
+static unsigned      g_fc_hist[FC_BUCKETS];
+static LARGE_INTEGER g_fc_freq, g_fc_prev, g_fc_wstart;
+static unsigned      g_fc_n;       /* frames in the current reporting window */
+static double        g_fc_sum, g_fc_max;
+static unsigned      g_fc_total;
+
+/* Percentiles from a histogram rather than a sample buffer: no allocation, no
+ * per-frame work beyond one increment, and 0.5 ms is finer than any decision this
+ * measurement feeds. A mean alone would hide exactly the thing worth knowing --
+ * whether the slow frames are rare and large or the whole distribution is slow. */
+static double fc_pct(int pct)
+{
+    unsigned want, acc = 0;
+    int i;
+    if (!g_fc_n) return 0.0;
+    want = (unsigned)((double)g_fc_n * pct / 100.0 + 0.5);
+    if (!want) want = 1;
+    for (i = 0; i < FC_BUCKETS; i++) {
+        acc += g_fc_hist[i];
+        if (acc >= want) break;
+    }
+    if (i >= FC_BUCKETS - 1) return FC_BUCKET_MS * (FC_BUCKETS - 1);
+    return ((double)i + 0.5) * FC_BUCKET_MS;
+}
+
+static void fc_tick(void)
+{
+    LARGE_INTEGER now;
+    double ms, win;
+    int b;
+
+    if (!g_fc) return;
+    QueryPerformanceCounter(&now);
+
+    /* The first tick has no predecessor: it establishes the origin and is not a
+     * frame time. Counting it would put one absurd interval in every run. */
+    if (!g_fc_freq.QuadPart) {
+        QueryPerformanceFrequency(&g_fc_freq);
+        if (!g_fc_freq.QuadPart) {
+            logf_("[x] [fps] no performance counter on this machine -- counting OFF");
+            g_fc = 0;
+            return;
+        }
+        g_fc_prev = now; g_fc_wstart = now;
+        return;
+    }
+
+    ms = (double)(now.QuadPart - g_fc_prev.QuadPart) * 1000.0 / (double)g_fc_freq.QuadPart;
+    g_fc_prev = now;
+    g_fc_total++;
+    g_fc_n++;
+    g_fc_sum += ms;
+    if (ms > g_fc_max) g_fc_max = ms;
+    b = (int)(ms / FC_BUCKET_MS);
+    if (b < 0) b = 0;
+    if (b >= FC_BUCKETS) b = FC_BUCKETS - 1;
+    g_fc_hist[b]++;
+
+    win = (double)(now.QuadPart - g_fc_wstart.QuadPart) * 1000.0 / (double)g_fc_freq.QuadPart;
+    if (win < (double)g_fc_interval * 1000.0) return;
+
+    /* One line per window. logf_ reopens the file on every call, so this must never
+     * run per frame -- at 60 fps that cost alone would become the thing measured. */
+    logf_("[fps] %lux%lu %lubpp  %u frames in %.2f s = %.1f fps   frame ms:"
+          " mean %.2f  p50 %.2f  p95 %.2f  p99 %.2f  max %.2f   (%u total)%s",
+          (unsigned long)g_fc_w, (unsigned long)g_fc_h, (unsigned long)g_fc_bpp,
+          g_fc_n, win / 1000.0, (double)g_fc_n / (win / 1000.0),
+          g_fc_sum / (double)g_fc_n, fc_pct(50), fc_pct(95), fc_pct(99), g_fc_max,
+          g_fc_total, g_present ? "   [PRESENTER]" : "");
+
+    g_fc_n = 0; g_fc_sum = 0.0; g_fc_max = 0.0; g_fc_wstart = now;
+    memset(g_fc_hist, 0, sizeof g_fc_hist);
+}
+
+/* The presentation. Lock the game's own render buffer and blit it to the window
+ * with GDI. 16bpp RGB565 is declared through BI_BITFIELDS rather than assumed --
+ * the masks come from the surface, because a wrong mask here is a colour bug that
+ * looks like a rendering bug. biWidth is derived from lPitch so a stride wider
+ * than the image (s10's multiple-of-4 rule) is handled rather than smeared. */
+/* Channel expansion driven by the surface's OWN masks, not by a hardcoded 565.
+ * Measured: the game's surfaces really are R 0xf800 G 0x07e0 B 0x001f -- but
+ * reading that off the surface costs nothing and means a driver that hands back
+ * 555, or a swapped order, produces right colours instead of a bug report. */
+static void pr_chan(DWORD mask, int *shift, int *bits)
+{
+    int sh = 0, n = 0;
+    if (!mask) { *shift = 0; *bits = 0; return; }
+    while (!(mask & 1)) { mask >>= 1; sh++; }
+    while (mask & 1)    { mask >>= 1; n++; }
+    *shift = sh; *bits = n;
+}
+
+static DWORD *g_pr_buf;          /* 32bpp scratch, grown on demand */
+static SIZE_T g_pr_bufpx;
+static int    g_pr_in_present;   /* recursion guard -- present locks and unlocks */
+
+/* WHY WE CONVERT RATHER THAN LET GDI DO IT. StretchDIBits can be handed a 16bpp
+ * BI_BITFIELDS DIB, and that is what the first version did. The colours came out
+ * wrong: a 16bpp DIB's default interpretation is RGB555, and when the mask array
+ * is not honoured, 565 data read as 555 shifts every hue and halves green. Rather
+ * than establish exactly whose bug that is, this converts to plain 32bpp BI_RGB --
+ * the one DIB format every implementation agrees on -- for the cost of one pass
+ * over the frame. */
+static void present_frame(IDirectDrawSurface7 *src)
+{
+    DDSURFACEDESC2 sd;
+    HWND w;
+    HDC hdc;
+    RECT wr;
+    BITMAPINFOHEADER bh;
+    DWORD y, x, sw, sh;
+    int rs, rb, gs, gb, bs, bb;
+
+    if (g_pr_in_present) return;
+    w = find_game_window();
+    if (!w || !GetClientRect(w, &wr) || wr.right <= 0 || wr.bottom <= 0) return;
+
+    g_pr_in_present = 1;
+    fc_tick();                   /* s117: one present is one frame, same as one Blt */
+    memset(&sd, 0, sizeof sd); sd.dwSize = sizeof sd;
+    if (IDirectDrawSurface7_Lock(src, NULL, &sd, DDLOCK_WAIT | DDLOCK_READONLY, NULL) != DD_OK) {
+        g_pr_in_present = 0;
+        return;
+    }
+    sw = sd.dwWidth; sh = sd.dwHeight;
+    if (!sw || !sh || !sd.lpSurface) goto out;
+
+    if (g_pr_bufpx < (SIZE_T)sw * sh) {
+        void *nb = realloc(g_pr_buf, (SIZE_T)sw * sh * 4);
+        if (!nb) goto out;
+        g_pr_buf = (DWORD *)nb;
+        g_pr_bufpx = (SIZE_T)sw * sh;
+    }
+
+    pr_chan(sd.ddpfPixelFormat.dwRBitMask, &rs, &rb);
+    pr_chan(sd.ddpfPixelFormat.dwGBitMask, &gs, &gb);
+    pr_chan(sd.ddpfPixelFormat.dwBBitMask, &bs, &bb);
+
+    if (sd.ddpfPixelFormat.dwRGBBitCount == 16 && rb && gb && bb) {
+        for (y = 0; y < sh; y++) {
+            const WORD *row = (const WORD *)((const BYTE *)sd.lpSurface + (SIZE_T)y * sd.lPitch);
+            DWORD *dst = g_pr_buf + (SIZE_T)y * sw;
+            for (x = 0; x < sw; x++) {
+                WORD px = row[x];
+                /* Replicate the high bits down so 31 maps to 255, not 248. */
+                DWORD r = (DWORD)((px >> rs) & ((1u << rb) - 1));
+                DWORD g = (DWORD)((px >> gs) & ((1u << gb) - 1));
+                DWORD b = (DWORD)((px >> bs) & ((1u << bb) - 1));
+                /* Shift up, then fold the top bits back into the gap. Written this
+                 * way rather than as (v << (8-n)) | (v >> (n-(8-n))) because that
+                 * form shifts by a NEGATIVE amount for any channel narrower than 4
+                 * bits -- undefined behaviour that happens to work for 565 and 555
+                 * and would not for anything else. */
+                r = (r << (8 - rb)); r |= r >> rb;
+                g = (g << (8 - gb)); g |= g >> gb;
+                b = (b << (8 - bb)); b |= b >> bb;
+                dst[x] = (r << 16) | (g << 8) | b;
+            }
+        }
+    } else if (sd.ddpfPixelFormat.dwRGBBitCount == 32) {
+        for (y = 0; y < sh; y++)
+            memcpy(g_pr_buf + (SIZE_T)y * sw,
+                   (const BYTE *)sd.lpSurface + (SIZE_T)y * sd.lPitch, (SIZE_T)sw * 4);
+    } else {
+        goto out;   /* a depth we do not convert -- better black than garbage */
+    }
+
+    hdc = GetDC(w);
+    if (hdc) {
+        memset(&bh, 0, sizeof bh);
+        bh.biSize     = sizeof bh;
+        bh.biWidth    = (LONG)sw;
+        bh.biHeight   = -(LONG)sh;          /* negative = top-down */
+        bh.biPlanes   = 1;
+        bh.biBitCount = 32;
+        bh.biCompression = BI_RGB;
+        SetStretchBltMode(hdc, COLORONCOLOR);
+        StretchDIBits(hdc, 0, 0, wr.right, wr.bottom, 0, 0, (int)sw, (int)sh,
+                      g_pr_buf, (BITMAPINFO *)&bh, DIB_RGB_COLORS, SRCCOPY);
+        ReleaseDC(w, hdc);
+        if (!g_pr_logged) {
+            logf_("[+] [present] first frame: %lux%lu %lubpp pitch %ld -> window %p client"
+                  " %ldx%ld  (converted to 32bpp; R<<%d/%d G<<%d/%d B<<%d/%d)",
+                  (unsigned long)sw, (unsigned long)sh,
+                  (unsigned long)sd.ddpfPixelFormat.dwRGBBitCount, (long)sd.lPitch,
+                  (void *)w, wr.right, wr.bottom, rs, rb, gs, gb, bs, bb);
+            g_pr_logged = 1;
+        }
+    }
+    g_pr_frames++;
+out:
+    IDirectDrawSurface7_Unlock(src, NULL);
+    g_pr_in_present = 0;
+}
+
+/* Bink never touches DirectDraw. The game calls BinkCopyToBuffer -- measured, 12
+ * times in one startup -- which decodes into a buffer the CALLER supplies, and for
+ * movies that buffer is the surface the game thinks is the screen. It writes the
+ * frame there and never blits, so a presenter that only fires on Blt shows nothing:
+ * exactly the black intro and black menu backdrop observed.
+ *
+ * So present on Unlock of that surface as well. The rule this settles on is the
+ * honest one -- PRESENT WHENEVER THE GAME HAS FINISHED WRITING TO WHAT IT BELIEVES
+ * IS THE SCREEN -- and it covers both routes without needing to know which the game
+ * chose for any given frame. */
+static HRESULT (WINAPI *g_real_unlock)(IDirectDrawSurface7 *, RECT *);
+
+static HRESULT WINAPI hook_Unlock(IDirectDrawSurface7 *self, RECT *r)
+{
+    HRESULT hr = g_real_unlock(self, r);
+    if (self && self == g_pr_fake && !g_pr_in_present) present_frame(self);
+    return hr;
+}
+
+static HRESULT WINAPI hook_Blt(IDirectDrawSurface7 *self, RECT *dst, IDirectDrawSurface7 *src,
+                               RECT *srcr, DWORD flags, DDBLTFX *fx)
+{
+    /* The destination rect is deliberately IGNORED. It is the game's window rect in
+     * screen space -- the very number that produced #150 -- and it means nothing
+     * once we are the ones putting pixels on a screen. */
+    if (self && self == g_pr_fake && src) { present_frame(src); return DD_OK; }
+    /* s117, the stock path: note that a frame happened and forward it untouched. */
+    if (g_fc && self && self == g_fc_primary) fc_tick();
+    return g_real_blt(self, dst, src, srcr, flags, fx);
+}
+
+/* The mode the GAME believes in, applied to every surface it asks for.
+ *
+ * Swallowing SetDisplayMode is what stops the display changing, but it leaves the
+ * two parties disagreeing: the game thinks the mode is 16bpp because that is what
+ * it asked for, while DirectDraw still reports the desktop's 32bpp because nothing
+ * changed. A surface created with no DDSD_PIXELFORMAT inherits DIRECTDRAW's idea,
+ * so the game then renders 16-bit pixels into a 32-bit buffer.
+ *
+ * MEASURED, and the arithmetic is worth keeping because it names the symptom: the
+ * game writes rows of 1920x2 = 3840 bytes; the surface has pitch 7680; presenting
+ * it as 32bpp reads two game rows per display row. The picture comes out half
+ * height with two consecutive rows side by side, which on a near-static menu looks
+ * like two copies of it. Fixing only the primary was not enough -- the game does
+ * not render into the primary, it renders into an OFFSCREENPLAIN surface and blits
+ * that -- so the override has to cover every surface, which is what the game's own
+ * idea of the mode would have done had we let the mode change. */
+static void pr_force_format(DDSURFACEDESC2 *d)
+{
+    if (g_pr_bpp != 16 || (d->dwFlags & DDSD_PIXELFORMAT)) return;
+    d->dwFlags |= DDSD_PIXELFORMAT;
+    memset(&d->ddpfPixelFormat, 0, sizeof d->ddpfPixelFormat);
+    d->ddpfPixelFormat.dwSize        = sizeof d->ddpfPixelFormat;
+    d->ddpfPixelFormat.dwFlags       = DDPF_RGB;
+    d->ddpfPixelFormat.dwRGBBitCount = 16;
+    d->ddpfPixelFormat.dwRBitMask    = 0xf800;
+    d->ddpfPixelFormat.dwGBitMask    = 0x07e0;
+    d->ddpfPixelFormat.dwBBitMask    = 0x001f;
+}
+
+static HRESULT WINAPI hook_CreateSurface(IDirectDraw7 *self, DDSURFACEDESC2 *desc,
+                                         IDirectDrawSurface7 **out, IUnknown *unk)
+{
+    DDSURFACEDESC2 d;
+    HRESULT hr;
+    int primary;
+
+    if (!desc) return g_real_cs(self, desc, out, unk);
+    d = *desc;
+    primary = (d.dwFlags & DDSD_CAPS) && (d.ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE);
+
+    /* s117: with the counter alone the descriptor is forwarded EXACTLY as the game
+     * wrote it. Everything below this point that rewrites it is the presenter's. */
+    if (g_present && primary && !g_pr_fake) {
+        d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+        d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY;
+        d.dwWidth  = g_pr_w ? g_pr_w : (DWORD)GetSystemMetrics(SM_CXSCREEN);
+        d.dwHeight = g_pr_h ? g_pr_h : (DWORD)GetSystemMetrics(SM_CYSCREEN);
+        d.dwBackBufferCount = 0;
+    }
+    if (g_present) pr_force_format(&d);
+
+    hr = g_real_cs(self, &d, out, unk);
+    if (hr != DD_OK && (d.dwFlags & DDSD_PIXELFORMAT) && !(desc->dwFlags & DDSD_PIXELFORMAT)) {
+        /* A driver that will not give 16bpp in system memory is a real possibility.
+         * Fall back, and SAY so -- the two outcomes produce very different pictures
+         * and afterwards only the log can tell them apart. */
+        logf_("[!] [present] a 16bpp RGB565 surface was refused (0x%08lx) -- falling back"
+              " to the desktop format; expect wrong colours or a doubled image",
+              (unsigned long)hr);
+        d.dwFlags &= ~DDSD_PIXELFORMAT;
+        hr = g_real_cs(self, &d, out, unk);
+    }
+
+    if (g_present && primary && !g_pr_fake) {
+        logf_("[+] [present] primary surface request answered with a %lux%lu %s"
+              " system-memory surface -> %s (%p)",
+              (unsigned long)d.dwWidth, (unsigned long)d.dwHeight,
+              (d.dwFlags & DDSD_PIXELFORMAT) ? "16bpp RGB565" : "desktop-format",
+              hr == DD_OK ? "DD_OK" : "FAILED", out ? (void *)*out : NULL);
+        if (hr == DD_OK && out && *out) {
+            g_pr_fake = *out;
+            g_fc_w = d.dwWidth; g_fc_h = d.dwHeight; g_fc_bpp = g_pr_bpp;
+            if (!g_real_blt) {
+                /* &lpVtbl->Blt, not vt[5]: the member is checked by the compiler
+                 * against ddraw.h, an index is a number I could miscount, and a
+                 * wrong one would corrupt an unrelated method. */
+                if (hook_slot((void **)&(*out)->lpVtbl->Blt, (void *)hook_Blt,
+                              (void **)&g_real_blt) &&
+                    hook_slot((void **)&(*out)->lpVtbl->Unlock, (void *)hook_Unlock,
+                              (void **)&g_real_unlock))
+                    logf_("[+] [present] IDirectDrawSurface7 Blt and Unlock hooked"
+                          " (vtable %p)", (void *)(*out)->lpVtbl);
+                else
+                    logf_("[x] [present] could not hook Blt/Unlock -- nothing will be"
+                          " presented");
+            }
+        }
+    } else if (!g_present && g_fc && primary && !g_fc_primary
+               && hr == DD_OK && out && *out) {
+        /* s117: the only thing the counter needs from CreateSurface -- which surface
+         * the per-frame Blt will be aimed at. The surface itself is the game's own,
+         * created from the game's own descriptor. */
+        DDSURFACEDESC2 sd;
+        g_fc_primary = *out;
+        memset(&sd, 0, sizeof sd); sd.dwSize = sizeof sd;
+        if (IDirectDrawSurface7_GetSurfaceDesc(*out, &sd) == DD_OK) {
+            g_fc_w   = sd.dwWidth;
+            g_fc_h   = sd.dwHeight;
+            g_fc_bpp = sd.ddpfPixelFormat.dwRGBBitCount;
+        }
+        if (!g_real_blt) {
+            if (hook_slot((void **)&(*out)->lpVtbl->Blt, (void *)hook_Blt,
+                          (void **)&g_real_blt))
+                logf_("[+] [fps] counting frames on the primary %lux%lu %lubpp (%p)."
+                      " A report follows every %d s.",
+                      (unsigned long)g_fc_w, (unsigned long)g_fc_h,
+                      (unsigned long)g_fc_bpp, (void *)*out, g_fc_interval);
+            else {
+                logf_("[x] [fps] could not hook Blt -- no frames will be counted");
+                g_fc = 0;
+            }
+        }
+    } else if (hr == DD_OK && (d.dwFlags & DDSD_PIXELFORMAT)) {
+        static int n;
+        if (++n <= 3)
+            logf_("  [present] surface %lux%lu given the game's own 16bpp RGB565 rather"
+                  " than the desktop's format%s",
+                  (unsigned long)d.dwWidth, (unsigned long)d.dwHeight,
+                  n == 3 ? "  [further ones not logged]" : "");
+    }
+    return hr;
+}
+
+static HRESULT WINAPI hook_SetDisplayMode(IDirectDraw7 *self, DWORD w, DWORD h, DWORD bpp,
+                                          DWORD refresh, DWORD flags)
+{
+    (void)self; (void)refresh; (void)flags;
+    g_pr_w = w; g_pr_h = h; g_pr_bpp = bpp;
+    logf_("[+] [present] SetDisplayMode(%lu,%lu,%lu) SWALLOWED -- the display is not being"
+          " changed; the game gets a buffer of that size instead",
+          (unsigned long)w, (unsigned long)h, (unsigned long)bpp);
+    return DD_OK;
+}
+
+/* SWALLOWING A SETTER MEANS OWNING ITS GETTER.
+ *
+ * s6, measured, and it names the exact sequence this sits in: "It calls
+ * GetDisplayMode immediately before creating the primary surface." With
+ * SetDisplayMode swallowed, GetDisplayMode still reports the real desktop -- so
+ * the game asks for 2560x1440, is told the mode is 1920x1080, concludes the mode
+ * did not take, and never creates a surface at all.
+ *
+ * MEASURED as exactly that: targeting a 2560x1440 monitor while Wine measures a
+ * 1920x1080 desktop, the log reaches the menu and stops, with no CreateSurface and
+ * no error. Targeting the 1920x1080 primary -- where the swallowed mode happened to
+ * equal the real one -- it proceeded. The lie has to be consistent or it is not a
+ * lie, it is a contradiction. */
+static HRESULT (WINAPI *g_real_gdm)(IDirectDraw7 *, DDSURFACEDESC2 *);
+
+static HRESULT WINAPI hook_GetDisplayMode(IDirectDraw7 *self, DDSURFACEDESC2 *sd)
+{
+    HRESULT hr = g_real_gdm(self, sd);
+    if (hr != DD_OK || !sd || !g_pr_w) return hr;
+    sd->dwWidth  = g_pr_w;
+    sd->dwHeight = g_pr_h;
+    sd->dwFlags |= DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    if (g_pr_bpp == 16) {
+        memset(&sd->ddpfPixelFormat, 0, sizeof sd->ddpfPixelFormat);
+        sd->ddpfPixelFormat.dwSize        = sizeof sd->ddpfPixelFormat;
+        sd->ddpfPixelFormat.dwFlags       = DDPF_RGB;
+        sd->ddpfPixelFormat.dwRGBBitCount = 16;
+        sd->ddpfPixelFormat.dwRBitMask    = 0xf800;
+        sd->ddpfPixelFormat.dwGBitMask    = 0x07e0;
+        sd->ddpfPixelFormat.dwBBitMask    = 0x001f;
+        sd->lPitch = (LONG)g_pr_w * 2;
+    }
+    {
+        static int n;
+        if (++n <= 2)
+            logf_("  [present] GetDisplayMode answered %lux%lu %lubpp -- the mode the game"
+                  " asked for, not the desktop's", (unsigned long)g_pr_w,
+                  (unsigned long)g_pr_h, (unsigned long)g_pr_bpp);
+    }
+    return hr;
+}
+
+static HRESULT WINAPI hook_SetCoopLevel(IDirectDraw7 *self, HWND w, DWORD flags)
+{
+    if (flags & DDSCL_FULLSCREEN) {
+        DWORD n = (flags & ~(DDSCL_FULLSCREEN | DDSCL_EXCLUSIVE | DDSCL_ALLOWREBOOT))
+                  | DDSCL_NORMAL;
+        logf_("[+] [present] SetCooperativeLevel 0x%08lx -> 0x%08lx (exclusive fullscreen"
+              " downgraded; DirectDraw never takes a display)",
+              (unsigned long)flags, (unsigned long)n);
+        return g_real_scl(self, w, n);
+    }
+    return g_real_scl(self, w, flags);
+}
+
+static void present_attach(IDirectDraw7 *dd)
+{
+    if ((!g_present && !g_fc) || !dd || g_real_cs) return;
+
+    /* CreateSurface is the one both consumers need, for opposite reasons: the
+     * presenter substitutes the primary, the counter only wants to know which
+     * surface it is. By member, not by index -- see the note in hook_CreateSurface. */
+    if (!hook_slot((void **)&dd->lpVtbl->CreateSurface, (void *)hook_CreateSurface,
+                   (void **)&g_real_cs)) {
+        logf_("[x] [present] could not patch IDirectDraw7::CreateSurface --"
+              " presenting and frame counting are both OFF");
+        g_present = 0; g_fc = 0;
+        return;
+    }
+
+    /* s117: the counter stops here. The mode calls stay the game's own, so nothing
+     * it measures has been altered by measuring it. */
+    if (!g_present) {
+        logf_("[*] [fps] IDirectDraw7::CreateSurface hooked, to find the primary."
+              " Nothing else is intercepted -- the cooperative level, both mode"
+              " calls and the blit itself are all forwarded untouched.");
+        return;
+    }
+
+    if (!hook_slot((void **)&dd->lpVtbl->SetCooperativeLevel, (void *)hook_SetCoopLevel,   (void **)&g_real_scl) ||
+        !hook_slot((void **)&dd->lpVtbl->GetDisplayMode,      (void *)hook_GetDisplayMode, (void **)&g_real_gdm) ||
+        !hook_slot((void **)&dd->lpVtbl->SetDisplayMode,      (void *)hook_SetDisplayMode, (void **)&g_real_sdm)) {
+        logf_("[x] [present] could not patch the IDirectDraw7 vtable -- presenting is OFF");
+        g_present = 0;
+        return;
+    }
+    logf_("[+] [present] IDirectDraw7 vtable hooked (%p): CreateSurface,"
+          " SetCooperativeLevel, Set/GetDisplayMode", (void *)dd->lpVtbl);
+}
+
+static HMODULE WINAPI hook_LoadLibraryA(LPCSTR name)
+{
+    HMODULE m = g_ddp_loadlib(name);
+    if (name && ddp_names_ddraw(name)) {
+        g_ddp_mod = m;
+        logf_("[ddprobe] LoadLibraryA(\"%s\") from %p -> %p", name, DDP_CALLER(), (void *)m);
+    }
+    return m;
+}
+
+static FARPROC WINAPI hook_GetProcAddress(HMODULE mod, LPCSTR name)
+{
+    FARPROC p = g_ddp_getproc(mod, name);
+    /* HIWORD==0 means an ordinal, not a string -- dereferencing it as a name is
+     * the classic way to turn a probe into a crash. */
+    if (!name || !((ULONG_PTR)name >> 16)) return p;
+
+    if (mod != g_ddp_mod) {
+        /* Not the module LoadLibraryA reported -- but a name beginning
+         * "DirectDraw" is worth catching anyway. It means ddraw arrived by a
+         * route this hook did not see (LoadLibraryW, GetModuleHandle, a handle
+         * cached before we installed), and a probe that stayed quiet there would
+         * report "the game never resolved DirectDrawCreate" when it had. That is
+         * the s113.6 failure shape: a silent path read as a negative result. */
+        if (strncmp(name, "DirectDraw", 10)) return p;
+        logf_("[ddprobe] GetProcAddress(module %p, \"%s\") from %p -> %p"
+              "   -- NOT the module LoadLibraryA reported (%p); adopting it",
+              (void *)mod, name, DDP_CALLER(), (void *)p, (void *)g_ddp_mod);
+        g_ddp_mod = mod;
+    } else {
+        logf_("[ddprobe] GetProcAddress(ddraw, \"%s\") from %p -> %p",
+              name, DDP_CALLER(), (void *)p);
+    }
+    if (!p) return p;
+
+    if (!strcmp(name, "DirectDrawCreate")) {
+        g_ddp_real_create = (ddc_t)(void *)p;
+        return (FARPROC)(void *)ddp_create;
+    }
+    if (!strcmp(name, "DirectDrawCreateEx")) {
+        g_ddp_real_createex = (ddcex_t)(void *)p;
+        return (FARPROC)(void *)ddp_createex;
+    }
+    if (!strcmp(name, "DirectDrawEnumerateExA")) {
+        g_ddp_real_enumex = (ddenumex_t)(void *)p;
+        return (FARPROC)(void *)ddp_enumex;
+    }
+    return p;
+}
+
+static BOOL WINAPI hook_FreeLibrary(HMODULE mod)
+{
+    if (mod && mod == g_ddp_mod)
+        logf_("[ddprobe] FreeLibrary(ddraw %p) from %p", (void *)mod, DDP_CALLER());
+    return g_ddp_freelib(mod);
+}
+
+static void maybe_install_ddprobe(void)
+{
+    char ip[MAX_PATH];
+    snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+    g_ddp_enable = GetPrivateProfileIntA("DDProbe", "Enable", 0, ip);
+    /* s116 rides the same GetProcAddress interception: it needs the IDirectDraw7 the
+     * game creates, and this is what sees it being created. Read here rather than
+     * relying on g_borderless, because this runs BEFORE choose_monitor() sets it. */
+    g_present = GetPrivateProfileIntA("Display", "Borderless", 0, ip);
+    /* s117 rides the same interception, and for the same reason: this is the code
+     * that sees the IDirectDraw7 being created. */
+    g_fc = GetPrivateProfileIntA("FrameCount", "Enable", 0, ip);
+    g_fc_interval = GetPrivateProfileIntA("FrameCount", "Interval", 5, ip);
+    if (g_fc_interval < 1) g_fc_interval = 1;
+    if (g_fc)
+        logf_("[*] [fps] frame counting armed, reporting every %d s. It intercepts"
+              " nothing the game relies on; Blt is forwarded untouched.", g_fc_interval);
+    if (!g_ddp_enable && !g_present && !g_fc) return;
+
+    if (!hook_import("KERNEL32.dll", "LoadLibraryA", (void *)hook_LoadLibraryA,
+                     (void **)&g_ddp_loadlib))
+        logf_("[x] [ddprobe] KERNEL32!LoadLibraryA not in the import table");
+    if (!hook_import("KERNEL32.dll", "GetProcAddress", (void *)hook_GetProcAddress,
+                     (void **)&g_ddp_getproc))
+        logf_("[x] [ddprobe] KERNEL32!GetProcAddress not in the import table");
+    if (!hook_import("KERNEL32.dll", "FreeLibrary", (void *)hook_FreeLibrary,
+                     (void **)&g_ddp_freelib))
+        logf_("[x] [ddprobe] KERNEL32!FreeLibrary not in the import table");
+    if (g_ddp_loadlib && g_ddp_getproc)
+        logf_("[*] [ddprobe] armed -- logging how the game obtains DirectDraw."
+              " It changes nothing; every wrapper forwards.");
 }
 
 /* The message stream, s89 round 3.
@@ -2675,7 +3529,7 @@ static void choose_monitor(void)
     if (done) return;               /* called from DllMain, and again from the patch pass */
     done = 1;
     xout_t outs[8];
-    int n, i, chosen = -1, prim = -1;
+    int n, i, chosen = -1, prim = -1, set_primary;
     char ip[MAX_PATH], want[64], want2[64];
     POINT pt;
     long px, py;
@@ -2710,8 +3564,26 @@ static void choose_monitor(void)
      * Turning it off here is enough by itself. g_launch_w is never set, so pick_mode()
      * validates against SM_CXSCREEN -- the primary, the screen the game will actually
      * run on -- and no mode is adopted from a monitor it will not be shown on. */
-    if (!GetPrivateProfileIntA("Display", "SetPrimary", running_under_wine() ? 1 : 0, ip))
-        return;
+    /* s115 splits this gate in two. Everything above the "RECORD IT" block at the
+     * bottom only READS the display, and borderless needs those reads -- which
+     * monitor was launched from, and its mode -- while wanting the primary left
+     * exactly where it is. So SetPrimary now gates the WRITE, at the bottom, and
+     * this early return survives only for the case where neither feature is on.
+     *
+     * That preserves s113.8's guarantee literally: with SetPrimary=0 and
+     * Borderless=0 the function still returns here, g_launch_w is still never set,
+     * and pick_mode() still validates against SM_CXSCREEN. Nothing about the
+     * default path moves. */
+    set_primary = GetPrivateProfileIntA("Display", "SetPrimary", running_under_wine() ? 1 : 0, ip);
+    g_borderless = GetPrivateProfileIntA("Display", "Borderless", 0, ip);
+    if (!set_primary && !g_borderless) return;
+    if (g_borderless && set_primary) {
+        /* Both would aim at the same monitor by two different means, and the one
+         * that changes the player's computer is the one we are trying to retire. */
+        logf_("[!] [display] Borderless=1 and SetPrimary=1 are both set -- borderless"
+              " wins and the primary is left alone. Set SetPrimary=0 to silence this.");
+        set_primary = 0;
+    }
     GetPrivateProfileStringA("Display", "Monitor", "", want, sizeof want, ip);
 
     /* Not when tools/tropico started us. That launcher already chose the monitor,
@@ -2720,9 +3592,23 @@ static void choose_monitor(void)
      * information (no launch context, a pointer that may have moved) would win by
      * running second. The launcher exports this; nothing else sets it. */
     if (GetEnvironmentVariableA("TROPICO_LAUNCHER", want2, sizeof want2)) {
-        logf_("  [display] launched by tools/tropico, which has already chosen the"
-              " monitor -- leaving the display alone");
-        return;
+        /* s115: this guard is about the DISPLAY, not about the window. The launcher
+         * owns the primary -- it may have run `xrandr --primary` and holds an EXIT
+         * trap to put it back -- so a second opinion from in here would fight it.
+         * Borderless has no second opinion to offer: it changes no display state at
+         * all, it only decides which monitor to lay the game's own window over, and
+         * the launcher does not do that. So it continues, with the display half
+         * already off. Returning here is what made a normal launcher run silently
+         * ignore Borderless=1 while still logging that it was watching for the
+         * window -- a log that said the feature was armed when it was not. */
+        if (!g_borderless) {
+            logf_("  [display] launched by tools/tropico, which has already chosen the"
+                  " monitor -- leaving the display alone");
+            return;
+        }
+        logf_("  [display] launched by tools/tropico; it owns the primary, so only the"
+              " borderless window placement runs from here");
+        set_primary = 0;
     }
 
     /* Inside our own virtual desktop (s100) the game sees one screen at 0,0 and the
@@ -2818,10 +3704,58 @@ static void choose_monitor(void)
               (unsigned long)g_launch_w, (unsigned long)g_launch_h);
     }
 
+    /* s115. The target as a POINT in Win32 screen coordinates, not as a name.
+     *
+     * The name is whatever the source that answered calls it -- an xrandr output on
+     * Wine, a \\.\DISPLAYn on Windows -- and the window has to be placed in Win32
+     * coordinates either way, so a name would have to be mapped back and the two
+     * namespaces do not correspond. A point needs no mapping: MonitorFromPoint
+     * resolves it identically on both platforms.
+     *
+     * Win32 puts the primary at the origin, so subtracting the primary's offset is
+     * the conversion -- the exact inverse of what the GetCursorPos fallback above
+     * does on the way in. The centre rather than the launch point, so this is right
+     * whether the monitor came from [Display] Monitor or from the pointer. */
+    if (g_borderless) {
+        /* THE PRECONDITION, TESTED AGAINST WHAT THE GAME SEES rather than against
+         * what the host does. The list above came from xrandr, which reports the
+         * real outputs even from inside a Wine virtual desktop -- but in there the
+         * PROCESS has one screen at 0,0, MonitorFromPoint can only resolve to it,
+         * and the window would be laid over the desktop it is already in. Borderless
+         * would arm, find nothing to do, and do nothing, silently.
+         *
+         * g_vd_inside does not catch that: it is only set when the PATCH armed the
+         * desktop and left a tropico-vd.state to prove it. A desktop armed by
+         * tools/tropico-gog.sh, or by hand, leaves no state file and would sail
+         * straight past. SM_CMONITORS is the question actually being asked. */
+        int seen = GetSystemMetrics(SM_CMONITORS);
+        if (seen < 2) {
+            logf_("[x] [borderless] the host has %d monitors but this process can see"
+                  " only %d -- almost always a Wine virtual desktop, which presents one"
+                  " screen at 0,0. Borderless has nowhere to put the window and is NOT"
+                  " arming.", n, seen);
+            logf_("    Remove it and relaunch:  wine reg delete"
+                  " 'HKCU\\Software\\Wine\\Explorer' /v Desktop /f  &&  wineserver -k");
+            logf_("    (tools/tropico-gog.sh does this for you when Borderless=1.)");
+            g_borderless = 0;
+            return;
+        }
+        g_bl_ptx = outs[chosen].x - outs[prim].x + (long)outs[chosen].w / 2;
+        g_bl_pty = outs[chosen].y - outs[prim].y + (long)outs[chosen].h / 2;
+        g_bl_w   = outs[chosen].w;
+        g_bl_h   = outs[chosen].h;
+        g_bl_have = 1;
+        logf_("[+] [borderless] target %s %lux%lu, centre (%ld,%ld) in Win32 screen"
+              " space -- the primary %s is NOT being changed",
+              outs[chosen].name, (unsigned long)g_bl_w, (unsigned long)g_bl_h,
+              g_bl_ptx, g_bl_pty, outs[prim].name);
+    }
+
     if (chosen == prim) {
         logf_("  [display] %s is already primary -- nothing to change", outs[prim].name);
         return;
     }
+    if (!set_primary) return;   /* borderless: the window does the work, not the display */
 
     /* RECORD IT; DO NOT DO IT. Everything above this line only reads the display,
      * and reading is safe from DllMain -- measured on Steam, where the pointer was
@@ -3105,7 +4039,21 @@ static void vd_detect(void)
     if (!running_under_wine()) return;
 
     snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+    /* s115: read here as well as in choose_monitor(), because vd_detect() runs
+     * FIRST and the two features are mutually exclusive -- see below. */
+    g_borderless = GetPrivateProfileIntA("Display", "Borderless", 0, ip);
     g_vd_want = GetPrivateProfileIntA("Display", "VirtualDesktop", 0, ip);
+
+    /* A virtual desktop presents exactly ONE screen at 0,0. That is the whole of
+     * why it cannot coexist with borderless: there is no second monitor in there to
+     * lay a window over, so borderless would arm, find nothing, and do nothing --
+     * silently, which is the worst of the three outcomes. */
+    if (g_borderless && g_vd_want) {
+        logf_("[!] [vdesk] Borderless=1, so no virtual desktop is being armed. Inside"
+              " one the game sees a single screen at 0,0 and there is no second monitor"
+              " to place the window on.");
+        g_vd_want = 0;
+    }
 
     /* tools/tropico builds its own desktop on the command line and names it Tropico.
      * Two things arming the same setting is the s90.2 mistake; the launcher wins. */
@@ -3372,6 +4320,18 @@ static int launch_override(mode_t *m)
 static void launch_mode_check(int dw, int dh)
 {
     if (!g_launch_w || !g_launch_h || !dw || !dh) return;
+
+    /* s115: in borderless the game renders into a WINDOW on the target monitor, not
+     * into the primary's display mode, so the primary's size is the wrong yardstick
+     * and this guard's premise -- "the game would render nothing at all" -- does not
+     * hold. A 2560x1440 window on a 1920x1080 primary is legal; the virtual desktop
+     * spans both. Judge it against the monitor it will actually be shown on. */
+    if (g_borderless && g_bl_have) {
+        if (g_launch_w <= g_bl_w && g_launch_h <= g_bl_h) return;
+        dw = (int)g_bl_w;
+        dh = (int)g_bl_h;
+    }
+
     if ((int)g_launch_w <= dw && (int)g_launch_h <= dh) return;
 
     logf_("[x] ADOPTED MODE DOES NOT FIT. The launch monitor is %lux%lu but the screen"
@@ -5524,11 +6484,134 @@ static BOOL CALLBACK dump_window(HWND w, LPARAM lp)
     return TRUE;
 }
 
+/* s115. Strip the frame and lay the window over the chosen monitor exactly.
+ *
+ * This is the whole of what "borderless fullscreen" means here -- there is no mode
+ * to set and no device to select, because the renderer has already been told it is
+ * windowed and is blitting through a clipper into whatever rectangle it is given.
+ *
+ * It re-asserts rather than firing once. s75 measured the compositor putting a
+ * fullscreen window back on its own output within 100 ms, and the same hand is on
+ * this window; the difference is that losing here costs a misplaced window rather
+ * than #150, because nothing about the rendering depends on which monitor it is on.
+ * That is the property the whole approach was chosen for, and it is worth saying
+ * out loud: this failure mode is cosmetic where the old one was fatal. */
+static void place_window_borderless(const char *src)
+{
+    HWND w;
+    LONG style, want;
+    RECT wr;
+
+    if (!g_bl_have) return;
+    w = find_game_window();
+    if (!w) return;                       /* too early -- no window yet */
+    if (IsIconic(w)) return;
+    if (!GetWindowRect(w, &wr)) return;
+    if (wr.right - wr.left < 320 || wr.bottom - wr.top < 200) return;
+
+    /* Resolve the monitor once, from the point choose_monitor() recorded. Done here
+     * rather than there because MonitorFromPoint wants a settled display and this
+     * runs long after DllMain, where s99 established the display can be trusted. */
+    if (IsRectEmpty(&g_bl_rect)) {
+        POINT p;
+        HMONITOR m;
+        MONITORINFO mi;
+        p.x = g_bl_ptx; p.y = g_bl_pty;
+        m = MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST);
+        mi.cbSize = sizeof mi;
+        if (!m || !GetMonitorInfoA(m, &mi)) {
+            logf_("[x] [borderless] no monitor at (%ld,%ld) -- cannot place the window."
+                  " The game will run where the desktop put it.", g_bl_ptx, g_bl_pty);
+            g_bl_have = 0;
+            return;
+        }
+        g_bl_rect = mi.rcMonitor;
+        logf_("  [borderless] target monitor resolved to %ld,%ld %ldx%ld",
+              g_bl_rect.left, g_bl_rect.top,
+              g_bl_rect.right - g_bl_rect.left, g_bl_rect.bottom - g_bl_rect.top);
+    }
+
+    /* WS_POPUP with nothing else: no caption, no resize border, no system menu.
+     * Done before the move, because the frame is what makes the client area smaller
+     * than the monitor and SWP_FRAMECHANGED has to see the new style to recompute. */
+    style = GetWindowLongA(w, GWL_STYLE);
+    want  = (style & ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
+                       | WS_SYSMENU | WS_BORDER | WS_DLGFRAME)) | WS_POPUP;
+    if (style != want) {
+        SetWindowLongA(w, GWL_STYLE, want);
+        /* The HWND and the visibility, not just the style word. Without the HWND
+         * two successive style lines cannot be told from one window changing twice,
+         * and without IsWindowVisible a window with the right geometry that nobody
+         * can see reads as a success. Both were true of the first run. */
+        logf_("  [borderless] window %p style 0x%08lx -> 0x%08lx (frame removed),"
+              " visible=%d", (void *)w, (unsigned long)style, (unsigned long)want,
+              IsWindowVisible(w) ? 1 : 0);
+    }
+
+    if (wr.left == g_bl_rect.left && wr.top == g_bl_rect.top &&
+        wr.right == g_bl_rect.right && wr.bottom == g_bl_rect.bottom && g_bl_placed)
+        return;                            /* already exactly there */
+
+    {
+        int vis_before = IsWindowVisible(w) ? 1 : 0;
+        /* SWP_SHOWWINDOW, and it is the whole reason the first build produced a
+         * window nobody could see. MEASURED: the game's render window is created
+         * WITHOUT WS_VISIBLE (style 0x04000000) and stays that way -- in the normal
+         * path DDSCL_EXCLUSIVE|DDSCL_FULLSCREEN is what maps it, and taking that
+         * away leaves nothing that does. The engine's own windowed path never mapped
+         * it either, which is consistent with s6 calling windowed the failure path:
+         * there is no evidence anyone has seen this engine windowed and working.
+         *
+         * So showing it is not a workaround bolted on to hide a defect -- it is the
+         * presentation duty that exclusive mode used to discharge, now discharged
+         * here, which is what "substitute fullscreen" means. */
+        SetWindowPos(w, HWND_TOP, g_bl_rect.left, g_bl_rect.top,
+                     g_bl_rect.right - g_bl_rect.left, g_bl_rect.bottom - g_bl_rect.top,
+                     SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        if (vis_before != (IsWindowVisible(w) ? 1 : 0))
+            logf_("[!] [borderless] SetWindowPos CHANGED visibility on %p: %d -> %d",
+                  (void *)w, vis_before, IsWindowVisible(w) ? 1 : 0);
+    }
+
+    GetWindowRect(w, &wr);
+    if (!g_bl_placed) {
+        logf_("[+] [borderless] (%s) window %p laid over %ld,%ld %ldx%ld; it is now"
+              " %ld,%ld %ldx%ld  visible=%d", src, (void *)w,
+              g_bl_rect.left, g_bl_rect.top,
+              g_bl_rect.right - g_bl_rect.left, g_bl_rect.bottom - g_bl_rect.top,
+              wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top,
+              IsWindowVisible(w) ? 1 : 0);
+        g_bl_placed = 1;
+    }
+    /* The state that decides whether any of the above mattered, sampled over time
+     * rather than once: a window can be correct and invisible, and the first run
+     * was exactly that -- right geometry, right monitor, Map State IsUnMapped. */
+    {
+        static int last_vis = -1;
+        int vis = IsWindowVisible(w) ? 1 : 0;
+        if (vis != last_vis) {
+            logf_("  [borderless] window %p visible=%d (style 0x%08lx)", (void *)w, vis,
+                  (unsigned long)GetWindowLongA(w, GWL_STYLE));
+            last_vis = vis;
+        }
+    }
+    /* Rate-limited, and it reports the rect: "the compositor keeps moving it" and
+     * "our own SetWindowPos is being ignored" look identical without one. */
+    if (++g_bl_moves == 20)
+        logf_("[!] [borderless] the window has been re-placed 20 times -- something"
+              " keeps moving or resizing it. Last seen at %ld,%ld %ldx%ld.",
+              wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top);
+}
+
 static void pin_window_to_primary(const char *src)
 {
     HWND w;
     HMONITOR m, prim;
     MONITORINFO mi, pi;
+    /* s115: borderless owns the window instead. The two must never both run --
+     * one drags it to the primary, the other to the chosen monitor, and they would
+     * fight for as long as the game was open. */
+    if (g_borderless) { place_window_borderless(src); return; }
     if (!g_pin_primary) return;
     w = find_game_window();
     if (!w) return;                       /* too early -- no window yet */
@@ -5622,8 +6705,13 @@ static DWORD WINAPI pin_thread(LPVOID p)
         }
         Sleep(100);
     }
-    if (!g_pin_done && !g_pin_seen_ok)
+    if (g_borderless) {
+        if (!g_bl_placed)
+            logf_("[x] [borderless] the watcher finished without ever placing the window."
+                  " The game is running wherever the desktop put it, at whatever size.");
+    } else if (!g_pin_done && !g_pin_seen_ok) {
         logf_("  [display] watcher finished without ever seeing a sized game window");
+    }
     return 0;
 }
 
@@ -5658,6 +6746,24 @@ static void __cdecl slotprobe_hook(DWORD *a)
      *
      * Clamp here rather than at the checkbox because every caller funnels through
      * this one routine, and -1 ("keep") must pass through untouched. */
+    /* s115 inverts the clamp above, at the same site and for the same reason it
+     * exists: every caller funnels through here, so this is the one place that can
+     * make the decision consistently.
+     *
+     * -1 ("keep") is forced too, which the s79 clamp deliberately does not do. That
+     * asymmetry is correct rather than sloppy: under s79, "keep" keeps the flag
+     * patch_force_fullscreen() has already stored as 0, so passing it through means
+     * fullscreen and agrees with the clamp. Under borderless the stored flag is
+     * still 0 -- deliberately, so nothing windowed reaches TROPICO.CFG -- so passing
+     * -1 through would mean FULLSCREEN and disagree. Some call sites windowed and
+     * some not is the one outcome worse than either. */
+    /* s116 REMOVED the windowed forcing that used to be here. Making the ENGINE
+     * windowed was the wrong lever: its windowed path is s79's brick and s6's
+     * failure path, and the black screen it produced was this same #150 clipped
+     * rather than raised. The game now stays on its known-good fullscreen path and
+     * it is DIRECTDRAW that is downgraded, underneath it, where the game cannot
+     * tell. So the s79 clamp below applies unchanged in both modes -- which also
+     * retires the CFG landmine the first design had to document. */
     if (g_force_fs && (int)a[12] > 0) {
         a[12] = 0;
         if (++g_fs_clamped <= 4)
@@ -7528,6 +8634,10 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     /* s99: before anything else patches or defers, and before the exe's entry
      * point runs, so the numbering starts at the game's genuinely first open. */
     maybe_start_fileorder();
+
+    /* s114: for the same reason, and one of its own -- the game resolves
+     * DirectDraw at 0x514e55, which is early. Off unless [DDProbe] Enable=1. */
+    maybe_install_ddprobe();
 
     /* ART BEFORE THE GAME'S ENTRY POINT, WHICH IS THE ONLY MOMENT EARLY ENOUGH.
      *
