@@ -85,6 +85,13 @@ else
   note "stale key comments" "none"
 fi
 
+# Keys the shipped ini advertises that the code no longer reads. A user who
+# follows the file's own advice and sets one gets silence. Informational until
+# Task 12 rewrites the ini; a hard gate afterwards, enforced in Task 17.
+DEAD=$(python3 dev/tools/ini-doc-check.py 2>/dev/null | tr '\n' ' ')
+if [ -z "$DEAD" ]; then note "ini advertises dead" "none"
+else note "ini advertises dead" "$DEAD"; fi
+
 LEAK=$(grep -rniE 'FINDINGS|\bs[0-9]{2,3}[.: ]|§[0-9]+' \
         README.md known-good/tropico-fix.ini packaging/ 2>/dev/null | wc -l)
 note "user-facing leaks" "$LEAK $([ "$LEAK" -eq 0 ] && echo OK || echo '(expected until Workstream B)')"
