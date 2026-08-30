@@ -901,9 +901,40 @@ Not a probe — an experimental feature whose own documentation warns users away
 
 **Follow "The deletion method" above — call sites first, compiler second.**
 
-ini branch to remove: `[Display] VirtualDesktop`.
+ini branch to remove: `[Display] VirtualDesktop`. Also remove the `vd_detect();`
+and `vd_apply();` calls near the top of the patch pass (~lines 977 and 980).
 
 Where to look (advisory only): `the virtual desktop`.
+
+**This one reaches into KEPT code, so the compiler will hand you two hard errors
+rather than warnings.** Two places outside the feature read its state, and both
+branches become permanently dead once it is gone. Resolve them like this:
+
+1. **The primary-restore early-out** (~line 3511-3518). It reads:
+
+```c
+    /* Inside our own virtual desktop (s100) the game sees one screen at 0,0 ... */
+    if (g_vd_inside) {
+        logf_("  [display] running in the virtual desktop -- no monitor to choose and"
+              " no primary to change");
+        return;
+    }
+```
+
+   Delete the whole block, comment included. With no virtual desktop it can never
+   fire, and leaving it would be an early-out that never happens.
+
+2. **The mode-fit diagnostic** (~lines 4208-4216), an `if`/`else` whose `if` branch
+   explains a virtual-desktop-specific cause. Delete the `if` branch and its
+   condition, and keep the `else` branch's message unconditionally:
+
+```c
+    logf_("    Cause: the game was started for one monitor and opened on another."
+          " Launch it from the monitor you want to play on.");
+```
+
+Do not delete `g_launch_w`/`g_launch_h` or the surrounding function — only the
+virtual-desktop-specific branches.
 
 - [ ] **Step 1: Confirm the range and find every reference**
 
