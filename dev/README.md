@@ -25,3 +25,6 @@ in history, not gone. To read one back:
 
 Recovery SHAs are recorded in the commit messages of the deletions themselves;
 `git log --grep='probes:'` finds them.
+
+Cursor-probe recovery point (pre-deletion state of the cursor probe, the call-site
+sweep, and the Wine-vs-X comparison): 4119ccd6b99538a15f1ac9983117b1467f18bd11
