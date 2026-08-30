@@ -290,14 +290,6 @@ static LONG  g_restore_done;
 
 static void choose_monitor(void);
 static void apply_monitor(void);
-/* s100: the virtual desktop. detect() reads and is safe from DllMain;
- * apply() writes the prefix registry and belongs in the patch pass. */
-static void vd_detect(void);
-static void vd_apply(void);
-static int   g_vd_want;                  /* [Display] VirtualDesktop */
-static int   g_vd_inside;                /* this process IS in the desktop we armed */
-static int   g_vd_checked;
-static DWORD g_vd_arm_w, g_vd_arm_h;     /* what tropico-vd.state says we armed */
 
 
 static BYTE *find_unique(const BYTE *pat, SIZE_T len, BYTE *start, SIZE_T size, const char *what)
@@ -941,10 +933,8 @@ static void apply_patches(void)
      * desktop was idling in. With the switch further down, the fits check could
      * reject a perfectly good 1440p mode for not fitting a 1080p primary that was
      * about to stop being the primary. */
-    vd_detect();
     choose_monitor();
     apply_monitor();
-    vd_apply();
 
     /* What Wine believes the screen is, logged UNCONDITIONALLY. Everything the
      * patch computes is relative to this, and when it is stale -- a wineserver that
@@ -2733,7 +2723,11 @@ static int sp_ccd(const char *dev)
  * walking the chain again -- a restore that retries four failing mechanisms first
  * would rearrange the desktop several times over while the player watches.
  */
-static int running_under_wine(void);   /* defined with the virtual-desktop code */
+static int running_under_wine(void)
+{
+    HMODULE nt = GetModuleHandleA("ntdll.dll");
+    return nt && GetProcAddress(nt, "wine_get_version") != NULL;
+}
 
 typedef int (*setprim_fn)(const char *dev);
 static const struct { const char *name; setprim_fn fn; } SETPRIM[] = {
@@ -3046,15 +3040,6 @@ static void choose_monitor(void)
         return;
     }
 
-    /* Inside our own virtual desktop (s100) the game sees one screen at 0,0 and the
-     * mode is the desktop's own. Making a monitor primary would change the display
-     * for no gain -- the failure mode it exists to prevent cannot arise in here. */
-    if (g_vd_inside) {
-        logf_("  [display] running in the virtual desktop -- no monitor to choose and"
-              " no primary to change");
-        return;
-    }
-
     n = xrandr_outputs(outs, 8);
     if (n <= 0) {
         /* No host to ask: native Windows, or a prefix whose game is not on Z:.
@@ -3286,301 +3271,6 @@ static void apply_monitor(void)
     }
 }
 
-/* ------------------------------------------------ s100 the virtual desktop
- *
- * WHY. The GOG launcher runs the game inside `wine explorer /desktop=Tropico,WxH`,
- * and s76.2 records what that buys: inside a virtual desktop there is exactly one
- * screen with origin (0,0), so the geometry behind #150 -- a window on a monitor
- * Wine did not measure, at negative coordinates -- CANNOT ARISE. It is also why the
- * GOG path has never shown the s89 camera drift: the game cannot see the monitor
- * layout at all.
- *
- * The Steam edition gets none of that, because Steam's Play button is the only way
- * past the DRM (s90) and nothing of ours is in front of it to pass /desktop= on a
- * command line. This is the way in that needs no command line: Wine reads the same
- * setting out of the PREFIX REGISTRY, and the proxy is already running inside that
- * prefix with the right to write it.
- *
- *   HKCU\Software\Wine\Explorer            Desktop  = TropicoVD
- *   HKCU\Software\Wine\Explorer\Desktops   TropicoVD = 2560x1440
- *
- * MEASURED before any of this was written (probes/vdprobe.c, s100.1), because the
- * whole design rests on it: with those two values set and NOTHING on the command
- * line, a plain `wine prog.exe` reports SM_CMONITORS=1, 1280x1024 at 0,0 -- against
- * SM_CMONITORS=2, virtual screen 4480x1440 at 0,-360 in the same prefix without
- * them. The registry route really does produce the same desktop the command line
- * does.
- *
- * THE SIZE IS DECIDED ONE LAUNCH EARLY, and there is no way around that: the desktop
- * exists before the game's first instruction, so the proxy can only ever arm the
- * NEXT launch. This is the same shape as d32cc32's pending monitor change. Arming is
- * therefore idempotent and self-refreshing -- every run rewrites the size it wants,
- * so a monitor that changed since last time costs one launch at the old size.
- *
- * BEING INSIDE IS RECORDED, NOT INFERRED. `tropico-vd.state` holds the size we last
- * armed; we are inside when Wine reports exactly that size on exactly one monitor.
- * Inferring it from the metrics alone cannot work -- on a single-monitor desktop the
- * inside and outside readings are identical (s90.3's rule: when a sentinel is also a
- * legal value, get the fact from a source that has no such overlap).
- *
- * BORDERLESS IS NOT FULLSCREEN. The desktop window arrives placed like any other
- * window: measured at +320+531 in the probe, which is exactly the "bordered and not
- * fullscreen" complaint that got this idea rejected the first time round. The EWMH
- * message tools/tropico-fullscreen.py sends is what fixes it there, and s90.1's host
- * channel is how it gets sent from in here. The desktop is deliberately NOT named
- * "Tropico": the game's own window has that title, and a substring match on it would
- * fullscreen the wrong window. "TropicoVD" is matched by no window the game creates.
- *
- * OFF BY DEFAULT, and reversible: turning [Display] VirtualDesktop back to 0 removes
- * the registry value rather than leaving the prefix in desktop mode for a game that
- * is no longer patched. uninstall.sh does the same from the host, for the case where
- * the flag is still on when the patch is removed.
- *
- * ONLY UNDER WINE. On native Windows nothing reads these keys, so writing them would
- * be litter; wine_get_version() is the test.
- *
- *   [Display] VirtualDesktop=1
- */
-#define VD_NAME "TropicoVD"
-
-
-/* The EWMH request, embedded rather than shipped: the Windows package has no Python
- * in it at all (s97) and this must not be the thing that puts it back. Same message
- * tools/tropico-fullscreen.py sends -- keep the two in step. */
-static const char FULLSCREEN_PY[] =
-    "import ctypes, ctypes.util, sys, time\n"
-    "NAME = sys.argv[1]\n"
-    "DEADLINE = time.time() + 30\n"
-    "lib = ctypes.util.find_library('X11')\n"
-    "if not lib: sys.exit(0)\n"
-    "x = ctypes.CDLL(lib)\n"
-    "x.XOpenDisplay.restype = ctypes.c_void_p\n"
-    "x.XInternAtom.restype = ctypes.c_ulong\n"
-    "x.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]\n"
-    "x.XDefaultRootWindow.restype = ctypes.c_ulong\n"
-    "x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]\n"
-    "d = x.XOpenDisplay(None)\n"
-    "if not d: sys.exit(0)\n"
-    "root = x.XDefaultRootWindow(ctypes.c_void_p(d))\n"
-    "class XEvent(ctypes.Structure):\n"
-    "    _fields_ = [('pad', ctypes.c_long * 24)]\n"
-    "def children(w):\n"
-    "    r = ctypes.c_ulong(); p = ctypes.c_ulong()\n"
-    "    kids = ctypes.POINTER(ctypes.c_ulong)(); n = ctypes.c_uint()\n"
-    "    if not x.XQueryTree(ctypes.c_void_p(d), ctypes.c_ulong(w), ctypes.byref(r),\n"
-    "                        ctypes.byref(p), ctypes.byref(kids), ctypes.byref(n)):\n"
-    "        return []\n"
-    "    out = [kids[i] for i in range(n.value)]\n"
-    "    x.XFree(kids)\n"
-    "    return out\n"
-    "def name_of(w):\n"
-    "    s = ctypes.c_char_p()\n"
-    "    if x.XFetchName(ctypes.c_void_p(d), ctypes.c_ulong(w), ctypes.byref(s)) and s.value:\n"
-    "        v = s.value.decode('utf-8', 'replace'); x.XFree(s); return v\n"
-    "    return ''\n"
-    "def find():\n"
-    "    for w in children(root):\n"
-    "        if NAME.lower() in name_of(w).lower(): return w\n"
-    "        for c in children(w):\n"
-    "            if NAME.lower() in name_of(c).lower(): return c\n"
-    "    return None\n"
-    "target = None\n"
-    "while time.time() < DEADLINE:\n"
-    "    target = find()\n"
-    "    if target: break\n"
-    "    time.sleep(0.3)\n"
-    "if not target: sys.exit(0)\n"
-    "state = x.XInternAtom(ctypes.c_void_p(d), b'_NET_WM_STATE', False)\n"
-    "full = x.XInternAtom(ctypes.c_void_p(d), b'_NET_WM_STATE_FULLSCREEN', False)\n"
-    "ev = XEvent()\n"
-    "buf = ctypes.cast(ctypes.byref(ev), ctypes.POINTER(ctypes.c_long))\n"
-    "ctypes.memset(ctypes.byref(ev), 0, ctypes.sizeof(ev))\n"
-    "buf[0] = 33; buf[2] = 1; buf[3] = 0; buf[4] = target; buf[5] = state\n"
-    "buf[6] = 32; buf[7] = 1; buf[8] = full; buf[9] = 0; buf[10] = 1\n"
-    "x.XSendEvent(ctypes.c_void_p(d), ctypes.c_ulong(root), False,\n"
-    "             ctypes.c_long((1 << 20) | (1 << 19)), ctypes.byref(ev))\n"
-    "x.XFlush(ctypes.c_void_p(d))\n";
-
-static int running_under_wine(void)
-{
-    HMODULE nt = GetModuleHandleA("ntdll.dll");
-    return nt && GetProcAddress(nt, "wine_get_version") != NULL;
-}
-
-static void vd_state_read(void)
-{
-    char win[MAX_PATH], buf[64];
-    HANDLE h;
-    DWORD got = 0;
-    unsigned w = 0, hgt = 0;
-    snprintf(win, sizeof win, "%s\\tropico-vd.state", g_dir);
-    h = CreateFileA(win, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE) return;
-    ReadFile(h, buf, sizeof buf - 1, &got, NULL);
-    CloseHandle(h);
-    buf[got] = 0;
-    if (sscanf(buf, "%ux%u", &w, &hgt) == 2) { g_vd_arm_w = w; g_vd_arm_h = hgt; }
-}
-
-static void vd_state_write(DWORD w, DWORD h)
-{
-    char win[MAX_PATH], body[64];
-    HANDLE fh;
-    DWORD wrote;
-    snprintf(win, sizeof win, "%s\\tropico-vd.state", g_dir);
-    if (!w) { DeleteFileA(win); g_vd_arm_w = g_vd_arm_h = 0; return; }
-    snprintf(body, sizeof body, "%lux%lu\n", (unsigned long)w, (unsigned long)h);
-    fh = CreateFileA(win, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (fh == INVALID_HANDLE_VALUE) return;
-    WriteFile(fh, body, (DWORD)strlen(body), &wrote, NULL);
-    CloseHandle(fh);
-    g_vd_arm_w = w; g_vd_arm_h = h;
-}
-
-/* size == NULL removes the desktop; the Desktops entry is left behind on purpose,
- * because it names a size and nothing reads it without the Desktop value above. */
-static int vd_registry(const char *size)
-{
-    HKEY k;
-    LONG r;
-    if (RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\Wine\\Explorer", 0, NULL, 0,
-                        KEY_SET_VALUE, NULL, &k, NULL) != ERROR_SUCCESS) return 0;
-    if (size) r = RegSetValueExA(k, "Desktop", 0, REG_SZ, (const BYTE *)VD_NAME,
-                                 (DWORD)strlen(VD_NAME) + 1);
-    else      r = RegDeleteValueA(k, "Desktop");
-    RegCloseKey(k);
-    if (!size) return r == ERROR_SUCCESS || r == ERROR_FILE_NOT_FOUND;
-    if (r != ERROR_SUCCESS) return 0;
-
-    if (RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\Wine\\Explorer\\Desktops", 0, NULL,
-                        0, KEY_SET_VALUE, NULL, &k, NULL) != ERROR_SUCCESS) return 0;
-    r = RegSetValueExA(k, VD_NAME, 0, REG_SZ, (const BYTE *)size, (DWORD)strlen(size) + 1);
-    RegCloseKey(k);
-    return r == ERROR_SUCCESS;
-}
-
-/* READ-ONLY, and safe from DllMain for the s99 reason: it reads the display and the
- * ini, and changes neither. */
-static void vd_detect(void)
-{
-    char ip[MAX_PATH], env[64];
-    if (g_vd_checked) return;
-    g_vd_checked = 1;
-    if (!running_under_wine()) return;
-
-    snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-    g_vd_want = GetPrivateProfileIntA("Display", "VirtualDesktop", 0, ip);
-
-    /* tools/tropico builds its own desktop on the command line and names it Tropico.
-     * Two things arming the same setting is the s90.2 mistake; the launcher wins. */
-    if (GetEnvironmentVariableA("TROPICO_LAUNCHER", env, sizeof env)) {
-        if (g_vd_want)
-            logf_("  [vdesk] launched by tools/tropico, which builds its own desktop"
-                  " -- leaving [Display] VirtualDesktop alone");
-        g_vd_want = 0;
-        return;
-    }
-
-    vd_state_read();
-    if (g_vd_arm_w && GetSystemMetrics(SM_CMONITORS) == 1 &&
-        (DWORD)GetSystemMetrics(SM_CXSCREEN) == g_vd_arm_w &&
-        (DWORD)GetSystemMetrics(SM_CYSCREEN) == g_vd_arm_h) {
-        g_vd_inside = 1;
-        g_launch_w = g_vd_arm_w;
-        g_launch_h = g_vd_arm_h;
-        logf_("[+] [vdesk] inside the %lux%lu virtual desktop -- one screen at 0,0,"
-              " so nothing has to touch the monitor layout",
-              (unsigned long)g_vd_arm_w, (unsigned long)g_vd_arm_h);
-    }
-}
-
-/* The mode the NEXT launch's desktop should be. The launch monitor if the pointer
- * can be placed on one, the primary otherwise -- the same order choose_monitor()
- * uses, and for the same reason. */
-static int vd_target_mode(DWORD *w, DWORD *h)
-{
-    xout_t outs[8];
-    int n, i, prim = -1;
-    n = xrandr_outputs(outs, 8);
-    if (n <= 0) return 0;
-    for (i = 0; i < n; i++) if (outs[i].primary) prim = i;
-    if (g_ptr_x >= 0)
-        for (i = 0; i < n; i++)
-            if (g_ptr_x >= outs[i].x && g_ptr_x < outs[i].x + (long)outs[i].w &&
-                g_ptr_y >= outs[i].y && g_ptr_y < outs[i].y + (long)outs[i].h) {
-                *w = outs[i].w; *h = outs[i].h; return 1;
-            }
-    if (prim < 0) return 0;
-    *w = outs[prim].w; *h = outs[prim].h;
-    return 1;
-}
-
-/* Runs in the patch pass, beside apply_monitor(), for the s99 reason: this writes. */
-static void vd_apply(void)
-{
-    char size[32], script[MAX_PATH * 3], udir[MAX_PATH];
-    DWORD w = 0, h = 0;
-
-    if (!running_under_wine()) return;
-
-    if (g_vd_inside) {
-        /* Fullscreen it. Borderless alone is not fullscreen (s76.2), and under
-         * Proton the desktop window is placed like any other -- measured at
-         * +320+531 in the probe. Backgrounded: it waits for the window. */
-        if (game_unix_dir(udir, sizeof udir) && write_host_file("tropico-vd-fs.py", FULLSCREEN_PY)) {
-            snprintf(script, sizeof script,
-                     "/usr/bin/python3 '%s/tropico-vd-fs.py' %s >/dev/null 2>&1 &\n",
-                     udir, VD_NAME);
-            unix_sh(script, 300);
-            logf_("  [vdesk] asked the window manager to fullscreen %s", VD_NAME);
-        }
-        /* Re-arm for next time, so a monitor that changed since costs one launch. */
-        if (g_vd_want && vd_target_mode(&w, &h) && (w != g_vd_arm_w || h != g_vd_arm_h)) {
-            snprintf(size, sizeof size, "%lux%lu", (unsigned long)w, (unsigned long)h);
-            if (vd_registry(size)) {
-                vd_state_write(w, h);
-                logf_("[+] [vdesk] the display changed -- the next launch gets a %s"
-                      " desktop instead", size);
-            }
-        }
-        if (!g_vd_want) {
-            /* Inside, but the flag came off: this run stays where it is, the next
-             * one does not. */
-            if (vd_registry(NULL)) {
-                vd_state_write(0, 0);
-                logf_("  [vdesk] VirtualDesktop=0 -- disarmed; the next launch runs on"
-                      " the real desktop again");
-            }
-        }
-        return;
-    }
-
-    if (g_vd_want) {
-        if (!vd_target_mode(&w, &h)) {
-            logf_("[!] [vdesk] could not read the display from the host -- cannot arm"
-                  " a virtual desktop (expected outside Steam/Proton)");
-            return;
-        }
-        snprintf(size, sizeof size, "%lux%lu", (unsigned long)w, (unsigned long)h);
-        if (vd_registry(size)) {
-            vd_state_write(w, h);
-            logf_("[+] [vdesk] armed a %s virtual desktop. IT TAKES EFFECT ON THE NEXT"
-                  " LAUNCH -- the desktop exists before this process does, so it cannot"
-                  " be this one", size);
-        } else {
-            logf_("[!] [vdesk] could not write HKCU\\Software\\Wine\\Explorer -- not armed");
-        }
-        return;
-    }
-
-    if (g_vd_arm_w) {                     /* not wanted, but we armed it once */
-        if (vd_registry(NULL)) {
-            vd_state_write(0, 0);
-            logf_("  [vdesk] VirtualDesktop=0 -- removed the desktop this patch armed");
-        }
-    }
-}
-
 /* The adopted mode wins over [Resolution]: it describes the screen the player is
  * actually looking at, and the ini describes whatever was configured last. */
 static int launch_override(mode_t *m)
@@ -3617,15 +3307,8 @@ static void launch_mode_check(int dw, int dh)
           " this process actually has is %dx%d -- the game would render nothing at all,"
           " which sounds like a crash and is not one.",
           (unsigned long)g_launch_w, (unsigned long)g_launch_h, dw, dh);
-    if (g_vd_arm_w && (g_vd_arm_w != (DWORD)dw || g_vd_arm_h != (DWORD)dh))
-        logf_("    A %lux%lu virtual desktop is armed and takes effect on the NEXT launch"
-              " (FINDINGS 100) -- the desktop exists before this process does. This launch"
-              " runs at %dx%d; start it again to get %lux%lu.",
-              (unsigned long)g_vd_arm_w, (unsigned long)g_vd_arm_h, dw, dh,
-              (unsigned long)g_vd_arm_w, (unsigned long)g_vd_arm_h);
-    else
-        logf_("    Cause: the game was started for one monitor and opened on another."
-              " Launch it from the monitor you want to play on.");
+    logf_("    Cause: the game was started for one monitor and opened on another."
+          " Launch it from the monitor you want to play on.");
     g_launch_w = g_launch_h = 0;      /* let the picker choose one that fits */
 }
 
@@ -5415,7 +5098,6 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     {
         mode_t am;
         char ip[MAX_PATH];
-        vd_detect();
         choose_monitor();
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
         g_artgen_enabled = GetPrivateProfileIntA("Art", "Generate", 1, ip);
