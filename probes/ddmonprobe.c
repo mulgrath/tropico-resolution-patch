@@ -100,11 +100,41 @@ static int g_hold = 4;        /* seconds per device in the visual phase */
 static int g_visual = 1;
 static char g_only[64];       /* restrict to one \\.\DISPLAYn */
 
+/* ONE ARM, ONE PROCESS -- the structural fix for the first Windows run.
+ *
+ * That run took exclusive fullscreen in arm 0 and never released it, because
+ * teardown() could only run after the phase-5 visual check, which needed every
+ * arm's context alive. Arms 1-4 were then refused with
+ * DDERR_EXCLUSIVEMODEALREADYSET before the device was consulted, and the summary
+ * read exactly like "Windows refuses per-device exclusive mode". It was not an
+ * answer at all. Arm 1 -- a CONTROL, primary GUID on the primary window, failing
+ * identically to the secondary arms -- is what gave it away.
+ *
+ * Releasing between arms would fix that instance. Running each arm in its own
+ * process makes the whole class impossible: exclusive mode, display modes,
+ * surfaces and windows are all torn down by process exit, which is the one
+ * cleanup path that cannot be forgotten, mis-ordered, or skipped by an early
+ * return. When a mistake costs a reboot to discover, structural beats careful.
+ *
+ * The parent enumerates, prints the arm table, then runs itself once per arm and
+ * collects the ##ARM lines the children emit. --dry stays in-process: it never
+ * takes exclusive mode, so it has nothing to leak, and it was the half of the
+ * first run that WAS valid. */
+static int  g_arm = -1;       /* >=0: child, run only this arm */
+static char g_expect[64];     /* the GDI device the parent expects that arm to be */
+
 static void say(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+/* A child process has to REDO phase 0 and phase 1 to rebuild the same arm list,
+ * but the parent has already printed all of it. g_mute covers exactly that
+ * stretch, so the shared code stays one code path rather than growing a "are we
+ * the child" branch at every say() in it. */
+static int g_mute;
+
 static void say(const char *fmt, ...)
 {
     char buf[2048];
     va_list ap;
+    if (g_mute) return;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
@@ -130,6 +160,31 @@ static const char *ddname(HRESULT hr)
     case DDERR_CANNOTATTACHSURFACE:    return "DDERR_CANNOTATTACHSURFACE";
     case DDERR_CURRENTLYNOTAVAIL:      return "DDERR_CURRENTLYNOTAVAIL";
     case DDERR_EXCEPTION:              return "DDERR_EXCEPTION";
+    /* 581. THE ONE THAT HID. The first run of this probe held arm 0's exclusive
+     * mode for the whole session, so every arm after it was refused with this --
+     * and because 581 was not in this table it printed as "(unrecognised)",
+     * which reads like a device saying no. It is not: it is THIS PROCESS saying
+     * "you already have it". Every DirectDraw name below was added in the same
+     * pass, on the principle that an unnamed code is a result nobody can read. */
+    case DDERR_EXCLUSIVEMODEALREADYSET: return "DDERR_EXCLUSIVEMODEALREADYSET";
+    case DDERR_DIRECTDRAWALREADYCREATED: return "DDERR_DIRECTDRAWALREADYCREATED";
+    case DDERR_HWNDALREADYSET:         return "DDERR_HWNDALREADYSET";
+    case DDERR_HWNDSUBCLASSED:         return "DDERR_HWNDSUBCLASSED";
+    case DDERR_NOTFLIPPABLE:           return "DDERR_NOTFLIPPABLE";
+    case DDERR_NOTLOCKED:              return "DDERR_NOTLOCKED";
+    case DDERR_CANTCREATEDC:           return "DDERR_CANTCREATEDC";
+    case DDERR_NODC:                   return "DDERR_NODC";
+    case DDERR_CANTDUPLICATE:          return "DDERR_CANTDUPLICATE";
+    case DDERR_IMPLICITLYCREATED:      return "DDERR_IMPLICITLYCREATED";
+    case DDERR_INVALIDPOSITION:        return "DDERR_INVALIDPOSITION";
+    case DDERR_INVALIDSURFACETYPE:     return "DDERR_INVALIDSURFACETYPE";
+    case DDERR_NOEMULATION:            return "DDERR_NOEMULATION";
+    case DDERR_NOTPALETTIZED:          return "DDERR_NOTPALETTIZED";
+    case DDERR_REGIONTOOSMALL:         return "DDERR_REGIONTOOSMALL";
+    case DDERR_NOBLTHW:                return "DDERR_NOBLTHW";
+    case DDERR_BLTFASTCANTCLIP:        return "DDERR_BLTFASTCANTCLIP";
+    case DDERR_NOTAOVERLAYSURFACE:     return "DDERR_NOTAOVERLAYSURFACE";
+    case DDERR_DEVICEDOESNTOWNSURFACE: return "DDERR_DEVICEDOESNTOWNSURFACE";
     case DDERR_HEIGHTALIGN:            return "DDERR_HEIGHTALIGN";
     case DDERR_INCOMPATIBLEPRIMARY:    return "DDERR_INCOMPATIBLEPRIMARY";
     case DDERR_INVALIDCAPS:            return "DDERR_INVALIDCAPS";
@@ -546,6 +601,7 @@ typedef struct {
     DWORD    sw, sh;              /* what the primary surface says it is */
     DDPIXELFORMAT pf;
     int      blits_ok, blits_bad, rect_errs;
+    int      voided;              /* the arm never reached the device -- see phase_modes */
 } ctx_t;
 
 static ctx_t g_ctx[16];
@@ -705,7 +761,21 @@ static void phase_modes(ctx_t *c)
                  DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN | DDSCL_ALLOWREBOOT);
         say("      SetCooperativeLevel(+ALLOWREBOOT, as the game passes) -> %s", hres(hr));
     }
-    if (hr != DD_OK) return;
+    if (hr != DD_OK) {
+        /* THIS IS NOT AN ANSWER ABOUT THE DEVICE, and the first Windows run was
+         * misread exactly here. Exclusive mode is per-process: if anything in
+         * this process already holds it, every later request is refused before
+         * the device is ever consulted. Each arm now runs in its own process so
+         * this cannot happen -- but if it ever does again, it says so instead of
+         * impersonating a refusal. */
+        if (hr == DDERR_EXCLUSIVEMODEALREADYSET) {
+            say("    !!! EXCLUSIVE MODE WAS ALREADY HELD IN THIS PROCESS.");
+            say("    !!! This arm never reached the device, so its result is VOID --");
+            say("    !!! read it as 'not asked', never as 'the device refused'.");
+            c->voided = 1;
+        }
+        return;
+    }
     c->exclusive = 1;
 
     /* The ladder the game actually climbs (TESTING.md trap 4): map load starts
@@ -1031,6 +1101,97 @@ static DWORD WINAPI watchdog(LPVOID p)
     return 0;
 }
 
+/* ------------------------------------------------- one arm, one process
+ *
+ * The parent and each child append to the SAME log, so the file reads top to
+ * bottom as one run. Only one of them holds it open at a time: two live handles
+ * to one file is not a thing to depend on, and the cost of being wrong here is
+ * a lost log after a reboot was already spent.
+ *
+ * Per-arm results travel in a sidecar rather than through say(), so the log a
+ * human reads stays prose and the parent still gets its comparison table. The
+ * table is the point -- a per-arm block on its own is exactly what must not be
+ * read alone. */
+static char g_logpath[MAX_PATH];
+
+static void log_close(void)       { if (g_log) { fclose(g_log); g_log = NULL; } }
+static void log_open_append(void) { if (!g_log && g_logpath[0]) g_log = fopen(g_logpath, "ab"); }
+
+static void arms_path(char *out, size_t cap)
+{
+    size_t n = strlen(g_logpath);
+    snprintf(out, cap, "%s", g_logpath);
+    if (n > 4 && !_stricmp(g_logpath + n - 4, ".log") && n - 4 < cap)
+        snprintf(out + n - 4, cap - (n - 4), ".arms");
+    else
+        strncat(out, ".arms", cap - strlen(out) - 1);
+}
+
+static void arm_result_write(const char *logpath, const char *line)
+{
+    char ap[MAX_PATH];
+    FILE *f;
+    (void)logpath;
+    arms_path(ap, sizeof ap);
+    f = fopen(ap, "ab");
+    if (!f) return;
+    fprintf(f, "%s\n", line);
+    fclose(f);
+}
+
+static void arm_results_table(const char *logpath)
+{
+    char ap[MAX_PATH], buf[512];
+    FILE *f;
+    (void)logpath;
+    arms_path(ap, sizeof ap);
+    f = fopen(ap, "rb");
+    if (!f) {
+        say("  NO PER-ARM RESULTS WERE COLLECTED. Every arm process failed to start,");
+        say("  so this run measured nothing -- do not read the sections above as");
+        say("  answers.");
+        return;
+    }
+    while (fgets(buf, sizeof buf, f)) {
+        char *nl = strchr(buf, '\n');
+        if (nl) *nl = 0;
+        say("%s", buf);
+    }
+    fclose(f);
+    remove(ap);
+}
+
+static int run_arm_child(const char *self, int idx, const char *gdi)
+{
+    char cmd[MAX_PATH * 2];
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    DWORD code = 0;
+
+    log_close();
+    snprintf(cmd, sizeof cmd, "\"%s\" --arm %d --expect \"%s\" --hold %d%s",
+             self, idx, gdi ? gdi : "", g_hold, g_visual ? "" : " --no-visual");
+
+    memset(&si, 0, sizeof si); si.cb = sizeof si;
+    memset(&pi, 0, sizeof pi);
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        DWORD e = GetLastError();
+        log_open_append();
+        say("!!! arm [%d]: could not start a process for it (GetLastError=%lu)."
+            " THIS ARM WAS NOT RUN.", idx, (unsigned long)e);
+        return 0;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    log_open_append();
+    if (code != 0)
+        say("!!! arm [%d]: its process exited with code %lu, so its section above"
+            " may be incomplete.", idx, (unsigned long)code);
+    return 1;
+}
+
 /* ------------------------------------------------------------------- main */
 
 int main(int argc, char **argv)
@@ -1044,15 +1205,28 @@ int main(int argc, char **argv)
     slash = strrchr(logpath, '\\');
     if (slash) slash[1] = 0; else logpath[0] = 0;
     strncat(logpath, "ddmonprobe.log", sizeof logpath - strlen(logpath) - 1);
-    g_log = fopen(logpath, "wb");
+    snprintf(g_logpath, sizeof g_logpath, "%s", logpath);
 
     for (i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--dry"))       g_dry = 1;
         else if (!strcmp(argv[i], "--no-visual")) g_visual = 0;
-        else if (!strcmp(argv[i], "--hold") && i + 1 < argc) g_hold = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--hold")   && i + 1 < argc) g_hold = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--arm")    && i + 1 < argc) g_arm  = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--expect") && i + 1 < argc)
+            snprintf(g_expect, sizeof g_expect, "%s", argv[++i]);
         else snprintf(g_only, sizeof g_only, "%s", argv[i]);
     }
     if (g_hold <= 0) g_visual = 0;
+
+    /* The parent truncates; a child appends to what the parent already wrote, so
+     * the file reads as one run. The parent also clears the sidecar, or a second
+     * run would show the first run's arms alongside its own. */
+    g_log = fopen(logpath, g_arm >= 0 ? "ab" : "wb");
+    if (g_arm < 0) { char ap[MAX_PATH]; arms_path(ap, sizeof ap); remove(ap); }
+
+    /* A child has to redo phase 0 and phase 1 to rebuild the same arm list, but
+     * the parent printed all of that already. Muted until the dispatch below. */
+    g_mute = (g_arm >= 0);
 
     SetUnhandledExceptionFilter(crash_filter);
     CloseHandle(CreateThread(NULL, 0, watchdog, (LPVOID)(DWORD_PTR)180000u, 0, NULL));
@@ -1160,58 +1334,116 @@ int main(int argc, char **argv)
     say("Both the primary and the secondary are taken through the SAME sequence.");
     say("That is deliberate: a DDERR on the secondary means nothing unless the");
     say("identical call on the primary succeeded in the same run (TESTING.md trap 6).");
+    if (!g_dry && g_arm < 0)
+        say("Each arm runs in its OWN PROCESS, so no arm can leave exclusive mode,"
+            " a display mode or a window behind for the next one.");
+    g_mute = 0;
 
-    for (i = 0; i < g_ndev; i++) {
-        ctx_t *c = &g_ctx[g_nctx];
-        if (g_only[0] && g_dev[i].gdi[0] && _stricmp(g_only, g_dev[i].gdi)) continue;
-        memset(c, 0, sizeof *c);
-        c->d = &g_dev[i];
+    /* LIVE RUN, PARENT: hand each arm to a fresh process. See the note beside
+     * g_arm for why this is structural rather than a tidier teardown. */
+    if (!g_dry && g_arm < 0) {
+        for (i = 0; i < g_ndev; i++) {
+            if (g_only[0] && g_dev[i].gdi[0] && _stricmp(g_only, g_dev[i].gdi)) continue;
+            if (run_arm_child(self, i, g_dev[i].gdi)) tested++;
+        }
+    } else {
+        for (i = 0; i < g_ndev; i++) {
+            ctx_t *c = &g_ctx[g_nctx];
+            if (g_only[0] && g_dev[i].gdi[0] && _stricmp(g_only, g_dev[i].gdi)) continue;
+            if (g_arm >= 0 && i != g_arm) continue;
+            memset(c, 0, sizeof *c);
+            c->d = &g_dev[i];
 
-        blank();
-        say("=== arm [%d]: %s ===", i, c->d->label);
-        say("    %s", c->d->primary && (!c->d->guid_from[0] ||
-                                        !_stricmp(c->d->guid_from, c->d->gdi))
-                      ? "everything points at the primary -- this arm is the CONTROL"
-                      : "this arm is a question");
+            /* A child rebuilds this list from its own enumeration, so "arm N"
+             * means what the parent meant only if the layout did not move in
+             * between. Checked rather than assumed: a mismatch would report one
+             * monitor's answer under another's name, which is worse than no
+             * answer at all. Two arms may legitimately share a GDI name -- arms
+             * 2 and 3 both target the secondary -- so this asks "is arm N still
+             * on the monitor the parent saw", not "is arm N unique". */
+            if (g_arm >= 0 && g_expect[0] && c->d->gdi[0] &&
+                _stricmp(g_expect, c->d->gdi)) {
+                say("!!! ARM MISMATCH: the parent expected arm [%d] on %s, but this",
+                    i, g_expect);
+                say("!!! process enumerated %s there. The display layout moved"
+                    " mid-run; this arm is NOT being run.", c->d->gdi);
+                continue;
+            }
 
-        say("    -- phase 2: create and identify --");
-        if (!phase_create(c)) { say("    device unusable; moving on."); continue; }
-        g_nctx++; tested++;
+            blank();
+            say("=== arm [%d]: %s ===", i, c->d->label);
+            say("    %s", c->d->primary && (!c->d->guid_from[0] ||
+                                            !_stricmp(c->d->guid_from, c->d->gdi))
+                          ? "everything points at the primary -- this arm is the CONTROL"
+                          : "this arm is a question");
 
-        if (g_dry) { say("    -- dry run: stopping before exclusive mode --"); continue; }
+            say("    -- phase 2: create and identify --");
+            if (!phase_create(c)) { say("    device unusable; moving on."); continue; }
+            g_nctx++; tested++;
 
-        say("    -- phase 3: exclusive fullscreen and the mode ladder (question 2) --");
-        phase_modes(c);
-        if (!c->exclusive) { say("    no exclusive mode; the blit phase cannot run."); continue; }
+            if (g_dry) { say("    -- dry run: stopping before exclusive mode --"); continue; }
 
-        say("    -- phase 4: surfaces, blits and flips (question 3) --");
-        phase_blits(c);
+            say("    -- phase 3: exclusive fullscreen and the mode ladder (question 2) --");
+            phase_modes(c);
+            if (!c->exclusive) { say("    no exclusive mode; the blit phase cannot run."); continue; }
+
+            say("    -- phase 4: surfaces, blits and flips (question 3) --");
+            phase_blits(c);
+
+            /* Phase 5 runs HERE, inside the arm that owns the display -- not at
+             * the end over saved contexts. That ordering is precisely what
+             * forced every context to stay alive in the first version, and that
+             * is what leaked exclusive mode into every later arm. */
+            if (g_visual) {
+                blank();
+                say("=== phase 5: the visual check -- WATCH YOUR MONITORS ===");
+                say("The colour is named here BEFORE it is shown, and held for %d s. No", g_hold);
+                say("API reports which panel the photons reached, so this line plus what");
+                say("you saw IS the measurement.");
+                phase_visual(c, i);
+            }
+        }
     }
 
-    if (!g_dry && g_visual && g_nctx) {
-        blank();
-        say("=== phase 5: the visual check -- WATCH YOUR MONITORS ===");
-        say("Each device is filled with a named colour and held for %d s, and the", g_hold);
-        say("colour is written here BEFORE it is shown. No API reports which panel");
-        say("the photons reached, so this line plus your answer IS the measurement.");
-        for (i = 0; i < g_nctx; i++)
-            if (g_ctx[i].exclusive) phase_visual(&g_ctx[i], i);
-    }
-
+    /* In a child this is belt-and-braces -- process exit releases all of it
+     * anyway, which is the whole point of the split. It stays because --dry runs
+     * in-process, and because an explicit release is what the log should show. */
     blank();
     say("=== teardown ===");
     for (i = 0; i < g_nctx; i++) teardown(&g_ctx[i]);
     show_layout("at exit");
 
-    blank();
-    say("=== summary ===");
-    for (i = 0; i < g_nctx; i++) {
-        ctx_t *c = &g_ctx[i];
-        say("  exclusive=%-3s mode-set=%-3s surface=%lux%lu  blits ok=%d failed=%d (#150=%d)",
-            c->exclusive ? "yes" : "NO", c->mode_set ? "yes" : "NO",
-            (unsigned long)c->sw, (unsigned long)c->sh,
-            c->blits_ok, c->blits_bad, c->rect_errs);
-        say("      %s", c->d->label);
+    if (g_arm >= 0) {
+        /* One machine-readable line per arm, for the parent to collect. It goes
+         * to a sidecar rather than through say(), so the log a human reads stays
+         * prose. */
+        for (i = 0; i < g_nctx; i++) {
+            ctx_t *c = &g_ctx[i];
+            char line[512];
+            snprintf(line, sizeof line,
+                     "  exclusive=%-3s mode-set=%-3s surface=%lux%lu  blits ok=%d failed=%d (#150=%d)%s\n      %s",
+                     c->exclusive ? "yes" : "NO", c->mode_set ? "yes" : "NO",
+                     (unsigned long)c->sw, (unsigned long)c->sh,
+                     c->blits_ok, c->blits_bad, c->rect_errs,
+                     c->voided ? "   *** VOID: never reached the device ***" : "",
+                     c->d->label);
+            arm_result_write(logpath, line);
+        }
+    } else {
+        blank();
+        say("=== summary ===");
+        if (g_dry) {
+            for (i = 0; i < g_nctx; i++) {
+                ctx_t *c = &g_ctx[i];
+                say("  exclusive=%-3s mode-set=%-3s surface=%lux%lu  blits ok=%d failed=%d (#150=%d)",
+                    c->exclusive ? "yes" : "NO", c->mode_set ? "yes" : "NO",
+                    (unsigned long)c->sw, (unsigned long)c->sh,
+                    c->blits_ok, c->blits_bad, c->rect_errs);
+                say("      %s", c->d->label);
+            }
+        } else {
+            arm_results_table(logpath);
+        }
     }
     if (!tested) say("  nothing was tested.");
     blank();
@@ -1229,6 +1461,13 @@ int main(int argc, char **argv)
 
 done:
     blank();
+    if (g_arm >= 0) {
+        /* No pause and no closing banner in a child: the parent is blocked on it,
+         * so a prompt here would hang the whole run waiting for a key nobody
+         * knows to press. */
+        if (g_log) fclose(g_log);
+        return 0;
+    }
     say("Done. This log is saved at %s", logpath);
     printf("\nPress Enter to close.\n");
     fflush(stdout);
