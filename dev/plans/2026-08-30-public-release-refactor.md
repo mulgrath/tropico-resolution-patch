@@ -416,48 +416,56 @@ The DLL is byte-identical: nothing here touched a line of C."
 
 ---
 
-### Task 3: Lift the four shared primitives (Workstream A1)
+### Task 3: Lift hook_import out of the probe code (Workstream A1)
 
-Four helpers that shipped code calls live inside probe sections. They move out **before** anything is deleted. Because this only relocates code, the DLL must stay byte-identical — that is the whole point of doing it as its own task.
+`hook_import` redirects one entry in the main module's import table. It lives inside
+the cursor probe that first needed it, but five callers outside that code outlive it,
+so it moves out **before** anything is deleted. Because this only relocates code, the
+DLL must stay byte-identical — that is the whole point of doing it as its own task.
+
+**Only `hook_import` moves.** An earlier cross-reference check suggested four helpers
+needed rescue; that check counted the whole `scaling mode` section as kept. With the
+HUD probe block inside it correctly classified as probe (Ruling 5), the only callers
+of `wfb_read32`/`wfb_read16` and `fix_near`/`fix_short` are inside probe code. They
+are deleted with their host sections in Tasks 4 and 5. Lifting them would preserve
+four functions nothing calls.
 
 **Files:**
 - Modify: `proxy/tropico_fix.c`
 
 **Interfaces:**
-- Produces: a new `shared primitives` section, placed immediately after `pattern scanning`, exporting `hook_import()`, `wfb_read32()`, `wfb_read16()`, `fix_near()`, `fix_short()`, `J_NEAR_NE`, `J_NEAR_EQ` to the rest of the file.
+- Produces: a new `shared primitives` section, placed immediately after `pattern scanning`, exporting `hook_import()` to the rest of the file.
 
-- [ ] **Step 1: Confirm the four are where the spec says**
+- [ ] **Step 1: Confirm hook_import's callers outlive its host section**
 
 ```bash
-grep -n 'static void \*hook_import\|static DWORD wfb_read32(DWORD va)$\|static WORD wfb_read16(DWORD va)$\|static int fix_near\|static int fix_short\|define J_NEAR' proxy/tropico_fix.c
+grep -n 'static void \*hook_import' proxy/tropico_fix.c
+grep -n 'hook_import(' proxy/tropico_fix.c
 ```
 
-Expected: six or seven hits — `hook_import` definition, the two `wfb_read` definitions (bodies, not the `;` forward declarations), `fix_near`, `fix_short`, and the two macros.
+Expected: one definition, and callers both inside the cursor-probe section (Task 8 deletes it) and outside it. The outside callers are why this lift happens.
 
 - [ ] **Step 2: Create the shared primitives section**
 
-Insert immediately after the `pattern scanning` section ends. Move — do not copy — the bodies of `hook_import`, `wfb_read32`, `wfb_read16`, `fix_near`, `fix_short` and the two `J_NEAR_*` macros here, under this banner:
+Insert immediately after the `pattern scanning` section ends. Move — do not copy — the body of `hook_import` here, under this banner:
 
 ```c
 /* ------------------------------------------------------------ shared primitives
  *
- * Small helpers with more than one caller. They were each written inside whichever
- * investigation first needed them, which is why they used to live in probe code;
- * they are general, so they live here instead.
- *
- *   hook_import   redirect one entry in the main module's import table
- *   wfb_read32/16 read the game's memory at an absolute address, tolerating a bad
- *                 one rather than faulting
- *   fix_near/fix_short, J_NEAR_*  patch a jump displacement into a stub being
- *                 assembled by hand. fix_short range-checks, because a negative
- *                 displacement silently wraps into a jump backwards into unmapped
- *                 memory.
+ * hook_import redirects one entry in the main module's import table. It was written
+ * inside the cursor investigation because that is what first needed it, but it is
+ * general and has callers that outlive that code, so it lives here.
  */
 ```
 
+Leave `wfb_read32`, `wfb_read16`, `fix_near`, `fix_short` and the `J_NEAR_*` macros
+exactly where they are — Tasks 4 and 5 remove them with their host sections.
+
 - [ ] **Step 3: Delete the now-redundant forward declarations**
 
-`static HWND find_game_window(void);` (in the cursor probe) and `static DWORD wfb_read32(DWORD va); static WORD wfb_read16(DWORD va);` (in the write watch) are forward declarations only. `find_game_window`'s real definition is in kept code and needs no action; the two `wfb_read` forward declarations become redundant once the bodies move above their callers. Remove all three declarations.
+None need removing here. `find_game_window`'s declaration in the cursor probe and the
+`wfb_read` declarations in the write watch disappear with their sections in Tasks 8
+and 4. Touch only `hook_import`.
 
 - [ ] **Step 4: Verify the move changed nothing**
 
@@ -471,12 +479,15 @@ Expected: `byte-identical OK`. **If this fails, the move was not a pure move** �
 
 ```bash
 git add proxy/tropico_fix.c
-git commit -m "proxy: lift four shared helpers out of the probe code that hosted them
+git commit -m "proxy: lift hook_import out of the probe code that hosted it
 
-hook_import, wfb_read32/16, fix_near/fix_short and the two jump macros are
-general primitives with callers in shipped code, but each was written inside
-whichever probe first needed it. They move to a shared section so the probes
-around them can be deleted.
+It redirects one import-table entry, and five callers outside the cursor probe
+that hosted it outlive that code. It moves to a shared section so the probe
+around it can be deleted.
+
+Three other helpers looked like they needed the same rescue until the HUD probe
+block inside the scaling-mode section was classified correctly: their only
+callers are inside it, so they die with it instead.
 
 Byte-identical build: this moves code and changes nothing."
 ```

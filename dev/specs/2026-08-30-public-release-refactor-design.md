@@ -71,12 +71,18 @@ forward declarations whose real definitions live in kept code and simply disappe
 with their range. Four are genuine primitives that shipped code depends on and
 **must be relocated before the ranges are cut**:
 
-| Symbol | Defined | Called by (kept code) | Action |
-|---|---|---|---|
-| `find_game_window` | fwd decl @1650; real def @6320 | window pin @6320 | fwd decl disappears — no action |
-| `wfb_read32` / `wfb_read16` | fwd decl @4439–40; real def @4765/4772 | scaling mode @7774, @7800 | **relocate (~12 lines)** |
-| `hook_import` | @1799 | frame counter @2385 | **relocate (~25 lines)** |
-| `fix_near` / `fix_short` + `J_NEAR_NE` / `J_NEAR_EQ` | @5566–5576 | scaling mode @7641, @7730 | **relocate (~12 lines)** |
+| Symbol | Callers outside every delete range | Action |
+|---|---|---|
+| `hook_import` | 5 — frame counter, primary restore, mode-fit check | **relocate (~25 lines)** |
+| `find_game_window` | 2; its real definition is already in kept code | no action |
+| `wfb_read32` / `wfb_read16` | **none** | dies with the write watch |
+| `fix_near` / `fix_short` + `J_NEAR_*` | **none** | dies with the HUD shrink probe |
+
+**Corrected after Ruling 5.** The original check treated the whole `scaling mode`
+section as kept, so three helpers appeared to have shipped callers. With
+`patch_hud_probe`..end-of-section correctly classified as probe, those callers are
+themselves probe code. Only `hook_import` is lifted; lifting the others would
+preserve four functions nothing calls.
 
 These are general-purpose primitives — a memory reader, an IAT hook, two jump-patch
 helpers — that live in probe sections only by accident of when they were written.
