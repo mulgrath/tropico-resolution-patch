@@ -9788,3 +9788,519 @@ free — is untested. It would shrink the opt-in path's worst case considerably.
 the mirror of the benefit: a configuration Windows has not saved may be re-asserted from
 the database on a display event, such as a monitor sleeping, which would move the primary
 out from under a running game.
+
+## 114. Pointing DirectDraw at a monitor: what Wine says, and what the game asks for
+
+113.8 left the Windows primary-switch opt-in and mostly off, with the machinery to
+undo it larger than the change it undoes. The alternative is to change the game
+rather than the computer: the patch already rewrites the resolution table in
+memory, so pointing DirectDraw at a specific device would be in keeping — and if
+it worked it would retire the switch on both platforms, the Linux xrandr watchdog
+included.
+
+Four questions. This section answers one of them outright, answers a second for
+Wine, and puts the other two on a Windows trip that has not happened yet.
+
+### 114.1 The probe
+
+`probes/ddmonprobe.c`, built on `primaryprobe.c`'s shape for the same reason — the
+answers need a two-monitor Windows 11 desktop and reaching one costs a reboot, so
+everything is asked in one pass. It loads `ddraw.dll` by name rather than linking
+it, because that is how `Tropico.EXE` obtains it and because "the export is
+missing" and "the export refused" are different answers a link would collapse.
+
+Two rules carried over. **Never believe the return value** — every mode change is
+checked against `EnumDisplaySettings` and `GetSystemMetrics` afterwards, because
+113.6 measured a `ChangeDisplaySettingsEx` that returned `DISP_CHANGE_SUCCESSFUL`
+and did nothing. **Every test needs its control** (TESTING.md trap 6) — each blit
+run on a secondary is run identically on the primary in the same pass, since a
+`DDERR_INVALIDRECT` on DISPLAY2 cannot be told from a bug in the probe's own blit
+code otherwise, and #150 is an error this project has misattributed before.
+
+The blit matrix carries three cases that MUST fail — one pixel past the right
+edge, a negative origin, and a `BltFast` straddling the edge. All three returned
+`DDERR_INVALIDRECT` on every arm, which is the probe checking itself: had they
+passed, no other blit result would have meant anything.
+
+### 114.2 The arms, and why the matrix grew
+
+The first design paired each enumerated device GUID with a window on that device.
+The Wine dry run broke that design before a single mode was set:
+
+```
+[ex ATTACHEDSECONDARY] guid={aeb2cdd4-6e41-43ea-941c-8361cc760781}
+       driver="\\.\DISPLAY1"   -> \\.\DISPLAY1 at (0,0)-(1920,1080)  PRIMARY
+[ex ATTACHEDSECONDARY] guid={aeb2cdd4-6e41-43ea-941c-8361cc760781}
+       driver="\\.\DISPLAY2"   -> \\.\DISPLAY2 at (1920,-360)-(4480,1080)
+```
+
+**The same GUID for both monitors.** It names the adapter, not the head. A GUID
+that cannot distinguish two screens cannot be substituted to choose between them,
+so the substitution plan has no lever — and the only one left is which monitor the
+*window* is on. Two arms were added to test that, and one of them is the
+experiment that actually decides the design:
+
+| | GUID | window | what it separates |
+|---|---|---|---|
+| 0 | NULL | primary | control |
+| 1 | DISPLAY1 | DISPLAY1 | control |
+| 2 | DISPLAY2 | DISPLAY2 | the hoped-for path |
+| 3 | NULL | DISPLAY2 | does fullscreen simply follow the window? |
+| 4 | DISPLAY2 | DISPLAY1 | the discriminator: GUID or window? |
+
+Arms 3 and 4 each have two explanations alone and one explanation together. The
+probe now also detects the shared-GUID condition itself and says so loudly, since
+every downstream line is read differently depending on it.
+
+### 114.3 Wine's answer: all five arms are the same arm
+
+Wine 9.0, XWayland, DISPLAY1 1920x1080 primary beside DISPLAY2 2560x1440.
+
+```
+exclusive=yes mode-set=yes surface=1920x1080  blits ok=7 failed=0 (#150=0)   NULL / DISPLAY1
+exclusive=yes mode-set=yes surface=1920x1080  blits ok=7 failed=0 (#150=0)   DISPLAY1 / DISPLAY1
+exclusive=yes mode-set=yes surface=1920x1080  blits ok=7 failed=0 (#150=0)   DISPLAY2 / DISPLAY2
+exclusive=yes mode-set=yes surface=1920x1080  blits ok=7 failed=0 (#150=0)   NULL / DISPLAY2
+exclusive=yes mode-set=yes surface=1920x1080  blits ok=7 failed=0 (#150=0)   DISPLAY2 / DISPLAY1
+```
+
+Identical, to the count. Neither lever does anything. Three lines say why:
+
+```
+      window at (1920,-360) 2560x1440 -> 00060068
+      our window is on \\.\DISPLAY1
+      primary surface is 1920x1080 32bpp   (this device's own mode is 2560x1440)
+```
+
+The window was created at DISPLAY2's origin and Wine moved it to DISPLAY1 on the
+way into exclusive mode. The surface came back the size of the primary. And
+`SetDisplayMode(640,480,16)` returned `DD_OK` while moving no screen at all —
+113.6's lie, from a different API, caught only because the probe asks Windows
+rather than reading the HRESULT. The device's own 2560x1440 was refused outright
+with `DDERR_UNSUPPORTED`, which is §7 and trap 7 again: DirectDraw enumerates the
+primary's modes and nothing else.
+
+**Question 1's premise is false under Wine.** `DirectDrawEnumerateExA` with
+`DDENUM_ATTACHEDSECONDARYDEVICES` returned `DD_OK` and produced per-monitor
+entries with valid `HMONITOR`s — not `DDERR_UNSUPPORTED`. The secondary sources
+were wrong about the call and right about the outcome, for a different reason.
+
+**Question 3 is not answered, and the blit results must not be read as answering
+it.** No in-bounds blit failed on any arm — but no arm ever obtained a
+secondary-device surface, so the premise the warning describes was never
+constructed. "Blits behaved" here means "the probe's blit code is correct".
+
+**Consequence for Linux: this retires nothing.** The xrandr machinery stays.
+
+### 114.4 Question 4, answered: `DirectDrawCreateEx`, `NULL`, from `0x52de0f`
+
+Static analysis could not do it. The binary carries the strings — `DDraw.dll`,
+`DirectDrawCreate`, `DirectDrawCreateEx`, `DirectDrawEnumerateExA`, adjacent at
+`0x5a8b6c` — but **nothing in `.text`, `.rdata` or `.data` holds a pointer
+anywhere in `0x5a8b00–0x5a8c40`**. The call site is unreachable from the file.
+They sit among what read as allocator tags (`DD AGEH`, `DDC Pre 1`, `Primary`,
+`DDIGM 2`).
+
+So `[DDProbe] Enable=1` in the proxy hooks `KERNEL32!LoadLibraryA`,
+`GetProcAddress` and `FreeLibrary` through the existing `hook_import()`, and
+replaces the returned entry points with wrappers that log and forward. Off by
+default; installed from `DllMain`, which the file header licenses — the IAT is in
+`.idata`, which SteamStub leaves in the clear. Measured, GOG under Wine:
+
+```
+[ddprobe] LoadLibraryA("DDraw.dll") from 0052dc02 -> 78b70000
+[ddprobe] GetProcAddress(ddraw, "DirectDrawCreateEx")     from 0052dc1b
+[ddprobe] GetProcAddress(ddraw, "DirectDrawEnumerateExA") from 0052dc31
+[ddprobe] DirectDrawEnumerateExA(cb=0052e300, flags=0x00000003) from 0052dc9c
+[ddprobe] DirectDrawEnumerateExA(cb=0052e300, flags=0x00000007) from 0052dcb4
+[ddprobe] DirectDrawCreateEx(guid=NULL, out=0061c80c,
+                             iid={15e65ec0-3b9c-11d2-b92f-00609797ea5b},
+                             unk=00000000) from 0052de0f    -> DD_OK
+```
+
+Three things worth having.
+
+**One entry point, one argument.** `DirectDrawCreateEx`, `IID_IDirectDraw7`,
+`guid=NULL`. `DirectDrawCreate` is never resolved, so there is no DX1 path to
+support and no interface upgrade to arrange — the interception is a single
+substituted first argument at one call site, and the object lands in the global at
+`0x61c80c`.
+
+**The game enumerates devices itself**, twice, flags 3 then 7, into its own
+callback at `0x52e300` — and then creates with `NULL` anyway. So the machinery to
+know about a second monitor is already in the binary. Whatever `0x52e300` does
+with what it is handed is now the interesting question, and it is a static one.
+
+**The wrappers change nothing.** Every one forwards its arguments untouched and
+returns what the real call returned. The enumeration wrapper substitutes a
+trampoline that logs each device and calls the game's own callback with the
+arguments DirectDraw gave it, logging a `FALSE` return separately because
+stopping the enumeration early is what choosing looks like from outside.
+
+Measured on GOG. §21 established the Steam release is a different build, so the
+addresses above are GOG's until the Windows trip says otherwise; the log will say.
+
+### 114.5 What is verified, and what the Windows trip is for
+
+Verified: question 4, on GOG. Question 1's premise, disproved for Wine. Questions
+2 and 3, answered *for Wine* and in the negative — but Wine's ddraw is a
+reimplementation and the hypothesis under test is about what real Windows does, so
+that settles the Linux half only.
+
+Open, and one reboot away: whether real Windows hands back **different** GUIDs per
+head, and whether an arm aimed at a secondary produces a surface the size of that
+monitor. Those two lines decide the feature. If the GUIDs are shared there too,
+the plan has no lever and 113.8's opt-in is the end of it.
+
+The kit is staged in the Steam game folder — `ddmonprobe.exe`,
+`binkw32_ddprobe.dll` and `DDMON-TRIP.txt`. One cost is worth stating in advance
+because it outlives the run: the control arm drops the **primary** to 640x480 and
+back, and while nothing is written to the display database, Windows reflows the
+desktop and does not restore icon positions. Giving up the control would avoid it
+and make every other result unreadable, so it stays. `--dry` avoids it and still
+answers question 1.
+
+## 115. Borderless: the presenter works, and is still the wrong trade
+
+s114 measured that DirectDraw fullscreen cannot be pointed at a monitor — not by
+device GUID and not by window placement, on two Wine generations. This section is
+what happened next: an attempt to stop asking DirectDraw to put anything on screen
+at all, so the chosen monitor is reached by an ordinary window instead of by moving
+the player's primary.
+
+It works. It was still stopped. Both halves are the finding.
+
+### 115.1 The order was wrong, and that is the first lesson
+
+The cheap answers — substitute the device GUID, or place the window and let
+DirectDraw take exclusive fullscreen — are twenty-line changes with no ongoing
+responsibility. They were ruled out on **Wine** evidence and a display layer was
+built instead.
+
+That inference does not hold. Wine's ddraw enumerates per-monitor entries but hands
+back one adapter GUID for both heads: an unimplemented feature, not a measurement
+of how the feature behaves. On real Windows those routes remain open, and
+`ddmonprobe.exe` has been staged in the Steam folder the whole time to test them.
+
+**The rule this earns: a negative result from a reimplementation is not a negative
+result about the thing it reimplements.** It ranks alongside trap 2 — the expensive
+mistakes in this project are all inferences wearing a measurement's clothes.
+
+### 115.2 First design, and why it failed
+
+The engine already contains a windowed renderer (s6), and `slotprobe_hook()`
+already rewrites the apply-video call's arg3 on the stack. So: invert the s79 clamp
+to force windowed, strip the frame, lay the window over the chosen monitor.
+
+Three faults in sequence, each hiding the next.
+
+* **`TROPICO_LAUNCHER` made `choose_monitor()` return before arming anything.** That
+  guard exists so the patch does not fight the launcher over the primary; borderless
+  has no opinion about the primary. Until fixed, a launcher run logged *"watching for
+  the game window"* while the feature was never armed — a log asserting a feature was
+  on when it was not, which is the s113.6 failure shape.
+* **`tools/tropico-gog.sh` arms a virtual desktop by default**, which presents one
+  screen at 0,0 and leaves borderless nowhere to put the window. `Borderless=1` now
+  implies `TROPICO_NODESK`. The precondition is tested against `SM_CMONITORS`, not
+  `g_vd_inside` — the latter is only set when the *patch* armed the desktop and left
+  a state file, so a desktop armed by the launcher sailed straight past it.
+* **The window was created without `WS_VISIBLE` and never shown.** `Map State:
+  IsUnMapped`, correct geometry, correct monitor, invisible. In the normal path
+  `DDSCL_EXCLUSIVE|DDSCL_FULLSCREEN` is what maps the window; taking that away left
+  nothing that did. `SWP_SHOWWINDOW` fixed it.
+
+Then it showed a black screen.
+
+### 115.3 A retraction
+
+That black screen was diagnosed as *"the engine's windowed path never creates
+surfaces"*, from a `+ddraw` trace showing no `CreateSurface`, no `Blt`, no `Flip`.
+
+**That was wrong.** The *working* fullscreen run traces identically, and the tell was
+in it: **zero `SetDisplayMode` calls**, where s6 records a successful session as
+having three. Both traces stopped at the main menu. Neither reached the code that
+renders.
+
+Two runs were compared that were **both** short of the rendering path, and a
+conclusion drawn about rendering. TESTING.md trap 2, in its own words: *"an
+identical result across genuinely varied inputs usually means the input is not
+varying."* The readback that would have caught it — count `SetDisplayMode` before
+interpreting anything — is the same discipline as reading CFG `0x242` back.
+
+### 115.4 What the game actually asks DirectDraw for — VERIFIED
+
+A trace that *did* reach a map, which is where the renderer comes up:
+
+```
+SetCooperativeLevel(window, FULLSCREEN|ALLOWREBOOT|EXCLUSIVE)
+SetDisplayMode(1920, 1080, 16)
+CreateSurface(DDSCAPS_PRIMARYSURFACE)                      -- 16bpp RGB565
+CreateSurface(DDSCAPS_OFFSCREENPLAIN|DDSCAPS_SYSTEMMEMORY)
+loop:  Lock(offscreen) -> software render -> Unlock -> Blt(primary <- offscreen)
+```
+
+**Two surfaces. No `Flip`. No back buffer. No video-memory surface. No Direct3D
+device of its own.** The game renders in software into a system-memory buffer and
+asks DirectDraw to move it to the screen exactly once per frame.
+
+The `ddraw_surface1_Blt` beside each `ddraw_surface7_Blt` is Wine forwarding
+internally, not a second call — the game uses **v7 only**. Video is separate:
+`BinkCopyToBuffer`, twelve times in one startup, which decodes into a buffer the
+caller supplies and never touches DirectDraw.
+
+This is the most reusable thing in the section. Any future attempt to sit under this
+engine's rendering has this as its specification.
+
+### 115.5 #150, measured — s114's question 3, answered on Linux
+
+Two lines from the same trace:
+
+```
+Blt dst_rect (0,0)-(1920,1080)        src (0,0)-(1920,1080)   ok
+Blt dst_rect (1920,-360)-(4480,1080)  src (0,0)-(1920,1080)   DDERR_INVALIDRECT
+```
+
+**The destination is the game's window rect in screen coordinates, and the
+destination surface is the primary, which is bounded by the primary monitor.** Put
+the window on another screen and every frame lands outside the surface.
+
+That is s17, s18, s74, trap 7 and s114's question 3, all of them, in two lines — and
+it needed no Windows trip. It is also the black screen of 115.2: the same
+mechanism, silently clipped instead of raised.
+
+### 115.6 The presenter, and it works — MEASURED
+
+Three interceptions on the `IDirectDraw7` vtable, patched by member rather than by
+index, plus `Blt` and `Unlock` on the surface:
+
+| call | what happens |
+|---|---|
+| `SetCooperativeLevel` | `EXCLUSIVE\|FULLSCREEN` downgraded to `DDSCL_NORMAL` — DirectDraw never takes a display |
+| `SetDisplayMode` | swallowed, returns `DD_OK` — no display state changes at all |
+| `GetDisplayMode` | answers with the swallowed mode, not the desktop's |
+| `CreateSurface` | a primary request is answered with a plain system-memory surface |
+| `Blt` / `Unlock` | the source is converted and drawn to our own window with GDI |
+
+The game keeps its own fullscreen code path throughout — that path is chosen by the
+`+0x1c` flag, not by what DirectDraw does — so s79's brick never comes near it, and
+the CFG landmine the first design had to document does not exist.
+
+Measured, GOG under Wine, launched from a 2560x1440 secondary with a 1920x1080
+primary:
+
+```
+[present] SetCooperativeLevel 0x00000013 -> 0x00000008
+[present] SetDisplayMode(1920,1080,16) SWALLOWED
+[present] primary surface answered with a 1920x1080 16bpp RGB565 system-memory surface
+[present] IDirectDrawSurface7 Blt and Unlock hooked
+[present] first frame: 1920x1080 16bpp pitch 3840 -> window client 1920x1080
+```
+
+Owner-confirmed: **fullscreen on the chosen monitor, with the primary never
+touched.** The approach is proven to reach the screen.
+
+### 115.7 Three bugs, one family
+
+Every fault after the presenter came up was the same shape: **a lie that was not
+told consistently.**
+
+* Swallowing `SetDisplayMode` leaves DirectDraw reporting the desktop's 32bpp while
+  the game believes 16. A surface created with no `DDSD_PIXELFORMAT` inherits
+  DirectDraw's idea, so the game wrote 16-bit pixels into a 32-bit buffer. The
+  arithmetic is worth keeping: rows of 1920x2 = 3840 bytes into a surface with pitch
+  7680, presented as 32bpp, reads **two game rows per display row** — half height,
+  two rows side by side, which on a static menu looks like two copies of it.
+* Fixing only the *primary* surface was not enough. The game does not render into
+  the primary; it renders into the offscreen surface and blits that. The override
+  has to cover every surface the game creates.
+* Swallowing a setter means owning its getter. With `GetDisplayMode` still truthful
+  the game asks for a mode, is told it did not take, and stops.
+
+### 115.8 Where it stopped
+
+Targeting a monitor **larger** than the primary, the game reaches the menu and never
+calls `SetCooperativeLevel` at all. The likely cause is s2's desktop-width gate —
+the game refuses modes wider than what `GetDeviceCaps` reports, and that reports the
+primary. **Not confirmed**; work stopped before it was measured, and it is recorded
+as the next thing to test, not as a result.
+
+The fix would be to answer `GetDeviceCaps` with the target monitor's size too. That
+is coherent — having taken over the display, the game should be told about the
+display it is getting — and it is also the moment the scope of the commitment became
+plain: every question the engine asks the OS has to be answered consistently, and
+each inconsistency surfaces as a strange picture rather than an error.
+
+### 115.9 The verdict, and it is not a technical one
+
+`[Display] Borderless` stays in the source, **default 0**, with the presenter behind
+it. It is off, it is inert, and it is one command to remove.
+
+**It was stopped because the trade is bad, not because it does not work.** Weighed
+honestly:
+
+* On Windows the default is already "open on the primary at the primary's
+  resolution", so single-monitor players — most of them — see nothing. The
+  population this helps is multi-monitor Windows players who want a non-primary
+  screen and will not change their main display, and they have a one-click
+  workaround Windows itself provides.
+* On Linux the existing mechanism works and self-heals.
+* The other benefits are real but narrow: s17's alt-tab fault is *during map load*
+  only; arbitrary resolutions are unwanted because the patch already picks the
+  monitor's native mode; centring without Proton is a genuine but small defect.
+* Against that: permanent ownership of colour conversion, stride, row order, aspect
+  and frame timing; a per-frame full-screen convert-and-blit whose cost was **never
+  measured**; and hardware 3D closed off for good, since a D3D device needs a real
+  swapchain rather than a memory buffer.
+
+**The performance number should have come before any cosmetic fix.** It is the one
+objection that cannot be engineered around, and it was left unmeasured while two
+colour bugs were chased. If this is ever revived, that is the first measurement, not
+the last.
+
+**And the cheap routes are still untested on the platform where the problem is
+real.** s114's kit is staged. That trip should happen before any of this is
+reconsidered.
+
+## 117. The frame counter, and the number that should have come first
+
+s115.9 closed the presenter on a cost objection and then admitted, in its own last
+paragraph, that the cost had never been measured. This is that measurement. It also
+disposes of a question s91 left standing: whether the software renderer is still
+fast enough at the resolutions this patch now reaches, which is the only argument
+for restoring Hardware 3D that s91's deterministic refusal does not already answer.
+
+(The number 116 is skipped. The presenter's code comments already use `s116` for the
+`DirectDrawCreateEx` attach point, and that work is documented under 115.6.)
+
+### Why Blt is a frame, and how that was established
+
+Not assumed -- read off a WINEDEBUG `+ddraw` trace of a real map load, on the stock
+path with no proxy interception of any kind:
+
+```
+CreateSurface(DDSCAPS_PRIMARYSURFACE)                  <- no FLIP, no COMPLEX
+CreateSurface(DDSCAPS_OFFSCREENPLAIN|DDSCAPS_SYSTEMMEMORY)
+loop:  Lock(offscreen) -> render -> Unlock -> Blt(primary <- offscreen)
+```
+
+**This engine has no flipping chain.** The primary is a plain primary: no back
+buffer, no `Flip` anywhere in the trace. So there is no ambiguity about which call
+ends a frame, and no need for a heuristic -- one `Blt` on the primary is one frame.
+A counter written against `Flip`, the obvious guess, would have counted zero.
+
+### The instrument
+
+`[FrameCount] Enable=1`, default 0, reporting every `Interval` seconds. It rides the
+presenter's `DirectDrawCreateEx` interception, because that is the only code in the
+proxy that sees the `IDirectDraw7` -- but it is independent of it, and the
+independence is the whole point of the design:
+
+| | presenter armed | counter alone |
+|---|---|---|
+| `SetCooperativeLevel` | downgraded | **not hooked** |
+| `Set`/`GetDisplayMode` | swallowed / answered | **not hooked** |
+| `CreateSurface` | primary substituted | forwarded verbatim, result observed |
+| `Blt` | intercepted, drawn with GDI | **forwarded to the real one** |
+
+With `Borderless=0` the counter hooks exactly one method, learns which surface the
+primary is, and thereafter only notes that a blit happened. Nothing it measures has
+been altered by measuring it. With `Borderless=1` it counts presented frames
+instead, so s115.9's missing number is available from the same build.
+
+Percentiles come from a fixed 0.5 ms histogram rather than a sample buffer: no
+allocation, one increment per frame, and one `logf_` per window -- `logf_` reopens
+the file on every call, so a per-frame log line would have become the thing measured.
+
+### MEASURED: 2560x1440, GOG under system wine 9.0
+
+Owner's run, 2026-08-29, a 2560x1440 Wine virtual desktop on DP-3, software
+renderer, a couple of minutes of ordinary play after the map loaded:
+
+| | frames | wall | overall |
+|---|---|---|---|
+| menu + map load (3 windows) | 289 | 15.1 s | 19.2 fps |
+| **gameplay (20 windows)** | **7604** | **100.2 s** | **75.9 fps** |
+
+Gameplay, per five-second window: **worst 58.3 fps, best 128.1 fps**, p50 between
+8.25 and 17.25 ms, p95 between 13.75 and 22.25 ms. Exactly one gameplay window
+carries an elevated p99 of 80.25 ms, with a 214 ms worst frame -- a stall, not a
+render cost. Excluding it, p99 across every gameplay window is 16.75-25.75 ms.
+
+**The software renderer is not a bottleneck at 1440p.** It clears 60 fps in every
+sustained window and averages well above it, on a nine-megapixel-per-second job the
+2001 hardware would never have attempted.
+
+### The menu is a timer, and the contrast is what proves it
+
+The first windows report ~15 fps with p50 pinned at 66.75 ms and p95 at 68.25 --
+1/15 s almost exactly, with an earlier window at 33.75 ms = 1/30 s. Two exact frame
+intervals with nearly no spread is a redraw cadence, not a load.
+
+That reading is only safe because gameplay in the same run is broad -- p50 ranging
+8.25 to 17.25 ms across windows. A frame limiter would have clamped both. **So the
+engine has no global frame cap; the menu simply does not redraw when nothing
+changes.** Anyone measuring this again should discard the pre-map windows, and the
+ini documentation says so.
+
+### What this settles, and what it does not
+
+**Settled: Hardware 3D has no performance case on this machine.** s91 refused it on
+an install-bricking crash under native Windows and a smear under Proton, and noted
+it existed "to spare a 2001 CPU a job a modern one does without noticing." That last
+clause was an assumption until now. It is measured, and it holds at 2560x1440.
+`[Hardware] Enable=1` remains for anyone on wine who wants the option back.
+
+**Not settled, and this is the honest limit of the run:**
+
+* **One machine, one runtime.** GOG under system wine 9.0, inside a virtual desktop.
+  Steam-community requests for hardware 3D come mostly from Windows players on
+  unknown hardware, and nothing here speaks for them.
+* **A young map.** The last five windows read 83.3, 128.1, 68.3, 59.3, 58.3 fps --
+  a downward drift as the city grew. Two minutes is not a late-game island with
+  hundreds of agents, and the trend is the wrong direction. **A late-game save is
+  the measurement that would actually bound this**, and it has not been taken.
+* **The presenter's cost** was the third gap, and it was closed the same day. See
+  117.1 below.
+
+### 117.1 The presenter costs 8 ms a frame -- MEASURED, and s115.9 was right
+
+The same build, same machine, same monitor, `[Display] Borderless=1` (which implies
+`TROPICO_NODESK`: there is no second screen to target inside a virtual desktop).
+The presenter attached exactly as 115.6 described -- `SetDisplayMode(2560,1440,16)`
+swallowed, the primary answered with a system-memory RGB565 surface, the window laid
+over DP-3 at 0,0 2560x1440 with the primary never touched -- and every report line
+carries the `[PRESENTER]` tag, so there is no doubt which path was measured.
+
+Twenty gameplay windows each, ~100 s each, the same three leading windows discarded
+as menu and map load:
+
+| | windows | frames | wall | overall | worst window | p50 | p95 |
+|---|---|---|---|---|---|---|---|
+| stock (Blt to the real primary) | 20 | 7604 | 100.2 s | **75.9 fps** | 58.3 fps | 8.25-17.25 ms | 13.75-22.25 ms |
+| presenter (convert + GDI blit) | 20 | 4727 | 100.6 s | **47.0 fps** | 38.5 fps | 12.75-25.75 ms | 20.75-31.75 ms |
+
+**8.11 ms per frame, 1.62x slower, 38% of throughput gone.** The presenter's last
+six windows settle at 38.5-44.4 fps against the stock run's 58.3-83.3.
+
+The number is the right shape for what the code does: a full-screen 16bpp->32bpp
+conversion plus a `StretchDIBits` of 3.7 megapixels, single-threaded, every frame.
+That means **it scales with resolution** -- the cost is per-pixel, so it is cheaper
+at 1080p and worse than this on anything larger, which is precisely the direction
+this patch pushes people.
+
+**This vindicates 115.9's verdict and removes its one weakness.** That section
+stopped the presenter partly on a cost it admitted it had never measured, and
+recorded that as the thing to do first if the work were ever revived. The cost is
+now measured and it is substantial: a permanent 38% throughput tax, paid by every
+player who enables it, on top of permanent ownership of colour conversion, stride,
+aspect and frame timing, and hardware 3D closed off structurally rather than by
+policy.
+
+It is not disqualifying on its own -- 47 fps at 1440p is playable, and a 1080p
+player would pay less. But it is a real price for a feature whose beneficiaries are
+multi-monitor Windows players who decline a one-click workaround Windows itself
+provides. **`Borderless` stays default 0, and the file now says why with a number
+instead of an admission.**
+
+Both runs are kept: `logs/fps-software-2560x1440-gog-wine.log.gz` and
+`logs/fps-presenter-2560x1440-gog-wine.log.gz`.
