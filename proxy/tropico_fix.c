@@ -170,7 +170,6 @@ static int patch_preview_probe(void);
 static int patch_surface_probe(void);
 static int patch_preview_fix(int mode);
 static DWORD g_surf_va;
-static DWORD g_slot_out;
 static int patch_menu_slot(void);
 static int patch_slot_probe(void);
 static void find_applyvideo(void);
