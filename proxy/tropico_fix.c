@@ -5159,27 +5159,14 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     return TRUE;
 }
 
-/* ==================================================== s67 Bink instrumentation
+/* ==================================================== s67 Bink
  *
- * WHY. The startup movie does not play. The proxy replaces binkw32.dll, so the
- * proxy was the first suspect -- and it was EXONERATED by a control run with the
- * stock DLL, which behaves identically. That leaves two possibilities that look
- * the same from the outside:
- *
- *   (a) the game never asks for the movie -- a config, a table flag, or a branch
- *   (b) the game asks and Bink refuses -- most likely audio: the game opens Bink
- *       sound through BinkOpenMiles (Mss32.dll), and Bink will fail BinkOpen
- *       outright when its sound system did not initialise
- *
- * Those need opposite fixes, so guessing between them is worthless. We own the
- * DLL the game calls, which makes this a two-line measurement: stop forwarding the
- * handful of entry points that matter and log what actually crosses the boundary,
- * then tail-call the real Bink so behaviour is unchanged.
- *
- * Only these four are real functions; the other 77 exports stay pure forwarders. */
+ * The proxy replaces binkw32.dll. Of its 81 exports, only BinkCopyToBuffer is a
+ * real wrapper -- it carries the movie-pitch correction below. The other 80,
+ * including BinkOpen/BinkOpenMiles/BinkSetSoundSystem/BinkGetError, are plain
+ * forwards to binkw32_orig.dll in binkw32.def. */
 
 static HMODULE g_bink;
-static int g_bink_logged;
 
 static HMODULE bink_orig(void)
 {
@@ -5198,69 +5185,7 @@ static HMODULE bink_orig(void)
     return g_bink;
 }
 
-typedef void * (__stdcall *BinkOpen_t)(const char *, DWORD);
-typedef char * (__stdcall *BinkGetError_t)(void);
-typedef int    (__stdcall *BinkOpenMiles_t)(void *);
-typedef int    (__stdcall *BinkSetSoundSystem_t)(void *, DWORD);
-
-static const char *bink_err(void)
-{
-    HMODULE m = bink_orig();
-    if (!m) return "(no binkw32_orig)";
-    BinkGetError_t f = (BinkGetError_t)(void *)GetProcAddress(m, "_BinkGetError@0");
-    if (!f) return "(no BinkGetError)";
-    const char *e = f();
-    return e ? e : "(none)";
-}
-
-void * __stdcall my_BinkOpen(const char *name, DWORD flags);
-void * __stdcall my_BinkOpen(const char *name, DWORD flags)
-{
-    HMODULE m = bink_orig();
-    BinkOpen_t f = m ? (BinkOpen_t)(void *)GetProcAddress(m, "_BinkOpen@8") : NULL;
-    void *r = f ? f(name, flags) : NULL;
-    if (g_bink_logged < 64) {
-        g_bink_logged++;
-        /* Log the RESULT, not just the attempt. "asked and failed" and "asked and
-         * succeeded but was never drawn" are different bugs with different fixes. */
-        /* The CALLER is the point of this log now that Bink is exonerated. The
-         * movies that do play name the player function, and from there the intro's
-         * missing call site is a short walk up the call graph -- much shorter than
-         * chasing an indirect string table through the disassembly. */
-        logf_("  [bink] BinkOpen(\"%s\", 0x%08lx) -> %p   caller=%p%s%s",
-              name ? name : "(null)", flags, r, __builtin_return_address(0),
-              r ? "" : "   FAILED: ", r ? "" : bink_err());
-    }
-    return r;
-}
-
-int __stdcall my_BinkOpenMiles(void *p);
-int __stdcall my_BinkOpenMiles(void *p)
-{
-    HMODULE m = bink_orig();
-    BinkOpenMiles_t f = m ? (BinkOpenMiles_t)(void *)GetProcAddress(m, "_BinkOpenMiles@4") : NULL;
-    int r = f ? f(p) : 0;
-    logf_("  [bink] BinkOpenMiles(%p) -> %d%s%s", p, r,
-          r ? "" : "   FAILED: ", r ? "" : bink_err());
-    return r;
-}
-
-int __stdcall my_BinkSetSoundSystem(void *open, DWORD param);
-int __stdcall my_BinkSetSoundSystem(void *open, DWORD param)
-{
-    HMODULE m = bink_orig();
-    BinkSetSoundSystem_t f = m ? (BinkSetSoundSystem_t)(void *)GetProcAddress(m, "_BinkSetSoundSystem@8") : NULL;
-    int r = f ? f(open, param) : 0;
-    logf_("  [bink] BinkSetSoundSystem(%p, 0x%08lx) -> %d", open, param, r);
-    return r;
-}
-
-/* BinkCopyToBuffer(bink, dest, destpitch, destheight, destx, desty, flags).
- *
- * Forcing the menu into 1920x1080 made the intro render as a 640-wide image tiled
- * across the top third -- the signature of rows being written with a pitch of 640
- * pixels into a 1920-wide surface. This logs what the game actually passes so the
- * stale value can be identified rather than guessed at. */
+/* BinkCopyToBuffer(bink, dest, destpitch, destheight, destx, desty, flags). */
 typedef int (__stdcall *BinkCopyToBuffer_t)(void *, void *, int, unsigned, unsigned, unsigned, unsigned);
 
 int __stdcall my_BinkCopyToBuffer(void *b, void *dest, int pitch, unsigned h,
@@ -5268,38 +5193,21 @@ int __stdcall my_BinkCopyToBuffer(void *b, void *dest, int pitch, unsigned h,
 int __stdcall my_BinkCopyToBuffer(void *b, void *dest, int pitch, unsigned h,
                                   unsigned x, unsigned y, unsigned flags)
 {
-    /* MEASURED: the game passes pitch = movie_width * 2 (1280 for a 640-wide movie at
-     * 16bpp). The destination surface's real pitch follows the MODE, not the movie --
-     * 3840 at 1920x1080 -- so every source row advances only a third of a destination
-     * row: three copies across and a third of the height used. That is exactly the
-     * tiling seen once the menu was forced out of 640x480, and it is invisible at
-     * 640x480 because there the two happen to be equal.
+    /* The game passes pitch = movie_width * 2 (1280 for a 640-wide movie at
+     * 16bpp), but the destination surface's pitch follows the MODE, not the
+     * movie -- 3840 at 1920x1080. Every source row then advances a third of a
+     * destination row: three copies across, a third of the height used. That is
+     * invisible at 640x480, where the two happen to be equal.
      *
-     * Correct it to mode_width * 2. Gated on the ini because it rests on the surface
-     * pitch tracking the mode width, which is true for a DirectDraw primary/back
-     * buffer but is an inference, not something we can query through this interface. */
-    int orig = pitch;
+     * Off by default: the correction rests on the surface pitch tracking the
+     * mode width, which holds for a DirectDraw primary but is an inference we
+     * cannot query through this interface. */
     if (g_bink_pitch && g_vt_xs_va) {
         int mw = (int)(*(float *)(SIZE_T)g_vt_xs_va * 3200.0f + 0.5f);
         if (mw > 0 && pitch < mw * 2) pitch = mw * 2;
     }
-    static int n;
-    if (n < 12) {
-        n++;
-        logf_("  [bink] CopyToBuffer dest=%p pitch=%d%s destheight=%u at (%u,%u)"
-              " flags=0x%08x caller=%p",
-              dest, pitch, (pitch != orig) ? " (was tiling; corrected)" : "", h, x, y,
-              flags, __builtin_return_address(0));
-    }
     HMODULE m = bink_orig();
-    BinkCopyToBuffer_t f = m ? (BinkCopyToBuffer_t)(void *)GetProcAddress(m, "_BinkCopyToBuffer@28") : NULL;
+    BinkCopyToBuffer_t f = m ? (BinkCopyToBuffer_t)(void *)
+        GetProcAddress(m, "_BinkCopyToBuffer@28") : NULL;
     return f ? f(b, dest, pitch, h, x, y, flags) : 0;
-}
-
-char * __stdcall my_BinkGetError(void);
-char * __stdcall my_BinkGetError(void)
-{
-    HMODULE m = bink_orig();
-    BinkGetError_t f = m ? (BinkGetError_t)(void *)GetProcAddress(m, "_BinkGetError@0") : NULL;
-    return f ? f() : NULL;
 }
