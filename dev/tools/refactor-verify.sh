@@ -96,7 +96,15 @@ else note "ini advertises dead" "$DEAD"; fi
 # "width 1366 is not a multiple of 4 (FINDINGS 10: it would shear)" -- which tells
 # them to consult a document they do not have.
 LEAK=$(grep -rniE 'FINDINGS|\bs[0-9]{2,3}[.: ]|§[0-9]+' \
-        README.md known-good/tropico-fix.ini packaging/ tools/ 2>/dev/null | wc -l)
+        README.md known-good/tropico-fix.ini packaging/ tools/ proxy/README.md \
+        2>/dev/null | wc -l)
+# Files that actually SHIP, per tools/make-release.sh's own list. A citation here
+# reaches a user's disk, so these are counted separately and must reach zero.
+SHIPLEAK=$(grep -rniE 'FINDINGS|\bs[0-9]{2,3}[.: ]|§[0-9]+' \
+        README.md known-good/tropico-fix.ini packaging/README.md packaging/windows/ \
+        proxy/README.md tools/tropico tools/tropico-common.sh tools/tropico-setmode.sh \
+        tools/tropico-launchpoint.py tools/tropico-fullscreen.py 2>/dev/null | wc -l)
+note "leaks in SHIPPED files" "$SHIPLEAK $([ "$SHIPLEAK" -eq 0 ] && echo OK || echo '<- reaches a user disk')"
 note "user-facing leaks" "$LEAK $([ "$LEAK" -eq 0 ] && echo OK || echo '(expected until Workstream B)')"
 
 exit $fail
