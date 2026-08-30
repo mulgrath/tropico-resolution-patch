@@ -178,10 +178,18 @@ when diagnosing a user's report:
               ObjMatch, ObjW, ObjHMatch, ObjH
 [Text]        ReadoutColour
 [FrameCount]  Enable, Interval
+[VText]       Fix, FixW, FixH, BoxH, BoxDY, BoxDX, Entry,
+              BldgDH, BldgDY, DX, DY, ClipH
 ```
 
 Every Tier 1 and Tier 2 key keeps its current default, so a user who never opens the
 file sees no change.
+
+**The `[VText]` dials are Tier 2, not deletions.** Their names read like probe
+knobs and an earlier draft of this spec listed them for removal, but they default
+to on at 16:9 through `vt_dialled` and are the dials of the shipped rotated-label
+fix. Only `[VText] Probe` — which gates logging alone — is removed. Deleting the
+rest would have broken that fix at every 16:9 resolution, which is most users.
 
 ### A5. Rebuild `known-good/binkw32.dll`
 

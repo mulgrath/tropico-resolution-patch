@@ -613,14 +613,25 @@ unchanged."
 **Follow "The deletion method" above — call sites first, compiler second.**
 
 ini branches to remove: `[HudProbe]` (9 keys), `[TextProbe]` (1), `[ClipLog]` (4),
-and from `[VText]`: `Probe`, `Entry`, `Fix`, `FixW`, `FixH`, `DX`, `DY`, `BoxDX`,
-`BoxDY`, `BoxH`, `ClipH`, `BldgDY`, `BldgDH`.
+and from `[VText]` **only `Probe`**.
 
-**`[VText] Enable` STAYS, and so does the function it calls.** `patch_vtext` is
-defined at roughly line 5701, *inside the section banner-named "s49: the HUD shrink
-probe"*, but it is the shipped `[VText] Enable=1` fix — Tier 1, on by default.
-Deleting it would remove a shipped feature. The compiler will never name it,
-because the kept patcher still calls it; that is the check.
+**ALMOST THE WHOLE OF `[VText]` IS A SHIPPED FIX, DESPITE THE NAMES.** Read the
+comment at roughly line 1504 before touching anything here:
+
+> *"Probe now means 'log every rotated draw', not 'install the hooks': the hooks ARE
+> the fix, so Fix=1 installs them either way."*
+
+`Fix`, `Entry`, `FixW`, `FixH`, `BoxH`, `BoxDY`, `BoxDX`, `BldgDH`, `BldgDY`, `DX`,
+`DY` and `ClipH` all **default to on at 16:9** via `vt_dialled`, and they are the
+dials of the rotated-tab-label fix. Removing them would break that fix for most
+users. They all stay.
+
+`patch_vtext_probe()` and `patch_vtext_entry()` are **misnamed — they install the
+fix**, and the patcher calls both by default at 16:9. They stay too, along with
+`patch_vtext`. The compiler will never name any of the three; that is the check.
+
+The only thing to remove is `[VText] Probe`, which sets `g_vt_log`, and the two
+logging paths `g_vt_log` gates (roughly lines 4964 and 5117). Nothing else.
 
 Where to look (advisory only): `telemetry for the viewport fix`,
 `the HUD shrink probe`, `s65 probe`, `rotated-text ENTRY probe`,
@@ -1018,7 +1029,7 @@ grep -ohE 'GetPrivateProfile(Int|String)A\("[A-Za-z]+", *"[A-Za-z0-9_]+"' proxy/
   | sed -E 's/.*\("([A-Za-z]+)", *"([A-Za-z0-9_]+)"/[\1] \2/' | sort -u
 ```
 
-Expected: about 34 keys. Anything from `[Scan] [Watch] [WatchFB] [Poke] [ClipLog] [ImgW] [WorldW] [HudProbe] [Blit] [FileOrder] [DDProbe] [TextProbe] [Cursor] [Unix]` still present means an earlier task missed a read — go back and remove it there.
+Expected: about 46 keys (13 Tier 1 + 33 Tier 2). Anything from `[Scan] [Watch] [WatchFB] [Poke] [ClipLog] [ImgW] [WorldW] [HudProbe] [Blit] [FileOrder] [DDProbe] [TextProbe] [Cursor] [Unix]` still present means an earlier task missed a read — go back and remove it there.
 
 - [ ] **Step 2: Remove the last two debug keys**
 
@@ -1055,7 +1066,10 @@ echo 0 > dev/tools/baseline/warnings.count
 
 Tier 1 (13, documented in the shipped ini): `[Resolution] Width, Height`; `[Display] DeviceSelect, SetPrimary, Monitor, ForceFullscreen`; `[Hardware] Enable`; `[Art] Generate, FontNearest`; `[Intro] Force`; `[WorldFix] Enable`; `[Text] Enable`; `[VText] Enable`.
 
-Tier 2 (21, internal): `[Display] FollowLaunchMonitor, PinToPrimary`; `[Menu] Slot, FixPreview, FixMovieScale, FixHudMovie, FixMoviePitch`; `[WorldFix] Force, Guard, Match, Width, HMatch, Height, Ctor, ObjMatch, ObjW, ObjHMatch, ObjH`; `[Text] ReadoutColour`; `[FrameCount] Enable, Interval`.
+Tier 2 (33, internal): `[Display] FollowLaunchMonitor, PinToPrimary`; `[Menu] Slot, FixPreview, FixMovieScale, FixHudMovie, FixMoviePitch`; `[WorldFix] Force, Guard, Match, Width, HMatch, Height, Ctor, ObjMatch, ObjW, ObjHMatch, ObjH`; `[Text] ReadoutColour`; `[FrameCount] Enable, Interval`; `[VText] Fix, FixW, FixH, BoxH, BoxDY, BoxDX, Entry, BldgDH, BldgDY, DX, DY, ClipH`.
+
+The `[VText]` dials are Tier 2 despite their probe-ish names: they default to on at
+16:9 and are the dials of the shipped rotated-label fix. Only `[VText] Probe` goes.
 
 Any key present in the code but on neither list is a miss — decide its tier and record it.
 
@@ -1075,7 +1089,7 @@ Expected: all checks pass, as they have since Task 1.
 
 ```bash
 git add proxy/tropico_fix.c dev/CONFIG-REFERENCE.md
-git commit -m "config: 114 keys down to 34, and a clean build
+git commit -m "config: 114 keys down to 46, and a clean build
 
 Removes the last debug keys and any global the deleted probes left behind.
 
