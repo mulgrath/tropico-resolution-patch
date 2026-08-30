@@ -142,31 +142,16 @@ static int locate_sections(void)
  * refuse rather than patch the wrong site.
  */
 static int patch_world_viewport(UINT match_w, UINT new_w);
-static int patch_hud_probe(void);
-static int patch_blit_census(void);      /* s103 */
-static int g_bc_on;                      /* s103, armed from [Blit] Census; these
-                                          * three are read in the ini pass, which
-                                          * runs long before the census code, so
-                                          * they live up here with the prototype */
-static int g_bc_delay, g_bc_every, g_bc_miny;
 static int patch_vtext(int dy, int dx, int cliph, int have_dy, int have_dx, int have_cliph);
 static int patch_vtext_probe(void);
 static int patch_vtext_entry(void);
 static int patch_readout_colour(int want);
 static int patch_intro(void);
-static int patch_menu(int w, int h);
-static int patch_movie_probe(void);
-static DWORD g_mv_flag_va;
 static int g_menu_slot = -1;
 static int g_bink_pitch;
-static int patch_blit_probe(void);
 static int patch_blit_scale(void);
 static int patch_hud_movie(void);        /* s106 */
-static int patch_hud_movie_probe(void);  /* s106 */
-static int patch_preview_probe(void);
-static int patch_surface_probe(void);
 static int patch_preview_fix(int mode);
-static DWORD g_surf_va;
 static int patch_menu_slot(void);
 static int patch_slot_probe(void);
 static void find_applyvideo(void);
@@ -281,11 +266,6 @@ static DWORD g_vte_entry_va;
 /* s65 vtext hook state -- declared here because apply_patches() sets it from the
  * ini long before the hook that reads it is defined. */
 static int g_vt_fix, g_vt_fw, g_vt_fh, g_vt_boxh, g_vt_boxdy;
-static DWORD g_hud_mw, g_hud_mh;
-static int g_chr_enable;
-static DWORD g_chr_trim = 8;
-static DWORD g_hud_ph_style[8], g_hud_ph_size[8];
-static int g_hud_nph;
 static DWORD g_hud_table_va;
 static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
                             UINT objm, UINT objw, UINT objhm, UINT objh, int force, UINT guard);
@@ -1254,21 +1234,6 @@ static void apply_patches(void)
         }
     }
 
-    /* s103: the blit census (FINDINGS 102).  Read-only -- it tallies, it never
-     * changes a draw -- but it hooks the hottest path in the game, so it stays
-     * off unless the ini asks for it. */
-    {
-        char ip[MAX_PATH];
-        snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-        g_bc_on = GetPrivateProfileIntA("Blit", "Census", 0, ip);
-        if (g_bc_on) {
-            g_bc_delay = GetPrivateProfileIntA("Blit", "Delay", 25, ip);
-            g_bc_every = GetPrivateProfileIntA("Blit", "Every", 30, ip);
-            g_bc_miny = GetPrivateProfileIntA("Blit", "MinY", 0, ip);
-            if (patch_blit_census()) ok++; else fail++;
-        }
-    }
-
     /* s69: the movie/menu window. Off unless the ini asks. */
     {
         char ip[MAX_PATH];
@@ -1278,53 +1243,11 @@ static void apply_patches(void)
             if (patch_preview_fix(GetPrivateProfileIntA("Menu", "FixPreview", 2, ip)))
                 ok++; else fail++;
         }
-        if (GetPrivateProfileIntA("Menu", "SurfaceProbe", 0, ip)) {
-            /* descriptor width lives at +4 of the object; the locked base at +9 */
-            static const BYTE CS[]  = {0x66,0x3d,0x80,0x02, 0x7e,0x0a,
-                                       0xc7,0x44,0x24,0x10,0x80,0x02,0x00,0x00};
-            static const BYTE CM[]  = {   1,   1,   1,   1,    1,   1,
-                                          1,   1,   1,   1,   1,   1,   1,   1};
-            BYTE *c = find_unique_masked(CS, CM, sizeof CS, g_text, g_textlen, "descriptor");
-            if (c) {
-                /* the clamp reads `mov ax,[descW]` six bytes earlier */
-                g_surf_va = rd32(c - 4) + 5;
-                if (patch_surface_probe()) ok++; else fail++;
-            } else { logf_("[x] [surf] could not locate the screen descriptor"); fail++; }
-        }
-        if (GetPrivateProfileIntA("Menu", "PreviewProbe", 0, ip)) {
-            if (patch_preview_probe()) ok++; else fail++;
-        }
         if (GetPrivateProfileIntA("Menu", "FixMovieScale", 1, ip)) {
             if (patch_blit_scale()) ok++; else fail++;
         }
         if (GetPrivateProfileIntA("Menu", "FixHudMovie", 1, ip)) {
             if (patch_hud_movie()) ok++; else fail++;
-        }
-        if (GetPrivateProfileIntA("Menu", "HudMovieProbe", 0, ip)) {
-            if (patch_hud_movie_probe()) ok++; else fail++;
-        }
-        if (GetPrivateProfileIntA("Menu", "BlitProbe", 0, ip)) {
-            if (patch_blit_probe()) ok++; else fail++;
-        }
-        if (GetPrivateProfileIntA("Menu", "Probe", 0, ip)) {
-            /* The submode flag lives at [0x612fec]; read its VA out of the
-             * videowi2 branch rather than hardcoding it. */
-            static const BYTE FS[]  = {0x8b,0x15,0,0,0,0, 0x39,0x5a,0x1c};
-            static const BYTE FM[]  = {   1,   1,0,0,0,0,    1,   1,   1};
-            BYTE *f = find_unique_masked(FS, FM, sizeof FS, g_text, g_textlen, "movie submode");
-            if (f) g_mv_flag_va = rd32(f + 2);
-            /* The clamp's own fmul operands are the px<->virtual scale globals, and
-             * they are the cheapest read-out of the live mode. Take them from there
-             * so [Menu] Probe does not depend on [VText] being enabled. */
-            if (!g_vt_xs_va || !g_vt_ys_va) {
-                static const BYTE CS[]  = {0x66,0x3d,0x80,0x02, 0x7e,0x0a,
-                                           0xc7,0x44,0x24,0x10,0x80,0x02,0x00,0x00};
-                static const BYTE CM[]  = {   1,   1,   1,   1,    1,   1,
-                                              1,   1,   1,   1,   1,   1,   1,   1};
-                BYTE *c = find_unique_masked(CS, CM, sizeof CS, g_text, g_textlen, "clamp scales");
-                if (c) { g_vt_xs_va = rd32(c + 23); g_vt_ys_va = rd32(c + 69); }
-            }
-            if (patch_movie_probe()) ok++; else fail++;
         }
         /* s69: the menu renders at slot 4 -- but ONLY if the seven 640x480-only
          * assets were synthesised into data/. Defaulting this ON unconditionally
@@ -1346,9 +1269,7 @@ static void apply_patches(void)
 
         /* s73: the frontend preset. Installed whenever the menu slot is redirected
          * -- without it the menu is correct at startup and drops back to 640x480 the
-         * moment you return to it from a map. [Menu] SlotProbe=1 additionally logs
-         * every apply-video call and its caller, which is how this was found. */
-        g_slot_log = GetPrivateProfileIntA("Menu", "SlotProbe", 0, ip);
+         * moment you return to it from a map. */
         /* s74: keep the window on the monitor Wine measures. On by default --
          * the failure it prevents is DDERR_INVALIDRECT, which is unreadable. */
         g_pin_primary = GetPrivateProfileIntA("Display", "PinToPrimary", 1, ip);
@@ -1376,22 +1297,6 @@ static void apply_patches(void)
             if (patch_slot_probe()) ok++; else fail++;
         }
         if (g_menu_slot >= 0) { if (patch_menu_slot()) ok++; else fail++; }
-        int mw = GetPrivateProfileIntA("Menu", "W", 0, ip);
-        int mh = GetPrivateProfileIntA("Menu", "H", 0, ip);
-        if (GetPrivateProfileIntA("Menu", "Fit", 0, ip)) {
-            /* Pillarbox: the largest 4:3 box that fits the mode, which is what the
-             * owner asked for -- fill as much as possible without distorting. */
-            int W = GetPrivateProfileIntA("Resolution", "Width", 0, ip);
-            int H = GetPrivateProfileIntA("Resolution", "Height", 0, ip);
-            if (!mw || !mh) {
-                if (W && H) {
-                    mw = (H * 4 / 3 < W) ? H * 4 / 3 : W;
-                    mh = (W * 3 / 4 < H) ? W * 3 / 4 : H;
-                } else logf_("[x] [menu] Fit=1 needs [Resolution] Width/Height, or Menu W/H");
-            }
-            if (mw && mh) { if (patch_menu(mw, mh)) ok++; else fail++; }
-            else fail++;
-        }
     }
 
     /* s68: force the startup movie. Off unless the ini asks. */
@@ -1813,8 +1718,6 @@ static BOOL WINAPI hook_GetCursorPos(LPPOINT pt)
  * .idata, which SteamStub leaves in the clear, and the ddraw load happens at
  * 0x514e55 -- after the GetDeviceCaps that arms the patch pass, but there is no
  * reason to cut it that fine when .idata is readable at load time. */
-
-static int g_ddp_enable;
 
 typedef HMODULE  (WINAPI *loadlib_t)(LPCSTR);
 typedef FARPROC  (WINAPI *getproc_t)(HMODULE, LPCSTR);
@@ -2306,12 +2209,10 @@ static void maybe_install_ddprobe(void)
 {
     char ip[MAX_PATH];
     snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-    g_ddp_enable = GetPrivateProfileIntA("DDProbe", "Enable", 0, ip);
-    /* s118 rides it too, and for it the interception is not a probe but the whole
-     * feature: DirectDrawCreateEx is where the device GUID is chosen, and this is
-     * the only code that sees the call. Read here rather than from g_devsel,
-     * because maybe_install_ddprobe() runs BEFORE choose_monitor() sets that --
-     * the hook has to exist before the game resolves anything. */
+    /* s118: DirectDrawCreateEx is where the device GUID is chosen, and this is the
+     * only code that sees the call. Read here rather than from g_devsel, because
+     * maybe_install_ddprobe() runs BEFORE choose_monitor() sets that -- the hook
+     * has to exist before the game resolves anything. */
     /* DEFAULT ON since s118.15's green run. It costs nothing when there is nothing
      * to do -- one monitor returns early, and launching from the primary finds no
      * device to substitute -- and its failure mode is bounded: an unresolvable
@@ -2339,7 +2240,7 @@ static void maybe_install_ddprobe(void)
     if (g_fc)
         logf_("[*] [fps] frame counting armed, reporting every %d s. It intercepts"
               " nothing the game relies on; Blt is forwarded untouched.", g_fc_interval);
-    if (!g_ddp_enable && !g_fc && !g_devsel) return;
+    if (!g_fc && !g_devsel) return;
 
     if (!hook_import("KERNEL32.dll", "LoadLibraryA", (void *)hook_LoadLibraryA,
                      (void **)&g_ddp_loadlib))
@@ -4232,23 +4133,6 @@ static int install_cursor_probe(void)
     return 1;
 }
 
-static DWORD wfb_read32(DWORD va);
-static WORD  wfb_read16(DWORD va);
-
-static DWORD wfb_read32(DWORD va)
-{
-    DWORD v = 0;
-    BYTE *p = g_base + (va - 0x400000);
-    memcpy(&v, p, 4);
-    return v;
-}
-static WORD wfb_read16(DWORD va)
-{
-    WORD v = 0;
-    BYTE *p = g_base + (va - 0x400000);
-    memcpy(&v, p, 2);
-    return v;
-}
 
 /* ------------------------------------------- the world viewport width (§43)
  *
@@ -4527,17 +4411,6 @@ static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
  * plateauing at the widget count is the expected shape, and hits climbing forever
  * would itself be worth knowing (something re-derives the rect every frame).
  */
-static const BYTE HUD_SIG[] = {
-    0x51,0x53,0x56,0x8b,0xf1, 0xe8,0,0,0,0,
-    0x85,0xc0, 0x0f,0x84,0,0,0,0,
-    0xa1,0,0,0,0, 0x85,0xc0, 0x75,0x0d,
-    0xa1,0,0,0,0, 0x85,0xc0, 0x0f,0x84 };
-static const BYTE HUD_MASK[] = {
-       1,   1,   1,   1,   1,    1,0,0,0,0,
-       1,   1,    1,   1,0,0,0,0,
-       1,0,0,0,0,    1,   1,    1,   1,
-       1,0,0,0,0,    1,   1,    1,   1 };
-
 static volatile DWORD g_hud_calls, g_hud_hits;
 static volatile DWORD g_hud_hash[4], g_hud_live[4];
 /* written by the phase thread, read by the stub every draw */
@@ -4565,87 +4438,6 @@ static volatile DWORD g_chr_zero;
 static volatile DWORD g_chr_base;
 static volatile DWORD g_chr_apply, g_chr_setx, g_chr_sety, g_chr_setcx, g_chr_setcy;
 static volatile DWORD g_chr_dirty;
-static float g_chr_fx = 2.0f, g_chr_fy = 2.0f;
-static const DWORD CHR_ART_W[5] = { 640, 800, 1024, 1280, 1600 };
-static const DWORD CHR_ART_H[5] = { 480, 600,  768, 1024, 1200 };
-
-/* The factors MUST be correct before the game first builds a window, and run O
- * proves a delayed poll is not good enough: hudprobe_thread sleeps Delay seconds
- * before its first update, the map loaded inside that window, and FUN_00502510 --
- * which runs ONCE (s53.2) -- consumed the 2.0f static initialiser at slot 0 where
- * the right value is 5.0.  The bar's rect came out 1280x404 instead of 3200x1010,
- * the log printed that verbatim, and it then persisted through every F2.
- *
- * So: start at DLL load, poll at 50 ms, and on a slot change raise a dirty flag
- * that makes the stub zero the path-B rect for half a second -- which forces the
- * pre-draw back down the path-B branch so the rect is recomputed with the new art
- * set's factors instead of keeping one computed for the old one. */
-static DWORD WINAPI chrome_factor_thread(LPVOID unused)
-{
-    (void)unused;
-    DWORD last = 0xffffffff, clear_at = 0;
-    for (;;) {
-        DWORD cfg = wfb_read32(0x612fec), sl = 0xffffffff;
-        if (cfg && !IsBadReadPtr((void *)(SIZE_T)cfg, 0x1c))
-            memcpy(&sl, (BYTE *)(SIZE_T)(cfg + 0x18), 4);
-        if (sl < 5) {
-            if (sl != last) {
-                g_chr_fx = 3200.0f / (float)CHR_ART_W[sl];
-                g_chr_fy = 2400.0f / (float)CHR_ART_H[sl];
-                g_chr_dirty = 0;  /* superseded by patch_pathb_recompute */
-                clear_at = GetTickCount() + 500;
-                logf_("  [chrome] slot %lu (art %ux%u) -> factors %.4f / %.4f;"
-                      " path-B rects invalidated for 500 ms so they recompute",
-                      (unsigned long)sl, (unsigned)CHR_ART_W[sl], (unsigned)CHR_ART_H[sl],
-                      g_chr_fx, g_chr_fy);
-                last = sl;
-            } else if (g_chr_dirty && GetTickCount() >= clear_at) {
-                g_chr_dirty = 0;
-            }
-        }
-        Sleep(50);
-    }
-}
-static DWORD g_hud_delay, g_hud_every, g_hud_dwell;
-
-/* s50.7 / s50.8: does class-4 STYLE 1 stretch the sprite onto the widget rect?
- *
- * Style 1 hands FUN_005002c0 a full destination rectangle built from the widget's
- * virtual rect; style 0 -- which every shipped widget with art uses -- hands
- * FUN_00501b90 a bare position.  If style 1 stretches, a HUD that scales needs no
- * new art at all.  No shipped widget uses style 1, so this runs a path PopTop
- * never ran; that is the whole risk, and it is why this is gated to six widgets
- * in one panel.
- *
- * THE HAZARD, and why the third gate condition is not optional:
- *   style 0, 0x502ac6:  mov eax,[esi+0x66] ; test eax,eax ; je   <- guarded
- *   style 1, 0x5026c5:  mov eax,[esi+0x66] ; mov ecx,[eax]       <- NOT guarded
- * Four of the nine 560x560 class-4 widgets in MAINWIN.WIN carry no art, so
- * forcing style 1 on them dereferences NULL.  The stub refuses any widget whose
- * obj+0x66 is zero.
- *
- * The gate matches the AUTHORED rect at obj+0x50/0x52 (saved by FUN_0052a9f0),
- * not the live rect at obj+0x0f/0x11 -- otherwise the probe's own writes would
- * move the target out from under it and the phases could not cycle.
- */
-/* Short conditional jumps are a trap here: the stub grew past 127 bytes when the
- * chrome block was added, and `stub[f] = i - f - 1` silently wrapped negative --
- * a `je` that would have landed 150 bytes BACKWARDS, into unmapped memory, on the
- * first artless class-4 widget.  Caught by disassembling a replica, which is the
- * only reason it is not a crash report.  Every skip-to-end jump is now near
- * (rel32), and the one remaining short jump is range-checked. */
-#define J_NEAR_NE(st,i,f)  do { (st)[(i)++]=0x0f; (st)[(i)++]=0x85; (f)=(i); (i)+=4; } while (0)
-#define J_NEAR_EQ(st,i,f)  do { (st)[(i)++]=0x0f; (st)[(i)++]=0x84; (f)=(i); (i)+=4; } while (0)
-static int fix_near(BYTE *stub, int f, int i)
-{ LONG d = i - f - 4; memcpy(stub + f, &d, 4); return 1; }
-static int fix_short(BYTE *stub, int f, int i, const char *what)
-{
-    int d = i - f - 1;
-    if (d < 0 || d > 127) { logf_("[x] [hudprobe] short jump '%s' out of range (%d)"
-                                  " -- REFUSING to install a corrupt stub", what, d);
-                            return 0; }
-    stub[f] = (BYTE)d; return 1;
-}
 
 /* s53: correct the path-B conversion at its source.
  *
@@ -5433,124 +5225,6 @@ static int patch_intro(void)
     return 1;
 }
 
-/* ------------------------------------------------- s69 the movie/menu window
- *
- * The main menu and the intro both render into a 640x480 box in the TOP-LEFT
- * corner of a 1920x1080 screen.
- *
- * FUN_00515d30 is "play movie #i". After choosing a layout it sizes the window:
- *
- *     w = min(screenW, 640) ; h = min(screenH, 480)      <- the clamp, 0x515e58
- *     ... converted to virtual units through 0x5a0ff8 / 0x5a1000 ...
- *     msg 0x6a = w      msg 0x6b = h
- *     msg 0x68 = (3200 - w) / 2                          <- and it CENTRES
- *     msg 0x69 = (2400 - h) / 2
- *
- * So the engine already centres the window. That is the part that does not add up:
- * a centred 640x480 window would sit in the MIDDLE of the screen, not the corner.
- * Which means the menu is probably NOT on this path at all -- it is on the
- * `videowin.win` branch, which jumps to 0x515f86 and skips the clamp, the SetWH and
- * the centring together.
- *
- * Two things are therefore built here, so one run settles it either way:
- *   patch_menu()        widens the clamp to a PILLARBOXED size (4:3 inside the mode)
- *   patch_movie_probe() logs which branch each movie actually takes
- *
- * If the picture changes, the menu was on the clamped path and this is the fix.
- * If it does not, the log names the branch that needs the work instead -- and the
- * clamp change then only affects in-game event movies, which is the risk to watch. */
-
-static int patch_menu(int w, int h)
-{
-    /* mov ax,[screenW] / cmp ax,640 / jle / mov [esp+0x10],640 / ... / same for height */
-    static const BYTE SIG[]  = {0x66,0xa1,0,0,0,0, 0x66,0x3d,0x80,0x02, 0x7e,0x0a,
-                                0xc7,0x44,0x24,0x10,0x80,0x02,0x00,0x00, 0xeb,0x07,
-                                0x0f,0xbf,0xc0, 0x89,0x44,0x24,0x10, 0xdb,0x44,0x24,0x10,
-                                0xd8,0x0d,0,0,0,0, 0xe8,0,0,0,0, 0x8b,0xf8,
-                                0x66,0xa1,0,0,0,0, 0x66,0x3d,0xe0,0x01, 0x7e,0x0a,
-                                0xc7,0x44,0x24,0x10,0xe0,0x01,0x00,0x00};
-    static const BYTE MASK[] = {   1,   1,0,0,0,0,    1,   1,   1,   1,    1,   1,
-                                   1,   1,   1,   1,   1,   1,   1,   1,    1,   1,
-                                   1,   1,   1,    1,   1,   1,   1,    1,   1,   1,   1,
-                                   1,   1,0,0,0,0,    1,0,0,0,0,    1,   1,
-                                   1,   1,0,0,0,0,    1,   1,   1,   1,    1,   1,
-                                   1,   1,   1,   1,   1,   1,   1,   1};
-    BYTE *at = find_unique_masked(SIG, MASK, sizeof SIG, g_text, g_textlen, "movie clamp");
-    if (!at) { logf_("[x] [menu] clamp signature not found"); return 0; }
-    WORD  w16 = (WORD)w, h16 = (WORD)h;
-    DWORD w32 = (DWORD)w, h32 = (DWORD)h;
-    if (!poke(at +  8, &w16, 2) || !poke(at + 16, &w32, 4) ||
-        !poke(at + 54, &h16, 2) || !poke(at + 62, &h32, 4)) {
-        logf_("[x] [menu] VirtualProtect failed"); return 0;
-    }
-    logf_("[+] [menu] movie-window clamp at %p: 640x480 -> %dx%d (the engine centres it itself)",
-          (void *)at, w, h);
-    return 1;
-}
-
-/* Log which branch FUN_00515d30 takes. Its first instruction is `mov eax,[imm32]`,
- * five bytes, so the detour relocates cleanly -- the same shape as the vtext entry
- * probe. ECX carries the movie index on entry. */
-static void __cdecl movie_hook(DWORD idx, DWORD playing)
-{
-    static int n;
-    if (n >= 24) return;
-    n++;
-    DWORD sub = 0;
-    if (g_mv_flag_va) {
-        DWORD obj = *(DWORD *)(SIZE_T)g_mv_flag_va;
-        if (obj) sub = *(DWORD *)(SIZE_T)(obj + 0x1c);
-    }
-    /* The mode the GAME thinks it is in, and the mode the DESKTOP is actually in.
-     * If they disagree, the movie is not mis-drawn at all -- the game is rendering
-     * a correct 640x480 frame that nothing is scaling up to the panel. That is a
-     * presentation problem, not a layout one, and it needs a completely different
-     * fix from anything inside the exe. */
-    int gw = 0, gh = 0;
-    if (g_vt_xs_va && g_vt_ys_va) {
-        gw = (int)(*(float *)(SIZE_T)g_vt_xs_va * 3200.0f + 0.5f);
-        gh = (int)(*(float *)(SIZE_T)g_vt_ys_va * 2400.0f + 0.5f);
-    }
-    logf_("          game mode %dx%d | desktop %dx%d", gw, gh,
-          GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
-    logf_("  [movie] play #%lu   already-playing=%lu   [0x612fec+0x1c]=%lu -> %s",
-          idx, playing, sub,
-          playing ? "REFUSED (a movie is already up)"
-                  : (sub ? "videowi2.win (clamped+centred path)"
-                         : "videowin.win (BYPASSES clamp and centring)"));
-}
-
-static int patch_movie_probe(void)
-{
-    /* mov eax,[playing-flag] / sub esp,0x28 / push ebx / xor ebx,ebx / cmp eax,ebx */
-    static const BYTE SIG[]  = {0xa1,0,0,0,0, 0x83,0xec,0x28, 0x53, 0x33,0xdb, 0x3b,0xc3};
-    static const BYTE MASK[] = {   1,0,0,0,0,    1,   1,   1,    1,    1,   1,    1,   1};
-    BYTE *at = find_unique_masked(SIG, MASK, sizeof SIG, g_text, g_textlen, "play-movie entry");
-    if (!at) { logf_("[x] [movie] entry signature not found"); return 0; }
-    DWORD playing_va = rd32(at + 1);
-
-    BYTE *tr = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tr) { logf_("[x] [movie] VirtualAlloc failed"); return 0; }
-    int o = 0;
-    tr[o++] = 0x60; tr[o++] = 0x9C;                    /* pushad / pushfd     */
-    tr[o++] = 0xA1; memcpy(tr + o, &playing_va, 4); o += 4;  /* mov eax,[flag] */
-    tr[o++] = 0x50;                                    /* push eax (playing)  */
-    tr[o++] = 0x51;                                    /* push ecx (index)    */
-    tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&movie_hook; memcpy(tr + o, &f, 4); o += 4; }
-    tr[o++] = 0xFF; tr[o++] = 0xD0;                    /* call eax            */
-    tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x08;    /* add esp,8           */
-    tr[o++] = 0x9D; tr[o++] = 0x61;                    /* popfd / popad       */
-    memcpy(tr + o, at, 5); o += 5;                     /* relocated mov eax   */
-    tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((at + 5) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
-
-    BYTE det[5]; det[0] = 0xE9;
-    { DWORD r = (DWORD)(SIZE_T)(tr - (at + 5)); memcpy(det + 1, &r, 4); }
-    if (!poke(at, det, 5)) { logf_("[x] [movie] VirtualProtect failed"); return 0; }
-    logf_("[+] [movie] play-movie entry %p detoured -> %p (playing flag %08x)",
-          (void *)at, (void *)tr, playing_va);
-    return 1;
-}
-
 /* ------------------------------------------ s69c the startup ASKS for 640x480
  *
  * Two earlier attempts failed and both were aimed at the wrong thing:
@@ -5721,75 +5395,11 @@ static int patch_force_fullscreen(void)
     return 1;
 }
 
-/* ------------------------------------------------- s69.6 the movie blit probe
- *
- * The movie tiles 3x across the top ~160px: a destination advance of 640 px per source
- * row against a 1920 px screen row. NOT an aspect-ratio problem -- a wrong aspect
- * stretches, it cannot duplicate an image.
- *
- * Bink is innocent, established by a crash rather than an argument. Just before the
- * copy, FUN_00531690 allocates bink->Width * bink->Height * 2 (640*480*2) and passes
- * pitch = width*2 = 1280. Forcing that pitch to 3840 made Bink write 1.8MB into a
- * 614KB buffer and the game died -- which PROVES 1280 is right and the buffer really
- * is movie-sized.
- *
- * So the fault is the game's own blit of that buffer, which starts at 0x531efd by
- * loading the screen width from ds:0x60c18c. It has two paths, selected at 0x531f47:
- *   [esp+0x30] != 0  -> a SCALING path (0x531f5f) that fdivs against the movie's own
- *                       dimensions -- the machinery that should fill a larger widget
- *   [esp+0x30] == 0  -> an unscaled path at 0x53204a
- *
- * Which one runs, and with what geometry, decides the fix. Log it rather than guess:
- * four wrong theories have already been paid for on this one screen. */
-static void __cdecl blit_hook(DWORD ebp, DWORD *sp)
-{
-    static int n;
-    if (n >= 6) return;
-    n++;
-    /* sp points at the callee's esp as it was on entry to the detour. */
-    logf_("  [blit] path-flag[esp+0x30]=%lu  movie %lux%lu  screenW=%d  ->  %s",
-          sp[0x30 / 4],
-          *(DWORD *)(SIZE_T)(ebp + 0x9a), *(DWORD *)(SIZE_T)(ebp + 0x9e),
-          g_vt_xs_va ? (int)(*(float *)(SIZE_T)g_vt_xs_va * 3200.0f + 0.5f) : 0,
-          sp[0x30 / 4] ? "SCALING path 0x531f5f" : "UNSCALED path 0x53204a");
-    logf_("         locals: [10]=%lu [14]=%lu [1c]=%lu [24]=%lu [28]=%lu [2c]=%lu [34]=%lu [38]=%lu",
-          sp[0x10/4], sp[0x14/4], sp[0x1c/4], sp[0x24/4],
-          sp[0x28/4], sp[0x2c/4], sp[0x34/4], sp[0x38/4]);
-}
-
-static int patch_blit_probe(void)
-{
-    /* the two instructions right after the BinkCopyToBuffer call:
-     *   mov ecx,[esp+0x2c] / mov esi,[esp+0x10] / movsx eax,WORD ds:0x60c18c */
-    static const BYTE SIG[]  = {0x8b,0x4c,0x24,0x2c, 0x8b,0x74,0x24,0x10,
-                                0x0f,0xbf,0x05,0,0,0,0};
-    static const BYTE MASK[] = {   1,   1,   1,   1,    1,   1,   1,   1,
-                                   1,   1,   1,0,0,0,0};
-    BYTE *at = find_unique_masked(SIG, MASK, sizeof SIG, g_text, g_textlen, "movie blit");
-    if (!at) { logf_("[x] [blit] signature not found"); return 0; }
-
-    BYTE *tr = (BYTE *)VirtualAlloc(NULL, 96, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tr) { logf_("[x] [blit] VirtualAlloc failed"); return 0; }
-    int o = 0;
-    tr[o++] = 0x60; tr[o++] = 0x9C;                                 /* pushad / pushfd     */
-    tr[o++] = 0x8D; tr[o++] = 0x44; tr[o++] = 0x24; tr[o++] = 0x24; /* lea eax,[esp+0x24]  */
-    tr[o++] = 0x50;                                                 /* push eax (orig esp) */
-    tr[o++] = 0x55;                                                 /* push ebp            */
-    tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&blit_hook; memcpy(tr + o, &f, 4); o += 4; }
-    tr[o++] = 0xFF; tr[o++] = 0xD0;                                 /* call eax            */
-    tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x08;                 /* add esp,8           */
-    tr[o++] = 0x9D; tr[o++] = 0x61;                                 /* popfd / popad       */
-    memcpy(tr + o, at, 8); o += 8;                                  /* relocated two movs  */
-    tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((at + 8) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
-
-    BYTE det[8];
-    det[0] = 0xE9;
-    { DWORD r = (DWORD)(SIZE_T)(tr - (at + 5)); memcpy(det + 1, &r, 4); }
-    memset(det + 5, 0x90, 3);
-    if (!poke(at, det, 8)) { logf_("[x] [blit] VirtualProtect failed"); return 0; }
-    logf_("[+] [blit] movie blit at %p detoured -> %p", (void *)at, (void *)tr);
-    return 1;
-}
+/* s69 the movie/menu window (removed): [Menu] W/H/Fit widened the movie-window
+ * clamp at 0x515e58 to a pillarboxed size, and [Menu] Probe logged which branch
+ * FUN_00515d30 took -- the stock path (clamp+centre) or the `videowin.win`
+ * branch at 0x515f86, which bypasses both. Neither is a shipped fix; the movie
+ * fixes that ship are below. */
 
 /* ------------------------------------------ s69.6 let the movie blit MAGNIFY
  *
@@ -5972,225 +5582,6 @@ static int patch_hud_movie(void)
           " panel instead of copying it 1:1 into the corner.  No other widget is"
           " touched", (void *)at, (void *)stub);
     return 1;
-}
-
-/* ------------------------------------------------ s106 the HUD movie probe
- *
- * Read-only.  Detours the scalable-flag test in FUN_00531990 and prints, once per
- * distinct (destination, movie) pair, what the paint has actually resolved.  The
- * stack slots are the paint's own: [esp+0x14] destW and [esp+0x38] destH were written
- * at 0x531ab1/0x531abe, [esp+0x28] destTop at 0x531a56, and ebx has held destLeft
- * since 0x531a24.  esp has not moved since the prologue, so they are all still live
- * where this sits. */
-static void __cdecl hm_probe_hook(BYTE *obj, int destL, const DWORD *fr)
-{
-    static struct { int w, h, mw, mh; } seen[8];
-    static int n;
-    int destT  = (int)fr[0x28 / 4];
-    int destW  = (int)fr[0x14 / 4];
-    int destH  = (int)fr[0x38 / 4];
-    DWORD flag = *(DWORD *)(obj + 0x7a);
-    DWORD rsz  = *(DWORD *)(obj + 0x7e);
-    DWORD *bk  = *(DWORD **)(obj + 0x96);
-    int mw = bk ? (int)bk[0] : 0;
-    int mh = bk ? (int)bk[1] : 0;
-    int k;
-    for (k = 0; k < n; k++)
-        if (seen[k].w == destW && seen[k].h == destH
-            && seen[k].mw == mw && seen[k].mh == mh) return;
-    if (n >= (int)(sizeof seen / sizeof seen[0])) return;
-    seen[n].w = destW; seen[n].h = destH; seen[n].mw = mw; seen[n].mh = mh; n++;
-    logf_("  [movie] widget virtual %d,%d %dx%d -> destination %d,%d %dx%d;"
-          " movie %dx%d; scalable=%lu sizedtomovie=%lu -> %s",
-          *(short *)(obj + 0x0b), *(short *)(obj + 0x0d),
-          *(short *)(obj + 0x0f), *(short *)(obj + 0x11),
-          destL, destT, destW, destH, mw, mh,
-          (unsigned long)flag, (unsigned long)rsz,
-          (flag && (destW != mw || destH != mh))
-              ? "SCALED to fit the widget"
-              : "copied 1:1 and clamped to the movie's own size");
-}
-
-static int patch_hud_movie_probe(void)
-{
-    static const BYTE SIG[] = {0x8b,0x45,0x7a, 0x85,0xc0, 0x74,0x1e,
-                               0x8b,0x85,0x96,0x00,0x00,0x00,
-                               0x8b,0x4c,0x24,0x14, 0x3b,0x08};
-    BYTE *at = find_unique(SIG, sizeof SIG, g_text, g_textlen,
-                           "class-0x040 scalable-flag test (FUN_00531990)");
-    if (!at) { logf_("[x] [movie] paint signature not found -- HUD probe NOT armed");
-               return 0; }
-
-    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 96, MEM_COMMIT | MEM_RESERVE,
-                                      PAGE_EXECUTE_READWRITE);
-    if (!stub) { logf_("[x] [movie] VirtualAlloc failed"); return 0; }
-
-    int i = 0;
-    stub[i++] = 0x60;                                          /* pushad  esp -= 32 */
-    stub[i++] = 0x9c;                                          /* pushfd  esp -= 4  */
-    stub[i++] = 0x8d; stub[i++] = 0x44; stub[i++] = 0x24; stub[i++] = 0x24;
-                                                    /* lea eax,[esp+0x24] -> paint esp */
-    stub[i++] = 0x50;                                          /* push eax   (frame) */
-    stub[i++] = 0x53;                                          /* push ebx   (destL) */
-    stub[i++] = 0x55;                                          /* push ebp   (widget) */
-    stub[i++] = 0xe8;
-    { DWORD r = (DWORD)(SIZE_T)((BYTE *)hm_probe_hook - (stub + i + 4));
-      memcpy(stub + i, &r, 4); i += 4; }
-    stub[i++] = 0x83; stub[i++] = 0xc4; stub[i++] = 0x0c;      /* add esp,12 */
-    stub[i++] = 0x9d;                                          /* popfd */
-    stub[i++] = 0x61;                                          /* popad */
-    memcpy(stub + i, at, 5); i += 5;             /* mov eax,[ebp+0x7a] / test eax,eax */
-    stub[i++] = 0xe9;
-    { DWORD r = (DWORD)(SIZE_T)((at + 5) - (stub + i + 4));
-      memcpy(stub + i, &r, 4); i += 4; }
-
-    BYTE det[5];
-    det[0] = 0xE9;
-    { DWORD r = (DWORD)(SIZE_T)(stub - (at + 5)); memcpy(det + 1, &r, 4); }
-    if (!poke(at, det, 5)) { logf_("[x] [movie] VirtualProtect failed"); return 0; }
-
-    logf_("[+] [movie] HUD movie probe armed at %p -> %p: every class-0x040 paint"
-          " reports its destination against the movie it was handed",
-          (void *)at, (void *)stub);
-    return 1;
-}
-
-/* --------------------------------------------- s70 the map-preview probe
- *
- * The scenario screen's map preview tiles three across with the second band as colour
- * noise. Same 3x signature as the movie (1920/640) and noise means the SOURCE read is
- * running past its buffer.
- *
- * NOT caused by [Menu] FixMovieScale. The clamps that removed live in FUN_00531690,
- * which has exactly ONE caller -- the menu movie tick -- so nothing else can reach that
- * code. Structural, not a guess.
- *
- * The renderer is FUN_00492d40 (the map-selection screen; it also owns the rotated
- * "Map Size"/"Elevation" labels at 0x494aea). Its destination addressing reads correct:
- * row start = screenW*y + x at 0x494479, row advance = screenW*2 at 0x49465a. So the
- * fault is in what it is told to draw, not where. Log the geometry rather than keep
- * reading disassembly. */
-/* Confirmed by the surface sweep: FUN_0044da90 draws the scenario preview (site 1,
- * 0x44de89, fired straight after s_c_loop.BIK opened). Its destination arithmetic reads
- * correct -- base + (y*screenW + x)*2, recomputed per row -- so the question is what
- * screenW and the surface actually ARE at draw time. The renderer takes its stride from
- * the SCREEN descriptor while writing to whichever surface is currently locked; if the
- * preview goes to an offscreen surface of a different width, that mismatch is the whole
- * bug and it is invisible at 640x480 where the two agree. */
-static void __cdecl preview_hook(DWORD stride, DWORD y, DWORD x, DWORD rows)
-{
-    static int n;
-    if (n >= 8) return;
-    n++;
-    logf_("  [preview] descriptor width=%lu  x=%ld y=%ld  lastrow=%ld   (mode %dx%d)",
-          stride, (long)(int)x, (long)(int)y, (long)(int)rows,
-          g_vt_xs_va ? (int)(*(float *)(SIZE_T)g_vt_xs_va * 3200.0f + 0.5f) : 0,
-          g_vt_ys_va ? (int)(*(float *)(SIZE_T)g_vt_ys_va * 2400.0f + 0.5f) : 0);
-}
-
-static int patch_preview_probe(void)
-{
-    /* Two earlier versions of this probe fired ZERO times because they sat inside
-     * FUN_00492d40 -- the SANDBOX map setup, not scenario selection. The surface sweep
-     * settled it: the renderer is FUN_0044da90. Hook the instruction that loads the
-     * stride, `movsx esi,[screen width]`, seven bytes. */
-    static const BYTE SIG[]  = {0x0f,0xbf,0x35,0,0,0,0, 0x8b,0x44,0x24,0x34,
-                                0x03,0xc1, 0x0f,0xaf,0xc6};
-    static const BYTE MASK[] = {   1,   1,   1,0,0,0,0,    1,   1,   1,   1,
-                                   1,   1,    1,   1,   1};
-    BYTE *at = find_unique_masked(SIG, MASK, sizeof SIG, g_text, g_textlen, "map preview");
-    if (!at) { logf_("[x] [preview] signature not found"); return 0; }
-
-    BYTE *tr = (BYTE *)VirtualAlloc(NULL, 96, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tr) { logf_("[x] [preview] VirtualAlloc failed"); return 0; }
-    int o = 0;
-    tr[o++] = 0x60; tr[o++] = 0x9C;                                 /* pushad / pushfd    */
-    /* after pushad+pushfd esp is 0x24 lower, so the callee's [esp+N] is [esp+0x24+N] */
-    /* after pushad+pushfd, the callee's [esp+N] is at [esp+0x24+N] */
-    tr[o++] = 0xFF; tr[o++] = 0x74; tr[o++] = 0x24; tr[o++] = 0x5C; /* push [esp+0x38] rows */
-    tr[o++] = 0xFF; tr[o++] = 0x74; tr[o++] = 0x24; tr[o++] = 0x34; /* push [esp+0x10] x    */
-    tr[o++] = 0xFF; tr[o++] = 0x74; tr[o++] = 0x24; tr[o++] = 0x58; /* push [esp+0x34] y    */
-    tr[o++] = 0xB8; { DWORD v = g_surf_va - 5; memcpy(tr + o, &v, 4); o += 4; } /* mov eax,&descW */
-    tr[o++] = 0x0F; tr[o++] = 0xB7; tr[o++] = 0x00;                 /* movzx eax,word [eax] */
-    tr[o++] = 0x50;                                                 /* push eax  stride     */
-    tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&preview_hook; memcpy(tr + o, &f, 4); o += 4; }
-    tr[o++] = 0xFF; tr[o++] = 0xD0;                                 /* call eax           */
-    tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x10;                 /* add esp,16         */
-    tr[o++] = 0x9D; tr[o++] = 0x61;                                 /* popfd / popad      */
-    memcpy(tr + o, at, 7); o += 7;                                  /* relocated movsx    */
-    tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((at + 7) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
-
-    BYTE det[7]; det[0] = 0xE9;
-    { DWORD r = (DWORD)(SIZE_T)(tr - (at + 5)); memcpy(det + 1, &r, 4); }
-    memset(det + 5, 0x90, 2);
-    if (!poke(at, det, 7)) { logf_("[x] [preview] VirtualProtect failed"); return 0; }
-    logf_("[+] [preview] map-preview draw at %p detoured -> %p", (void *)at, (void *)tr);
-    return 1;
-}
-
-/* ------------------------------------------- s70 sweep every surface access
- *
- * Finding the map-preview renderer by reasoning about which screen owns which
- * function has now failed three times: FUN_00492d40 was probed twice and fired ZERO
- * times (it is the sandbox map setup, not scenario selection), stpruler.i16 turned out
- * not to be what is displayed, and [WorldFix] was exonerated by a control run.
- *
- * So stop naming candidates. Every path that draws to the screen must read the locked
- * surface base at [screen descriptor + 9]. Detour EVERY instruction in .text that
- * references it and log which ones fire while the scenario screen is up. The renderer
- * cannot hide from that.
- *
- * Each such instruction is `mov reg,[abs]` (5-6 bytes) or `add reg,[abs]` (6), all long
- * enough for a jmp rel32, and all position-independent, so relocating is a plain copy.
- * The descriptor VA is discovered from the movie clamp's own operand, not hardcoded. */
-
-static BYTE *g_surf_site[32];
-static int   g_surf_n;
-static DWORD g_surf_hit;
-
-static void __cdecl surface_hook(DWORD idx)
-{
-    /* One line per site, the first time it fires. A bitmask keeps this to a few dozen
-     * bytes of work on what is a very hot path. */
-    if (idx >= 32 || (g_surf_hit & (1u << idx))) return;
-    g_surf_hit |= (1u << idx);
-    logf_("  [surf] site %lu at %p FIRED", idx, (void *)g_surf_site[idx]);
-}
-
-static int patch_surface_probe(void)
-{
-    if (!g_surf_va) { logf_("[x] [surf] screen-descriptor VA unknown"); return 0; }
-    DWORD va = g_surf_va;
-    for (SIZE_T i = 0; i + 6 <= g_textlen && g_surf_n < 32; i++) {
-        BYTE *p = g_text + i;
-        int len = 0;
-        if (p[0] == 0xA1 && rd32(p + 1) == va) len = 5;                 /* mov eax,[abs] */
-        else if (p[0] == 0x8B && (p[1] == 0x0D || p[1] == 0x15 || p[1] == 0x1D ||
-                                  p[1] == 0x25 || p[1] == 0x2D || p[1] == 0x35 ||
-                                  p[1] == 0x3D) && rd32(p + 2) == va) len = 6;
-        else if (p[0] == 0x03 && p[1] == 0x05 && rd32(p + 2) == va) len = 6; /* add eax,[abs] */
-        if (!len) continue;
-
-        BYTE *tr = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-        if (!tr) continue;
-        int idx = g_surf_n;
-        int o = 0;
-        tr[o++] = 0x60; tr[o++] = 0x9C;                       /* pushad / pushfd */
-        tr[o++] = 0x68; { DWORD v = (DWORD)idx; memcpy(tr + o, &v, 4); o += 4; }
-        tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&surface_hook; memcpy(tr + o, &f, 4); o += 4; }
-        tr[o++] = 0xFF; tr[o++] = 0xD0;
-        tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x04;
-        tr[o++] = 0x9D; tr[o++] = 0x61;                       /* popfd / popad   */
-        memcpy(tr + o, p, len); o += len;                     /* the original access */
-        tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((p + len) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
-
-        BYTE det[6]; det[0] = 0xE9;
-        { DWORD r = (DWORD)(SIZE_T)(tr - (p + 5)); memcpy(det + 1, &r, 4); }
-        if (len > 5) memset(det + 5, 0x90, len - 5);
-        if (poke(p, det, len)) { g_surf_site[idx] = p; g_surf_n++; i += len - 1; }
-    }
-    logf_("[+] [surf] %d surface-access site(s) detoured (descriptor+9 = %08x)", g_surf_n, va);
-    return g_surf_n > 0;
 }
 
 /* -------------------------------------------- s70 the scenario map preview
@@ -6413,521 +5804,6 @@ static int patch_preview_fix(int mode)
     return 1;
 }
 
-static int patch_hud_probe(void)
-{
-    BYTE *at = find_unique_masked(HUD_SIG, HUD_MASK, sizeof HUD_SIG,
-                                  g_text, g_textlen, "class-4 draw");
-    if (!at) { logf_("[x] [hudprobe] class-4 draw signature not found"); return 0; }
-    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 384, MEM_COMMIT | MEM_RESERVE,
-                                      PAGE_EXECUTE_READWRITE);
-    if (!stub) { logf_("[x] [hudprobe] VirtualAlloc failed"); return 0; }
-
-    DWORD a_calls=(DWORD)(SIZE_T)&g_hud_calls, a_hits=(DWORD)(SIZE_T)&g_hud_hits;
-    DWORD a_hash=(DWORD)(SIZE_T)&g_hud_hash[0], a_live=(DWORD)(SIZE_T)&g_hud_live[0];
-    DWORD a_style=(DWORD)(SIZE_T)&g_hud_style;
-    DWORD a_cx=(DWORD)(SIZE_T)&g_hud_cx, a_cy=(DWORD)(SIZE_T)&g_hud_cy;
-    int i=0, f1, f2, f3, f4;
-
-    stub[i++]=0x50;                                                   /* push eax             */
-    stub[i++]=0x52;                                                   /* push edx             */
-    stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_calls,4); i+=4;  /* inc [g_hud_calls]    */
-
-    /* MatchW == 0 would collide with the path-B gate (authored rect 0x0), so the
-     * rect comparison is emitted only when a real rect is being targeted. */
-    if (g_hud_mw) {
-        stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x41; stub[i++]=0x50; /* movsx eax,w[+0x50] */
-        stub[i++]=0x3d; memcpy(stub+i,&g_hud_mw,4); i+=4;               /* cmp eax,MatchW     */
-        J_NEAR_NE(stub, i, f1);                                         /* jne skip (near)    */
-        stub[i++]=0x0f; stub[i++]=0xbf; stub[i++]=0x41; stub[i++]=0x52; /* movsx eax,w[+0x52] */
-        stub[i++]=0x3d; memcpy(stub+i,&g_hud_mh,4); i+=4;               /* cmp eax,MatchH     */
-        J_NEAR_NE(stub, i, f2);                                         /* jne skip (near)    */
-    } else { f1 = f2 = -1; }
-    stub[i++]=0x83; stub[i++]=0x79; stub[i++]=0x66; stub[i++]=0x00;   /* cmp d[ecx+0x66],0    */
-    J_NEAR_EQ(stub, i, f3);                                           /* je  skip  (NO ART)   */
-
-    /* record the first four: resource pointer, and the LIVE rect as seen on entry
-     * (obj+0x0f and obj+0x11 are adjacent WORDs, so one dword is CX | CY<<16) --
-     * which shows the previous phase's write actually persisted. */
-    stub[i++]=0xa1; memcpy(stub+i,&a_hits,4); i+=4;                   /* mov eax,[g_hud_hits] */
-    stub[i++]=0x83; stub[i++]=0xf8; stub[i++]=0x04;                   /* cmp eax,4            */
-    stub[i++]=0x73; f4=i++;                                           /* jae nostore          */
-    stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x66;                   /* mov edx,[ecx+0x66]   */
-    stub[i++]=0x89; stub[i++]=0x14; stub[i++]=0x85;
-    memcpy(stub+i,&a_hash,4); i+=4;                                   /* mov [hash+eax*4],edx */
-    if (!fix_short(stub, f4, i, "nostore")) return 0;                 /* nostore:             */
-    /* The live rect is recorded on EVERY match, not only the first four.  In run K
-     * it sat inside the first-four gate, froze on frame one and read "560 x 560"
-     * for the whole run -- an instrument reporting a constant, which is the shape
-     * of a broken one (s48.0).  The screen disagreed with it and the screen was
-     * right. */
-    stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x0f;                   /* mov edx,[ecx+0x0f]   */
-    stub[i++]=0x89; stub[i++]=0x15; memcpy(stub+i,&a_live,4); i+=4;   /* mov [g_hud_live],edx */
-    stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_hits,4); i+=4;   /* inc [g_hud_hits]     */
-
-    /* ---- gate B: PATH-B widgets (authored rect 0x0) ------------------------
-     * Rescale the four fields FUN_00502510 just wrote, from the live mode's
-     * space into the art set's design space.  Idempotent: the pre-draw recomputes
-     * them from the sprite every frame, so this always operates on fresh values. */
-    if (g_chr_enable) {
-        DWORD a_on=(DWORD)(SIZE_T)&g_chr_on, a_cs=(DWORD)(SIZE_T)&g_chr_style;
-        int b1, b2, b3;
-        (void)0;
-        stub[i++]=0x66; stub[i++]=0x83; stub[i++]=0x79; stub[i++]=0x50; stub[i++]=0x00;
-        J_NEAR_NE(stub, i, b1);                                       /* cmp w[+0x50],0; jne  */
-        stub[i++]=0x66; stub[i++]=0x83; stub[i++]=0x79; stub[i++]=0x52; stub[i++]=0x00;
-        J_NEAR_NE(stub, i, b2);                                       /* cmp w[+0x52],0; jne  */
-        stub[i++]=0x83; stub[i++]=0x3d; memcpy(stub+i,&a_on,4); i+=4; stub[i++]=0x00;
-        J_NEAR_EQ(stub, i, b3);                                       /* cmp [g_chr_on],0; je */
-        /* NO ARITHMETIC HERE.  Run M multiplied the live rect by the correction
-         * factor on every draw, on the assumption that FUN_00502510 recomputed it
-         * from the sprite each frame.  It does not: FUN_005025e0 takes the path-B
-         * branch only while CX and CY are ZERO, so FUN_00502510 runs ONCE and the
-         * pre-draw takes path A forever after.  The multiply therefore compounded
-         * -- CX x1.2 and CY x0.9 per frame -- and the log caught it exactly:
-         *     live rect on entry: 33488 x 39  ->  32561 x 0  ->  32233 x 0
-         * CX ran into the int16 ceiling, CY collapsed, the rect went degenerate and
-         * the bar vanished permanently, surviving even the phase that turned the
-         * correction off, because nothing recomputes it.
-         *
-         * The guard that says so is quoted verbatim in s48.3.  Having the fact and
-         * not applying it is the same failure as s50.4.
-         *
-         * The correction now happens where the value is COMPUTED -- the six fmul
-         * operands inside FUN_00502510 (see patch_chrome_scale) -- which is
-         * idempotent by construction because it is a computation, not a mutation. */
-        {   DWORD a_dy=(DWORD)(SIZE_T)&g_chr_dirty; int d1;
-            stub[i++]=0x83; stub[i++]=0x3d; memcpy(stub+i,&a_dy,4); i+=4; stub[i++]=0x00;
-            stub[i++]=0x74; d1=i++;                                   /* cmp dirty,0; je    */
-            stub[i++]=0x66; stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x0f;
-            stub[i++]=0x00; stub[i++]=0x00;                           /* mov w[ecx+0x0f],0  */
-            stub[i++]=0x66; stub[i++]=0xc7; stub[i++]=0x41; stub[i++]=0x11;
-            stub[i++]=0x00; stub[i++]=0x00;                           /* mov w[ecx+0x11],0  */
-            if (!fix_short(stub, d1, i, "dirty")) return 0;
-        }
-        {   DWORD a_ch=(DWORD)(SIZE_T)&g_chr_hits;
-            DWORD a_rc=(DWORD)(SIZE_T)&g_chr_rect, a_ps=(DWORD)(SIZE_T)&g_chr_pos;
-            DWORD a_z =(DWORD)(SIZE_T)&g_chr_zero;
-            int z1;
-            stub[i++]=0xff; stub[i++]=0x05; memcpy(stub+i,&a_ch,4); i+=4;  /* inc [g_chr_hits] */
-            /* Replay a remembered absolute rect.  Never a read-modify-write:
-             * runs M and Q both died on those. */
-            {   DWORD a_ap=(DWORD)(SIZE_T)&g_chr_apply;
-                DWORD f[4]; int z1;
-                f[0]=(DWORD)(SIZE_T)&g_chr_setx;  f[1]=(DWORD)(SIZE_T)&g_chr_sety;
-                f[2]=(DWORD)(SIZE_T)&g_chr_setcx; f[3]=(DWORD)(SIZE_T)&g_chr_setcy;
-                static const BYTE FL[4] = { 0x0b, 0x0d, 0x0f, 0x11 };
-                stub[i++]=0x83; stub[i++]=0x3d; memcpy(stub+i,&a_ap,4); i+=4; stub[i++]=0x00;
-                stub[i++]=0x74; z1=i++;                                  /* cmp apply,0; je */
-                for (int k = 0; k < 4; k++) {
-                    stub[i++]=0xa1; memcpy(stub+i,&f[k],4); i+=4;        /* mov eax,[val]   */
-                    stub[i++]=0x66; stub[i++]=0x89; stub[i++]=0x41; stub[i++]=FL[k];
-                }
-                if (!fix_short(stub, z1, i, "apply")) return 0;
-            }
-            /* record THIS widget's rect and position, so the log can speak about
-             * the bar rather than about whatever drew last */
-            stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x0f;
-            stub[i++]=0x89; stub[i++]=0x15; memcpy(stub+i,&a_rc,4); i+=4;  /* rect  = [+0x0f] */
-            stub[i++]=0x8b; stub[i++]=0x51; stub[i++]=0x0b;
-            stub[i++]=0x89; stub[i++]=0x15; memcpy(stub+i,&a_ps,4); i+=4;  /* pos   = [+0x0b] */
-            /* obj+0x88 / obj+0x8c -- the origin pair the style-0 draw ADDS to the
-             * position.  s54.3 predicted they cancel the scale factor exactly; the
-             * owner's report that the bar moved says otherwise.  Logging both ends
-             * of the sum settles it by arithmetic instead of by another guess. */
-            {   DWORD a_ox=(DWORD)(SIZE_T)&g_chr_ox, a_oy=(DWORD)(SIZE_T)&g_chr_oy;
-                stub[i++]=0x8b; stub[i++]=0x91; memcpy(stub+i,"\x88\x00\x00\x00",4); i+=4;
-                stub[i++]=0x89; stub[i++]=0x15; memcpy(stub+i,&a_ox,4); i+=4;
-                stub[i++]=0x8b; stub[i++]=0x91; memcpy(stub+i,"\x8c\x00\x00\x00",4); i+=4;
-                stub[i++]=0x89; stub[i++]=0x15; memcpy(stub+i,&a_oy,4); i+=4;
-            }
-        }
-        stub[i++]=0xa1; memcpy(stub+i,&a_cs,4); i+=4;                 /* mov eax,[g_chr_style]*/
-        stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x7c;               /* mov [ecx+0x7c],eax   */
-        fix_near(stub,b1,i); fix_near(stub,b2,i); fix_near(stub,b3,i);
-    }
-
-    if (g_hud_mw) {
-        stub[i++]=0xa1; memcpy(stub+i,&a_cx,4); i+=4;                 /* mov eax,[g_hud_cx]   */
-        stub[i++]=0x66; stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x0f;
-        stub[i++]=0xa1; memcpy(stub+i,&a_cy,4); i+=4;                 /* mov eax,[g_hud_cy]   */
-        stub[i++]=0x66; stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x11;
-        stub[i++]=0xa1; memcpy(stub+i,&a_style,4); i+=4;              /* mov eax,[g_hud_style]*/
-        stub[i++]=0x89; stub[i++]=0x41; stub[i++]=0x7c;               /* mov [ecx+0x7c],eax   */
-    }
-
-    if (f1 >= 0) { fix_near(stub,f1,i); fix_near(stub,f2,i); }
-    fix_near(stub, f3, i);                                            /* skip:                */
-    stub[i++]=0x5a;                                                   /* pop edx              */
-    stub[i++]=0x58;                                                   /* pop eax              */
-    stub[i++]=0x51; stub[i++]=0x53; stub[i++]=0x56;                   /* push ecx/ebx/esi     */
-    stub[i++]=0x8b; stub[i++]=0xf1;                                   /* mov esi,ecx          */
-    stub[i++]=0xe9;
-    { LONG back=(LONG)(SIZE_T)(at+5)-(LONG)(SIZE_T)(stub+i+4); memcpy(stub+i,&back,4); i+=4; }
-
-    DWORD old;
-    if (!VirtualProtect(at, 5, PAGE_EXECUTE_READWRITE, &old)) {
-        logf_("[x] [hudprobe] VirtualProtect failed"); return 0; }
-    at[0]=0xe9;
-    { LONG rel=(LONG)(SIZE_T)stub-(LONG)(SIZE_T)(at+5); memcpy(at+1,&rel,4); }
-    VirtualProtect(at, 5, old, &old);
-
-    logf_("[+] [hudprobe] class-4 draw at %p (stub %p, %d bytes): targeting widgets whose"
-          " AUTHORED rect is %ux%u and which HAVE art (obj+0x66 != 0)",
-          at, stub, i, (unsigned)g_hud_mw, (unsigned)g_hud_mh);
-    for (int k = 0; k < g_hud_nph; k++)
-        logf_("[+]   phase %d: style %lu, rect %lux%lu virtual", k,
-              (unsigned long)g_hud_ph_style[k],
-              (unsigned long)g_hud_ph_size[k], (unsigned long)g_hud_ph_size[k]);
-    return 1;
-}
-
-static DWORD WINAPI hudprobe_thread(LPVOID unused)
-{
-    (void)unused;
-    Sleep(g_hud_delay * 1000);
-    int ph = -1; DWORD next = 0;
-    for (int t = 0;; t++) {
-        DWORD hw3d = wfb_read32(g_hud_table_va - 0x14);   /* 0x5a0f8c */
-        /* Run K spent its whole life in Software, where style 1 takes the tiled
-         * 1:1 branch of FUN_005002c0 and never reaches the ratio arithmetic at
-         * 0x500512 -- so the question could not have been answered, and the
-         * corruption on screen was the wrong branch failing.  Rather than rely on
-         * the operator remembering, suppress style 1 unless the renderer that can
-         * stretch is actually live, and say so. */
-        if (g_hud_style_want && !hw3d && g_hud_style) {
-            g_hud_style = 0;
-            logf_("  [hudprobe]   *** style 1 SUPPRESSED: renderer is SOFTWARE, which"
-                  " cannot stretch.  Press F2 and switch to Hardware 3D. ***");
-        } else if (g_hud_style_want && hw3d && !g_hud_style) {
-            g_hud_style = g_hud_style_want;
-            logf_("  [hudprobe]   Hardware 3D is live -- style %lu now applied",
-                  (unsigned long)g_hud_style);
-        }
-        /* Recompute the design-space factors every tick from the LIVE slot and mode.
-         * The art set follows the slot (s19) and the proxy has already rewritten
-         * slot 4's table entry to the target mode, so the design size CANNOT be
-         * read back from the table -- it is the slot's stock size. */
-        {
-            static const DWORD ART_W[5] = { 640, 800, 1024, 1280, 1600 };
-            static const DWORD ART_H[5] = { 480, 600,  768, 1024, 1200 };
-            DWORD cfg0 = wfb_read32(0x612fec), sl = 0xffffffff;
-            if (cfg0 && !IsBadReadPtr((void *)(SIZE_T)cfg0, 0x1c))
-                memcpy(&sl, (BYTE *)(SIZE_T)(cfg0 + 0x18), 4);
-            DWORD lw = wfb_read16(0x60c18c), lh = wfb_read16(0x60c18e);
-            (void)ART_W; (void)ART_H; (void)sl; (void)lw; (void)lh;
-            /* factors are owned by chrome_factor_thread, which starts at DLL load */
-        }
-        if (GetTickCount() >= next) {
-            ph = (ph + 1) % g_hud_nph;
-            g_hud_style_want = g_hud_ph_style[ph];
-            g_hud_style = (g_hud_style_want && !hw3d) ? 0 : g_hud_style_want;
-            g_hud_cx = g_hud_cy = g_hud_ph_size[ph];
-            if (g_chr_enable) {
-                /* size column doubles as the chrome mode: 0 = leave the bar stock,
-                 * non-zero = rescale it into the art set's design space. */
-                g_chr_on    = g_hud_ph_size[ph] ? 1 : 0;
-                g_chr_zero  = 0;
-                /* mode 3 = replay the learned rect with its bottom-right pulled
-                 * EdgeTrim virtual units inside the screen.  s59: the style-1 blit
-                 * REJECTS the whole draw when x2 or y2 lands on or past the screen
-                 * edge (0x5004d3 / 0x5004ea, jge -> 0x500960), and the bar's correct
-                 * rect ends at 1080.05 px on a 1080-tall screen -- 0.05 px too far. */
-                if (g_hud_ph_size[ph] == 3 && g_chr_base) {
-                    g_chr_setcx = (DWORD)(WORD)(short)((short)g_chr_setcx - (short)g_chr_trim);
-                    g_chr_setcy = (DWORD)(WORD)(short)((short)g_chr_setcy - (short)g_chr_trim);
-                    g_chr_apply = 1;
-                    logf_("  [chrome] replaying learned rect TRIMMED by %lu virtual units:"
-                          " x=%d y=%d w=%d h=%d", (unsigned long)g_chr_trim,
-                          (short)g_chr_setx, (short)g_chr_sety,
-                          (short)g_chr_setcx, (short)g_chr_setcy);
-                } else {
-                    g_chr_apply = 0;
-                }
-                g_chr_style = (g_hud_style_want && hw3d) ? g_hud_style_want : 0;
-                logf_("  [chrome] style %lu; design-space factors now %.4f / %.4f"
-                      " (live mode would be %.4f / %.4f)",
-                      (unsigned long)g_chr_style, g_chr_fx, g_chr_fy,
-                      3200.0 / (wfb_read16(0x60c18c) ? wfb_read16(0x60c18c) : 1),
-                      2400.0 / (wfb_read16(0x60c18e) ? wfb_read16(0x60c18e) : 1));
-            }
-            next = GetTickCount() + g_hud_dwell * 1000;
-            logf_("  [hudprobe] ===> PHASE %d: style %lu, rect %lux%lu  (%s)", ph,
-                  (unsigned long)g_hud_style, (unsigned long)g_hud_cx, (unsigned long)g_hud_cy,
-                  g_hud_style == 0 && g_hud_cx == g_hud_mw ? "BASELINE, should look stock"
-                : g_hud_style == 0 ? "s50: expect a CLIPPED corner at full scale"
-                : g_hud_cx == g_hud_mw ? "style 1 at natural size"
-                : "DISCRIMINATOR: whole image at half size = IT STRETCHES");
-        }
-        DWORD w = wfb_read16(0x60c18c), h = wfb_read16(0x60c18e);
-        DWORD hw = hw3d;
-        DWORD cfg = wfb_read32(0x612fec), slot = 0xffffffff;
-        if (cfg && !IsBadReadPtr((void *)(SIZE_T)cfg, 0x1c))
-            memcpy(&slot, (BYTE *)(SIZE_T)(cfg + 0x18), 4);
-        static const char *suf[5] = { ".i06", ".i08", ".i10", ".i12", ".i16" };
-        logf_("  [hudprobe] ph=%d  screen %ux%u  slot %ld art %s  renderer %s  "
-              "class4 draws=%lu  matches=%lu  live rect on entry: %lu x %lu",
-              ph, (unsigned)w, (unsigned)h, (long)(int)slot,
-              (slot < 5 ? suf[slot] : "?"), hw ? "HARDWARE 3D" : "SOFTWARE",
-              (unsigned long)g_hud_calls, (unsigned long)g_hud_hits,
-              (unsigned long)(g_hud_live[0] & 0xffff), (unsigned long)(g_hud_live[0] >> 16));
-        if (g_chr_enable) {
-            short cx = (short)(g_chr_rect & 0xffff), cy = (short)(g_chr_rect >> 16);
-            /* learn the engine's own computed rect once it looks like the bar */
-            if (!g_chr_apply && cx > 1000 && cy > 100) {
-                g_chr_setx = (DWORD)(WORD)(short)(g_chr_pos & 0xffff);
-                g_chr_sety = (DWORD)(WORD)(short)(g_chr_pos >> 16);
-                g_chr_setcx = (DWORD)(WORD)cx; g_chr_setcy = (DWORD)(WORD)cy;
-                g_chr_base = 1;
-            }
-            short px = (short)(g_chr_pos  & 0xffff), py = (short)(g_chr_pos  >> 16);
-            DWORD lw2 = wfb_read16(0x60c18c), lh2 = wfb_read16(0x60c18e);
-            logf_("  [chrome] path-B draws=%lu | BAR rect x=%d y=%d w=%d h=%d virtual"
-                  "  ->  px x=%ld y=%ld w=%ld h=%ld%s",
-                  (unsigned long)g_chr_hits, px, py, cx, cy,
-                  (long)px * (long)lw2 / 3200, (long)py * (long)lh2 / 2400,
-                  (long)cx * (long)lw2 / 3200, (long)cy * (long)lh2 / 2400,
-                  g_chr_zero ? "   [position ZEROED this phase]" : "");
-            /* the style-0 draw hands the blit (X + origin), so this IS the number
-             * that decides where the bar lands -- print it, do not infer it */
-            logf_("  [chrome]   origin +0x88=%ld +0x8c=%ld  ->  style-0 draw position"
-                  " = (%ld, %ld) virtual = (%ld, %ld) px%s",
-                  (long)(int)g_chr_ox, (long)(int)g_chr_oy,
-                  (long)px + (long)(int)g_chr_ox, (long)py + (long)(int)g_chr_oy,
-                  ((long)px + (long)(int)g_chr_ox) * (long)lw2 / 3200,
-                  ((long)py + (long)(int)g_chr_oy) * (long)lh2 / 2400,
-                  (px + (int)g_chr_ox == 0 && py + (int)g_chr_oy == 0)
-                      ? "   <- CANCELS, so s54.3 was right and only the clip moved"
-                      : "   <- does NOT cancel, so s54.3 was wrong");
-        }
-        if (g_hud_style_want && !hw3d)
-            logf_("  [hudprobe]   (this phase is INCONCLUSIVE while the renderer is"
-                  " Software -- the branch that can stretch is never reached)");
-        if (g_hud_calls == 0)
-            logf_("  [hudprobe]   *** ZERO class-4 draws -- the detour is NOT running."
-                  "  Do not interpret the screen. ***");
-        else if (!g_hud_hits)
-            logf_("  [hudprobe]   *** detour runs but NOTHING matched an authored %ux%u"
-                  " rect with art.  obj+0x50/0x52 is not the saved rect. ***",
-                  (unsigned)g_hud_mw, (unsigned)g_hud_mh);
-        Sleep(g_hud_every * 1000);
-    }
-}
-
-/* ------------------------------------------------------- s103 the blit census
- *
- * FINDINGS 102 named the pair -- the "shadows" are mwbuildf/mwinfof sprites drawn
- * by class-4 widgets, the buttons are class-1 widgets positioned from the .WIN --
- * and then killed every mechanism that could be read out of the files.  The art is
- * generated exactly as PopTop's own 1280x1024 set says it should be, the .WIN
- * arithmetic agrees, and compositing both rules offline at 1600x1200 and 1920x1080
- * puts the buttons in the SAME relative place inside their plates.  So the offset
- * is introduced at draw time and nothing on disk will show it.
- *
- * WHY THE LEAF AND NOT THE DISPATCHER.  The obvious hook is FUN_00501b90, but
- * s50.7 already establishes what it receives: a position and nothing else.  All
- * ten mwbuildf plates belong to widgets whose rect is 0,0, so at the dispatcher
- * they are ten identical calls -- the per-sprite offset that actually separates
- * the plates lives in the piece record and is applied further down.  Hooking the
- * dispatcher would log the widget origin and miss the very quantity in question.
- *
- * FUN_00538ba0 is the plain leaf (s62.1).  Its entry was read, not guessed:
- *
- *      sub esp,0x30 ; movsx eax,[ecx]        piece.x   (int16 at rec+0)
- *      ...          ; movsx edi,[ecx+2]      piece.y   (int16 at rec+2)
- *      add eax,[esp+0x44]                    + arg1    -> absolute dest X
- *      add edi,esi (esi = [esp+0x44]/arg2)   + arg2    -> absolute dest Y
- *      movsx edx,[ecx+4]                     piece.w   (int16 at rec+4)
- *      movsx eax,[ecx+6]                     piece.h   (int16 at rec+6)
- *
- * and args 4..7 are the clip box, which is what identifies them: the four early
- * rejects test dest_x > arg6, dest_x+w-1 < arg4, dest_y > arg7, dest_y+h-1 < arg5.
- * So one hook here yields, for EVERY sprite of EVERY widget class, the source size
- * and the absolute destination.  That is the census.
- *
- * A CENSUS, NOT A STREAM.  This is the hottest path in the game -- every piece of
- * every sprite of every frame.  Logging from inside it would change the thing being
- * measured and produce a hundred megabytes of duplicate lines.  Instead each
- * distinct (w, h, x, y) is recorded once in a fixed table with a hit counter, via a
- * hash so the hot path is O(1) and does no I/O at all; a separate thread prints the
- * table.  Sprites land at fixed places, so the table saturates in the first frame
- * and then only the counters move.
- */
-#define BC_CAP 8192u                     /* distinct (w,h,x,y) tuples kept       */
-typedef struct { short w, h, x, y; unsigned hits; } bc_row;
-static bc_row  g_bc[BC_CAP];
-static unsigned g_bc_used, g_bc_lost;    /* lost = tuples dropped once full      */
-
-/* Open addressing, power-of-two capacity, linear probe.  No locks: a torn read in
- * a counter costs one hit in a diagnostic, and taking a lock in this path would
- * perturb the frame time it is meant to observe. */
-static void bc_note(int w, int h, int x, int y)
-{
-    unsigned k = (unsigned)((w * 73856093) ^ (h * 19349663) ^ (x * 83492791) ^ (y * 2654435761u));
-    k &= (BC_CAP - 1);
-    for (unsigned n = 0; n < 64; n++) {
-        bc_row *r = &g_bc[(k + n) & (BC_CAP - 1)];
-        if (r->hits == 0) {
-            if (g_bc_used >= BC_CAP - 64) { g_bc_lost++; return; }
-            r->w = (short)w; r->h = (short)h; r->x = (short)x; r->y = (short)y;
-            r->hits = 1; g_bc_used++; return;
-        }
-        if (r->w == w && r->h == h && r->x == x && r->y == y) { r->hits++; return; }
-    }
-    g_bc_lost++;
-}
-
-/* __cdecl so the stub can push three arguments and clean up with one add. */
-static void __cdecl bc_hook(const short *rec, int bx, int by)
-{
-    int x, y;
-    if (!rec) return;
-    x = bx + rec[0]; y = by + rec[1];
-    /* The world draws through this leaf as well, and terrain lands at hundreds of
-     * distinct positions -- left unfiltered it saturates the table and buries the
-     * HUD.  MinY is the escape hatch: the HUD sits in the bottom band, so a floor
-     * a little above the bar's top edge keeps the census to the widgets.  Default
-     * 0 keeps everything, which is the right default for the first run. */
-    if (y < g_bc_miny) return;
-    bc_note(rec[2], rec[3], x, y);
-}
-
-static int bc_cmp(const void *a, const void *b)
-{
-    unsigned ha = ((const bc_row *)a)->hits, hb = ((const bc_row *)b)->hits;
-    return ha < hb ? 1 : ha > hb ? -1 : 0;      /* descending */
-}
-
-/* Sorting by hit count is the whole trick for reading this.  A HUD sprite is
- * redrawn at the SAME position every frame, so its counter tracks the frame count;
- * scrolling terrain spreads over hundreds of positions that each accumulate a few
- * hits and then never recur.  Descending hits therefore floats the fixed furniture
- * -- which is exactly the HUD -- to the top, with no knowledge of what the assets
- * are.  The table is copied first: the game keeps writing to it while this runs,
- * and sorting underneath a live writer is how a diagnostic starts lying. */
-static void bc_dump(const char *why)
-{
-    bc_row *snap = (bc_row *)malloc(sizeof(bc_row) * BC_CAP);
-    unsigned n = 0, shown = 0;
-    if (!snap) { logf_("[x] [blit] out of memory for the census snapshot"); return; }
-    for (unsigned i = 0; i < BC_CAP; i++)
-        if (g_bc[i].hits) snap[n++] = g_bc[i];
-    qsort(snap, n, sizeof(bc_row), bc_cmp);
-
-    logf_("[*] [blit] ==== census (%s) -- the last %d s only: %u distinct"
-          " (size @ position) tuples%s.  Most-drawn first -- fixed furniture floats"
-          " up, scrolling terrain sinks.",
-          why, g_bc_every, n,
-          g_bc_lost ? ", TABLE OVERFLOWED so some were DROPPED" : "");
-    for (unsigned i = 0; i < n; i++) {
-        logf_("  [blit] %4dx%-4d at %5d,%-5d   x%u",
-              snap[i].w, snap[i].h, snap[i].x, snap[i].y, snap[i].hits);
-        if (++shown >= 400) {
-            logf_("  [blit] ... %u further tuples NOT printed (all with %u hits or"
-                  " fewer)", n - shown, snap[i].hits);
-            break;
-        }
-    }
-    logf_("[*] [blit] ==== end census");
-    free(snap);
-
-    /* Clear for the next window.  MEASURED, not tidiness: a single run saturated
-     * the 8192-slot table, and a full table drops NEW tuples -- so a HUD panel
-     * opened late in a session would never be recorded at all, and the census
-     * would look complete while silently missing the thing being investigated.
-     * Resetting makes each dump a WINDOW rather than a cumulative total, which is
-     * also the more useful reading: whatever is on screen now is redrawn every
-     * frame and so re-enters the table within one frame of the reset. */
-    memset(g_bc, 0, sizeof g_bc);
-    g_bc_used = 0; g_bc_lost = 0;
-}
-
-static DWORD WINAPI bc_thread(LPVOID unused)
-{
-    (void)unused;
-    Sleep((DWORD)g_bc_delay * 1000);
-    for (;;) {
-        bc_dump("periodic");
-        if (g_bc_every <= 0) return 0;
-        Sleep((DWORD)g_bc_every * 1000);
-    }
-}
-
-/* The 24-byte entry above, with no absolute operand in it, so the same bytes match
- * any build.  Verified unique in the GOG .text -- and it has to be, because the
- * ~16 leaves resemble each other closely and hooking the wrong one would produce a
- * census of the wrong sprites while looking perfectly healthy. */
-static const BYTE BLIT_SIG[] = {
-    0x83,0xec,0x30,             /* sub   esp,0x30                */
-    0x0f,0xbf,0x01,             /* movsx eax,WORD PTR [ecx]      */
-    0x53, 0x55, 0x56,           /* push  ebx / ebp / esi         */
-    0x8b,0x74,0x24,0x44,        /* mov   esi,[esp+0x44]          */
-    0x57,                       /* push  edi                     */
-    0x03,0x44,0x24,0x44,        /* add   eax,[esp+0x44]          */
-    0x0f,0xbf,0x79,0x02,        /* movsx edi,WORD PTR [ecx+0x2]  */
-    0x8b,0xea                   /* mov   ebp,edx                 */
-};
-
-static int patch_blit_census(void)
-{
-    BYTE *fn = find_unique(BLIT_SIG, sizeof BLIT_SIG, g_text, g_textlen,
-                           "leaf blitter (FUN_00538ba0)");
-    if (!fn) { logf_("[x] [blit] leaf blitter signature not found -- census NOT armed");
-               return 0; }
-
-    BYTE *stub = (BYTE *)VirtualAlloc(NULL, 128, MEM_COMMIT | MEM_RESERVE,
-                                      PAGE_EXECUTE_READWRITE);
-    if (!stub) { logf_("[x] [blit] VirtualAlloc failed"); return 0; }
-
-    /* Six bytes are relocated (sub esp,0x30 ; movsx eax,[ecx]) -- both are
-     * position independent, so they can simply be copied. */
-    int i = 0;
-    stub[i++] = 0x60;                                   /* pushad   esp -= 32   */
-    stub[i++] = 0x9c;                                   /* pushfd   esp -= 4    */
-    /* At function entry [esp+4]=arg1, [esp+8]=arg2.  36 bytes of saves are now
-     * below that, and each push moves the window another 4. */
-    stub[i++] = 0xff; stub[i++] = 0x74; stub[i++] = 0x24; stub[i++] = 0x2c; /* push [esp+0x2c] -> arg2 */
-    stub[i++] = 0xff; stub[i++] = 0x74; stub[i++] = 0x24; stub[i++] = 0x2c; /* push [esp+0x2c] -> arg1 */
-    stub[i++] = 0x51;                                   /* push ecx  (piece rec) */
-    stub[i++] = 0xe8;                                   /* call bc_hook          */
-    { DWORD r = (DWORD)(SIZE_T)((BYTE *)bc_hook - (stub + i + 4));
-      memcpy(stub + i, &r, 4); i += 4; }
-    stub[i++] = 0x83; stub[i++] = 0xc4; stub[i++] = 0x0c;   /* add esp,12        */
-    stub[i++] = 0x9d;                                   /* popfd                 */
-    stub[i++] = 0x61;                                   /* popad                 */
-    memcpy(stub + i, fn, 6); i += 6;                    /* the relocated entry   */
-    stub[i++] = 0xe9;                                   /* jmp back past it      */
-    { DWORD r = (DWORD)(SIZE_T)((fn + 6) - (stub + i + 4));
-      memcpy(stub + i, &r, 4); i += 4; }
-
-    BYTE det[6];
-    det[0] = 0xE9;
-    { DWORD r = (DWORD)(SIZE_T)(stub - (fn + 5)); memcpy(det + 1, &r, 4); }
-    det[5] = 0x90;
-    if (!poke(fn, det, 6)) { logf_("[x] [blit] VirtualProtect failed"); return 0; }
-
-    logf_("[+] [blit] census armed on the leaf blitter at %p (stub %p, %d bytes)."
-          "  Every sprite's SOURCE SIZE and ABSOLUTE DESTINATION is tallied%s; the"
-          " table prints %d s in and every %d s after.",
-          (void *)fn, (void *)stub, i,
-          g_bc_miny ? " for destinations at or below MinY" : "",
-          g_bc_delay, g_bc_every);
-    if (g_bc_miny)
-        logf_("  [blit] MinY=%d -- sprites landing above that row are NOT counted",
-              g_bc_miny);
-    CreateThread(NULL, 0, bc_thread, NULL, 0, NULL);
-    return 1;
-}
-
-static void maybe_start_hudprobe(void)
-{
-    if (!g_hud_table_va) {
-        logf_("[x] [hudprobe] resolution table never located -- not starting");
-        return;
-    }
-    if (g_chr_enable) CreateThread(NULL, 0, chrome_factor_thread, NULL, 0, NULL);
-    if (!g_hud_nph) { logf_("[x] [hudprobe] no phases -- thread not started"); return; }
-    CreateThread(NULL, 0, hudprobe_thread, NULL, 0, NULL);
-}
 
 static const BYTE VP_SIG[] = { 0x0f,0xbf,0x4e,0x11, 0x0f,0xbf,0x46,0x0f,
                                0x89,0x8e,0x8e,0x00,0x00,0x00 };
@@ -7277,7 +6153,6 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         if (!install_iat_hook())
             logf_("[x] could not hook GetDeviceCaps -- NOTHING WILL BE PATCHED");
     }
-    maybe_start_hudprobe();
     return TRUE;
 }
 
