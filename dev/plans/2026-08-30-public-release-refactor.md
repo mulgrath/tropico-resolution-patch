@@ -387,8 +387,14 @@ Expected: **all checks pass**, including `byte-identical OK`. Nothing here touch
 - [ ] **Step 9: Verify no release payload regression**
 
 ```bash
-./tools/make-release.sh 2>&1 | tail -5
-find dist -newer dev/README.md -name '*.tar.gz' | head -1 | xargs -I{} tar tzf {} | grep -iE 'dev/|FINDINGS|HANDOFF|probes/' || echo "  OK: nothing from dev/ ships"
+# make-release.sh REQUIRES a version argument; without one it only prints usage
+# and silently verifies nothing. Use a throwaway version -- dist/ is gitignored.
+./tools/make-release.sh 1.3-refactor-check 2>&1 | tail -6
+{ tar tzf dist/tropico-resolution-patch-1.3-refactor-check.tar.gz
+  unzip -Z1 dist/tropico-resolution-patch-1.3-refactor-check-windows.zip
+} | grep -iE 'dev/|FINDINGS|TESTING|HANDOFF|probes/|WINDOWS-TRIP' \
+  && echo "  FAIL: development content in a release" || echo "  OK: nothing from dev/ ships"
+rm -f dist/*refactor-check*
 git checkout -- known-good/binkw32.dll proxy/binkw32.dll
 git status --short -- known-good proxy | grep -E '\.dll' && echo "  FAIL: a DLL is still modified" || echo "  OK: DLLs restored"
 ```
@@ -1121,7 +1127,17 @@ paragraph about crash recovery."
 5. **How to uninstall.** Double-click `uninstall.bat`; saves and settings untouched.
 6. **What this is, and what it is not.** Keep as-is.
 
-- [ ] **Step 2: Verify**
+- [ ] **Step 2: Verify — including the line endings, which gate the release**
+
+`tools/make-release.sh` refuses to build the Windows zip unless this file is CRLF,
+and `.gitattributes` marks it `eol=crlf`. If your editor writes LF, the Windows
+package cannot be built. Restore correct endings with a fresh checkout rather than
+converting by hand:
+
+```bash
+grep -qU $'\r$' packaging/windows/READ-ME-FIRST.txt && echo "  CRLF OK" \
+  || echo "  LF -- the Windows release will REFUSE to build"
+```
 
 ```bash
 grep -riE 'FINDINGS|\bs[0-9]{2,3}[.: ]|§[0-9]+' packaging/windows/READ-ME-FIRST.txt || echo "  OK"
@@ -1276,8 +1292,9 @@ Expected: two identical hashes. This is the exact command the README gives a str
 - [ ] **Step 3: Build a release and inspect it**
 
 ```bash
-./tools/make-release.sh 2>&1 | tail -10
-T=$(ls -t dist/*.tar.gz | head -1); Z=$(ls -t dist/*-windows.zip | head -1)
+./tools/make-release.sh 1.3-refactor-check 2>&1 | tail -10
+T=dist/tropico-resolution-patch-1.3-refactor-check.tar.gz
+Z=dist/tropico-resolution-patch-1.3-refactor-check-windows.zip
 echo "=== $T ==="; tar tzf "$T"
 echo "=== $Z ==="; unzip -l "$Z"
 ```
