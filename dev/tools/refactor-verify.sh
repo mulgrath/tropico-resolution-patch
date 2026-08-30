@@ -39,13 +39,22 @@ else
   note "entry point" "DllMain IS GONE -- the patch would silently never run"; fail=1
 fi
 
-grep -ohE '0x[0-9a-fA-F]{6,8}' proxy/tropico_fix.c | tr 'A-F' 'a-f' \
-  | sort -u > /tmp/refactor-addrs.txt
-MISSING=$(comm -23 "$B/addresses-kept.txt" /tmp/refactor-addrs.txt)
-if [ -z "$MISSING" ]; then
-  note "kept addresses" "all $(wc -l < "$B/addresses-kept.txt") present"
+# SHIPPED BEHAVIOUR. Every ini key whose default is non-zero does something with
+# no user action, so this set IS the patch's feature list. If a key vanishes, a
+# shipped fix went with it.
+#
+# This replaced an earlier check that grepped hex addresses out of the whole file.
+# That check was near-worthless: of its 44 addresses, 39 appeared only in COMMENTS
+# and the remaining 5 were generic constants (image base, 0xffffffff). It measured
+# prose, and a probe deletion that removed a comment could fail it while a deletion
+# that removed a real fix passed.
+python3 dev/tools/shipped-keys.py > /tmp/refactor-shipped.txt 2>/dev/null
+LOST=$(comm -23 "$B/shipped-keys.txt" /tmp/refactor-shipped.txt)
+if [ -z "$LOST" ]; then
+  note "shipped keys" "all $(wc -l < "$B/shipped-keys.txt") present"
 else
-  note "kept addresses" "MISSING:"; echo "$MISSING" | sed 's/^/      /'; fail=1
+  note "shipped keys" "LOST -- a default-on feature is gone:"
+  echo "$LOST" | sed 's/^/      /'; fail=1
 fi
 
 if [ "$STRICT" = "--byte-identical" ]; then
