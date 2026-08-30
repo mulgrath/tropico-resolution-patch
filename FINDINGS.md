@@ -10519,3 +10519,75 @@ that device; whether the HUD and mouse agree, since **pixels follow the GUID but
 input follows the window** and arm 2's configuration -- window and device on the
 same monitor -- is the one to reproduce; and whether anything in the engine reads
 `SM_CXSCREEN` and disagrees with the device it is drawing on.
+
+### 118.10 Which monitor was this launched from, on Windows
+
+s77 settled this on Linux and its answer was **not the pointer**: *"the mouse can
+sit on a monitor holding no focus -- move it across without clicking and it points
+at a screen the desktop is ignoring."* `tools/tropico-launchpoint.py` reads
+`_NET_ACTIVE_WINDOW` and falls back to the pointer.
+
+**That conclusion never reached the Windows path**, which used `GetCursorPos`
+alone -- so the hole s77 closed on one platform was still open on the other, and
+DeviceSelect would have inherited it. `win32_launch_point()` is the same idea in
+Win32 terms: `GetForegroundWindow()` first, its centre as the launch point, the
+pointer as fallback. At `DllMain` the game has no window yet, so the foreground
+window is still whatever launched it -- Steam, Explorer, a shortcut's owner --
+which is the **click itself** rather than an inference from where the mouse
+drifted to a second later.
+
+Both signals are named in the log, because "it opened on the wrong screen" is only
+diagnosable if you know which one answered.
+
+**Why automatic rather than an ini key.** The obvious alternative was to require
+`[Display] Monitor=`. Rejected, and the reason is not ergonomics:
+
+* **The cost of a wrong guess collapsed.** Under `SetPrimary` a wrong guess moved
+  the player's desktop and the change survived a reboot -- which is exactly why
+  s113.8 demanded opt-in, and demanding it was right. Under DeviceSelect a wrong
+  guess means the game opens on the wrong screen and you relaunch. The precaution
+  existed for a harm that no longer exists.
+* **The ini value goes stale silently.** `\\.\DISPLAYn` is adapter-enumeration
+  order, not a label the player ever sees -- the owner's machine reports **nine**
+  of them for two real monitors. Replug a cable and the answer moves, with nothing
+  connecting "wrong screen" to a line written months earlier. The automatic path's
+  failure mode is one bad launch; the ini's is a wrong answer that persists.
+* **A feature gated behind reading a config file helps the players who would have
+  found the workaround anyway, and nobody else.**
+
+`[Display] Monitor=` remains as the override, for the genuine "always the
+projector, wherever I launch from" case.
+
+### 118.11 PinToPrimary stands down, because it had the opposite opinion
+
+s74's window watcher drags the game window to the primary, because under Wine that
+is where DirectDraw renders whatever we do. With a device GUID substituted the
+game renders on the **chosen** monitor and DirectDraw places the window to match --
+s118.3's arm 3 measured Windows doing exactly that, moving a window to suit the
+device.
+
+Left armed, the two would fight: the picture on one screen and the mouse on
+another, which is s89's failure with a new cause. **Pixels follow the GUID; input
+follows the window.** So when DeviceSelect has a target, the pinner returns and
+says once that it has.
+
+This was a defect in 118.8 as first committed, found by the owner asking what the
+feature actually does for a player rather than whether it works.
+
+### 118.12 Where this subject closes
+
+**Linux is done and unchanged.** xrandr chooses the monitor, the launcher makes it
+primary for the run, and a watchdog or an exit trap puts it back -- self-healing,
+because the primary is runtime state the desktop re-establishes at login.
+DeviceSelect cannot help here and says so when armed: Wine reports one adapter
+GUID for every head.
+
+**Windows is answered but not yet proven through the game.** The mechanism is
+measured (118.1-118.3), implemented (118.8), and its launch detection and window
+handling are now consistent with it (118.10, 118.11). What has NOT happened is a
+single frame of Tropico rendered through a substituted device.
+
+`DeviceSelect` therefore stays **default 0**. Flipping it to 1 is a one-line change
+and the evidence for doing so is one green run: the game opens on the launch
+monitor at that monitor's resolution, the mouse agrees with the picture, and the
+primary is untouched. Until that run exists, the default is the honest one.

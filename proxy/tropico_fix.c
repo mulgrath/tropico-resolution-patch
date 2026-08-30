@@ -2718,6 +2718,45 @@ static int win32_outputs(xout_t *out, int cap)
     return n;
 }
 
+/* s118.10: WHICH MONITOR WAS THIS LAUNCHED FROM, on Windows.
+ *
+ * s77 settled this on Linux and the answer was not the pointer: "the mouse can sit
+ * on a monitor holding no focus -- move it across without clicking and it points at
+ * a screen the desktop is ignoring." tools/tropico-launchpoint.py reads
+ * _NET_ACTIVE_WINDOW and falls back to the pointer. That conclusion never reached
+ * the Windows path, which used GetCursorPos alone.
+ *
+ * This is the same idea in Win32 terms. At DllMain the game has no window yet, so
+ * the foreground window is still whatever launched us -- Steam, Explorer, a
+ * shortcut's owner -- which is the click itself rather than an inference from where
+ * the mouse drifted to afterwards.
+ *
+ * Both signals are reported by name in the log, because "it opened on the wrong
+ * screen" is only diagnosable if you know which signal answered. */
+static int win32_launch_point(long *px, long *py, char *how, size_t howcap)
+{
+    HWND fg;
+    RECT r;
+    POINT pt;
+
+    fg = GetForegroundWindow();
+    if (fg && !IsIconic(fg) && GetWindowRect(fg, &r) &&
+        r.right > r.left && r.bottom > r.top) {
+        *px = r.left + (r.right - r.left) / 2;
+        *py = r.top  + (r.bottom - r.top)  / 2;
+        snprintf(how, howcap, "the focused window");
+        return 1;
+    }
+    /* No foreground window is a real state -- launched from a service, or the shell
+     * lost focus -- and the pointer is the honest fallback, exactly as on Linux. */
+    if (GetCursorPos(&pt) && (pt.x || pt.y)) {
+        *px = pt.x; *py = pt.y;
+        snprintf(how, howcap, "the mouse pointer");
+        return 1;
+    }
+    return 0;
+}
+
 /* ------------------------------------- s113 putting the primary back afterwards
  *
  * The Linux side leaves a HOST WATCHDOG behind: a shell loop outside the process
@@ -3376,6 +3415,24 @@ static void choose_monitor(void)
         for (i = 0; i < n; i++) if (!_stricmp(outs[i].name, want)) chosen = i;
         if (chosen < 0)
             logf_("[!] [display] Monitor=%s is not a connected output -- ignoring it", want);
+    }
+    /* s118.10: native Windows asks the desktop what it is focused on, and only then
+     * the pointer. Win32 puts the primary at (0,0), so both answers are already in
+     * the virtual-screen coordinates outs[] uses -- no translation, unlike the Wine
+     * fallback below. */
+    if (chosen < 0 && g_ptr_x < 0 && !running_under_wine()) {
+        char how[32];
+        if (win32_launch_point(&px, &py, how, sizeof how)) {
+            for (i = 0; i < n; i++)
+                if (px >= outs[i].x && px < outs[i].x + (long)outs[i].w &&
+                    py >= outs[i].y && py < outs[i].y + (long)outs[i].h) { chosen = i; break; }
+            if (chosen >= 0)
+                logf_("  [display] launched from %s (launch point %ld,%ld, via %s)",
+                      outs[chosen].name, px, py, how);
+            else
+                logf_("  [display] the launch point %ld,%ld (via %s) is on no attached"
+                      " monitor -- staying on the primary %s", px, py, how, outs[prim].name);
+        }
     }
     if (chosen < 0 && (g_ptr_x >= 0 || GetCursorPos(&pt))) {
         if (g_ptr_x >= 0) {
@@ -6157,6 +6214,23 @@ static void pin_window_to_primary(const char *src)
     HWND w;
     HMONITOR m, prim;
     MONITORINFO mi, pi;
+    /* s118.11: DeviceSelect and this have OPPOSITE opinions about where the window
+     * belongs. s74 drags it to the primary because that is where Wine's DirectDraw
+     * will render whatever we do; with a device GUID substituted, the game renders
+     * on the chosen monitor instead and DirectDraw places the window to match
+     * (s118.3, arm 3 -- Windows moved a window to suit the device). Dragging it back
+     * would leave the picture on one screen and the mouse on another, which is s89's
+     * failure with a new cause. The device decides; this stands down. */
+    if (g_devsel && g_devsel_want[0]) {
+        static int said;
+        if (!said) {
+            logf_("  [display] DeviceSelect owns the monitor, so PinToPrimary is standing"
+                  " down -- DirectDraw places the window to match the device it renders"
+                  " on, and moving it would split the picture from the input.");
+            said = 1;
+        }
+        return;
+    }
     if (!g_pin_primary) return;
     w = find_game_window();
     if (!w) return;                       /* too early -- no window yet */
