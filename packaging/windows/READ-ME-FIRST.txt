@@ -98,26 +98,15 @@ The patch stopped working after Steam updated or verified files
     on, and a modern processor runs it without effort.
 
 Two monitors
-    The game opens on your MAIN monitor, at that monitor's resolution. To play
-    on the other one, make it your main display first:
+    Start the game from the screen you want to play on. The patch opens it
+    there, at that screen's own resolution, without changing your Windows
+    display settings at all.
+
+    If that ever does not work, the fallback is to make your chosen screen
+    the main display yourself:
 
         Settings -> System -> Display -> pick the monitor
                  -> Multiple displays -> "Make this my main display"
-
-    Tropico's fullscreen always goes to whichever monitor Windows calls the main
-    one. The patch could move that setting for you at every launch, and it used
-    to, but that is a change to your desktop rather than to the game -- and if
-    the game crashes, there is nothing left running to put it back. So it is off
-    unless you ask for it:
-
-        [Display]
-        SetPrimary=1
-
-    With that on, the patch makes whichever screen you launched from the main one
-    for the length of the game and puts it back when the game exits. If the game
-    is ended some way it cannot see -- a crash, or Task Manager -- your main
-    display stays moved until the next time you start Tropico, or until you set
-    it back yourself in Display settings above.
 
     To pin one monitor rather than following your mouse, add its device name:
 
