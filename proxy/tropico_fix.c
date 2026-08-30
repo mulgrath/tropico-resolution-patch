@@ -3146,8 +3146,36 @@ static void choose_monitor(void)
      * Turning it off here is enough by itself. g_launch_w is never set, so pick_mode()
      * validates against SM_CXSCREEN -- the primary, the screen the game will actually
      * run on -- and no mode is adopted from a monitor it will not be shown on. */
-    if (!GetPrivateProfileIntA("Display", "SetPrimary", running_under_wine() ? 1 : 0, ip))
+    /* SAY WHY, when the player has asked for something this gate discards.
+     *
+     * The return above happens BEFORE [Display] Monitor and FollowLaunchMonitor are
+     * read, so on Windows -- where SetPrimary now defaults to 0 (s113.8) -- setting
+     * either of them did nothing at all, and did it without a word. That is the
+     * s113.6 shape: a silence that reads as a result. The keys are not wrong and the
+     * gate is not wrong; what was missing was the sentence joining them.
+     *
+     * Both are checked as STRINGS with an empty default, because
+     * GetPrivateProfileInt cannot tell "absent" from "set to the default" and
+     * FollowLaunchMonitor's default is 1 -- so an int read would stay silent for the
+     * player who set it explicitly, which is exactly the player being addressed. */
+    if (!GetPrivateProfileIntA("Display", "SetPrimary", running_under_wine() ? 1 : 0, ip)) {
+        char m[64], f[64];
+        const char *what;
+        GetPrivateProfileStringA("Display", "Monitor", "", m, sizeof m, ip);
+        GetPrivateProfileStringA("Display", "FollowLaunchMonitor", "", f, sizeof f, ip);
+        if (!*m && !*f) return;
+        what = (*m && *f) ? "[Display] Monitor and FollowLaunchMonitor are"
+             : *m         ? "[Display] Monitor is"
+                          : "[Display] FollowLaunchMonitor is";
+        logf_("[!] [display] SetPrimary=0, so %s being ignored -- the monitor is not"
+              " being chosen at all. Tropico's fullscreen always goes to whichever"
+              " monitor is primary, so reaching another one means MAKING it primary,"
+              " and that is what SetPrimary gates.", what);
+        logf_("    Either make the monitor you want your main display in your desktop's"
+              " own settings -- it costs nothing and is the recommended answer -- or set"
+              " SetPrimary=1 after reading what it costs in tropico-fix.ini.");
         return;
+    }
     GetPrivateProfileStringA("Display", "Monitor", "", want, sizeof want, ip);
 
     /* Not when tools/tropico started us. That launcher already chose the monitor,
