@@ -40,14 +40,28 @@ _sm = subprocess.run(["./dev/tools/sections.py", "--range", "scaling mode"],
                      capture_output=True, text=True)
 assert _sm.returncode == 0, _sm.stderr
 DEL.append((_hp, int(_sm.stdout.split()[1])))
+# NOTE: this total reflects the tree AT CAPTURE TIME. Task 3 lifted hook_import
+# (25 lines) out of the cursor-probe range, and the file-order range is clamped
+# below, so it is 3652 here rather than the 3823 the plan quotes for the raw tree.
+# The "file-order probe" banner runs to the next banner -- but DllMain, the DLL's
+# ENTRY POINT, is defined inside that span. The 3-line "DllMain" banner above it is
+# only a marker; the function body sits after the probe's functions. Deleting the
+# banner range wholesale would remove DllMain, and no address check would notice,
+# because those lines were excluded from "kept" by that very range. Clamp the range
+# to end just before DllMain.
+_dm = next(i for i, l in enumerate(_src, 1)
+           if l.startswith("BOOL WINAPI DllMain("))
 for b in BANNERS:
     out = subprocess.run(["./dev/tools/sections.py","--range",b],
                          capture_output=True, text=True)
     assert out.returncode == 0, f"banner not unique: {b}\n{out.stderr}"
     a, z = map(int, out.stdout.split())
+    if b == "file-order probe":
+        assert a < _dm <= z, "DllMain is no longer inside the file-order range"
+        z = _dm - 1
     DEL.append((a, z))
 total = sum(z - a + 1 for a, z in DEL)
-assert total == 3823, f"delete ranges cover {total} lines, expected 3823"
+assert total == 3652, f"delete ranges cover {total} lines, expected 3652"
 lines = open("proxy/tropico_fix.c").read().rstrip("\n").split("\n")
 inr = lambda n: any(a <= n <= z for a, z in DEL)
 rx = re.compile(r"0x[0-9a-fA-F]{6,8}")

@@ -679,32 +679,54 @@ The fixes those probes were built to find stay: the movie blit magnify, the
 
 Section, by banner: `file-order probe`. ini key removed: `[FileOrder] Enable`.
 
+**DO NOT DELETE THE WHOLE BANNER RANGE.** `DllMain` — the DLL's entry point — is
+defined at the *end* of the span this banner claims. The 3-line `DllMain` banner
+above it is only a marker; the function body sits after the probe's functions.
+Delete from the `file-order probe` banner down to the line before
+`BOOL WINAPI DllMain(`, and keep `DllMain` and everything after it.
+
+Nothing else would catch this mistake: mingw supplies a default `DllMain`, so the
+build would still succeed and the patch would simply never run. `refactor-verify.sh`
+now has an explicit entry-point check for exactly this.
+
 - [ ] **Step 1: Confirm the range**
 
 ```bash
 ./dev/tools/sections.py --range "file-order probe"
 ```
 
-- [ ] **Step 2: Delete the section, its ini read, and its globals**
-
-This section sits after `DllMain`. Confirm `DllMain` itself survives:
+- [ ] **Step 2: Find the real end of the probe code**
 
 ```bash
-grep -n 'DllMain' proxy/tropico_fix.c
+./dev/tools/sections.py --range "file-order probe"      # start .. (overshoots)
+grep -n '^BOOL WINAPI DllMain(' proxy/tropico_fix.c     # the line to stop BEFORE
 ```
 
-- [ ] **Step 3: Rebuild until clean, then verify**
+Delete from the banner line through the line before `BOOL WINAPI DllMain(`, plus the
+`[FileOrder] Enable` read and the probe's globals. `DllMain` calls the probe's
+starter — remove that call from `DllMain`'s body too, leaving the rest of `DllMain`
+untouched.
+
+- [ ] **Step 3: Confirm the entry point survived**
+
+```bash
+grep -c '^BOOL WINAPI DllMain(' proxy/tropico_fix.c     # MUST print 1
+```
+
+- [ ] **Step 4: Rebuild until clean, then verify**
 
 ```bash
 ./proxy/build.sh /tmp/t7.dll 2>&1 | grep -E 'warning|error' | head -20
 ./dev/tools/refactor-verify.sh
 ```
 
-- [ ] **Step 4: Commit**
+The verifier's `entry point` line must read `DllMain present OK`.
+
+- [ ] **Step 5: Commit**
 
 ```bash
 git add proxy/tropico_fix.c
-git commit -m "probes: remove the file-order probe (318 lines)
+git commit -m "probes: remove the file-order probe (172 lines)
 
 It answered which archive the engine reads a given asset from. The answer is
 in FINDINGS; the instrument is not needed to ship."

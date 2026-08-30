@@ -28,6 +28,17 @@ else
   note "exports" "FAIL"; diff "$B/exports.txt" /tmp/refactor-exports.txt | head; fail=1
 fi
 
+# The DLL entry point. It is defined INSIDE the span the "file-order probe" banner
+# claims, so a banner-range deletion would remove it -- and nothing else here would
+# notice: mingw supplies a default DllMain, so the build still succeeds and the
+# patch simply never runs. The address invariant cannot see it either, because
+# DllMain's only literal (0x514e55) also appears in the kept file header.
+if grep -q '^BOOL WINAPI DllMain(' proxy/tropico_fix.c; then
+  note "entry point" "DllMain present OK"
+else
+  note "entry point" "DllMain IS GONE -- the patch would silently never run"; fail=1
+fi
+
 grep -ohE '0x[0-9a-fA-F]{6,8}' proxy/tropico_fix.c | tr 'A-F' 'a-f' \
   | sort -u > /tmp/refactor-addrs.txt
 MISSING=$(comm -23 "$B/addresses-kept.txt" /tmp/refactor-addrs.txt)
