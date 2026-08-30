@@ -1092,24 +1092,6 @@ static void apply_patches(void)
                                           g_text, g_textlen, "world-extent clamp");
             if (vc) {
                 DWORD dw = m.w * 2, dh = m.h * 2;
-                /* [Debug] ClampW/ClampH force the clamp to an arbitrary value.
-                 *
-                 * This exists for the REVERSE test. Raising a clamp and seeing no
-                 * change is ambiguous -- it can mean "wrong clamp" or "right clamp,
-                 * but something else also limits". LOWERING it is unambiguous: if
-                 * the terrain cutoff moves inward to match, this clamp governs the
-                 * terrain and there is a second limit above it; if the cutoff does
-                 * not move at all, this clamp has nothing to do with the terrain.
-                 * A test that can only produce one interesting outcome is a weak
-                 * test -- see TESTING.md. */
-                {
-                    char ip[MAX_PATH];
-                    snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-                    UINT cw = GetPrivateProfileIntA("Debug", "ClampW", 0, ip);
-                    UINT ch = GetPrivateProfileIntA("Debug", "ClampH", 0, ip);
-                    if (cw) { dw = cw; logf_("  [debug] ClampW override -> %u", cw); }
-                    if (ch) { dh = ch; logf_("  [debug] ClampH override -> %u", ch); }
-                }
                 if (poke(vc + VCLAMP_W1, &dw, 4) && poke(vc + VCLAMP_W2, &dw, 4)
                  && poke(vc + VCLAMP_H1, &dh, 4) && poke(vc + VCLAMP_H2, &dh, 4)) {
                     logf_("[+] world-extent clamp at %p: 3200x2400 -> %lux%lu (2x the mode)",
@@ -2279,6 +2261,7 @@ static DWORD WINAPI heartbeat_thread(LPVOID p)
         }
         Sleep(2000);
     }
+    return 0;
 }
 
 /* Everything xrandr told us about one output. */
