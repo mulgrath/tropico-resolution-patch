@@ -149,12 +149,9 @@ static int g_bc_on;                      /* s103, armed from [Blit] Census; thes
                                           * runs long before the census code, so
                                           * they live up here with the prototype */
 static int g_bc_delay, g_bc_every, g_bc_miny;
-static int patch_pathb_recompute(BYTE *layout_fn);
-static int patch_chrome_scale(DWORD table_va);
 static int patch_vtext(int dy, int dx, int cliph, int have_dy, int have_dx, int have_cliph);
 static int patch_vtext_probe(void);
 static int patch_vtext_entry(void);
-static int patch_text_probe(void);
 static int patch_readout_colour(int want);
 static int patch_intro(void);
 static int patch_menu(int w, int h);
@@ -279,13 +276,12 @@ static DWORD g_vt_ys_va, g_vt_xs_va;
  * read by the [VText] defaults and the art-set cross-check, both of which are
  * only correct for the mode the art was generated for. */
 static UINT  g_mode_w, g_mode_h;
-static int g_vt_entry, g_vt_bdh, g_vt_bdy, g_vt_log, g_vt_boxdx;
+static int g_vt_entry, g_vt_bdh, g_vt_bdy, g_vt_boxdx;
 static DWORD g_vte_entry_va;
 /* s65 vtext hook state -- declared here because apply_patches() sets it from the
  * ini long before the hook that reads it is defined. */
 static int g_vt_fix, g_vt_fw, g_vt_fh, g_vt_boxh, g_vt_boxdy;
 static DWORD g_hud_mw, g_hud_mh;
-static int g_txt_log;          /* s87 text probe: declared here, used by apply_patches */
 static int g_chr_enable;
 static DWORD g_chr_trim = 8;
 static DWORD g_hud_ph_style[8], g_hud_ph_size[8];
@@ -1258,37 +1254,6 @@ static void apply_patches(void)
         }
     }
 
-    /* s49 probe.  Off unless the ini asks for it -- it deliberately breaks the
-     * HUD, so it must never fire on a normal run. */
-    {
-        char ip[MAX_PATH];
-        snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-        if (GetPrivateProfileIntA("HudProbe", "Enable", 0, ip)) {
-            g_hud_mw = (DWORD)GetPrivateProfileIntA("HudProbe", "MatchW", 560, ip);
-            g_hud_mh = (DWORD)GetPrivateProfileIntA("HudProbe", "MatchH", 560, ip);
-            g_chr_enable = GetPrivateProfileIntA("HudProbe", "Chrome", 0, ip);
-            g_chr_trim   = (DWORD)GetPrivateProfileIntA("HudProbe", "EdgeTrim", 8, ip);
-            for (int k = 0; k < 8; k++) {
-                char key[8], buf[32]; unsigned st, sz;
-                snprintf(key, sizeof key, "P%d", k);
-                GetPrivateProfileStringA("HudProbe", key, "", buf, sizeof buf, ip);
-                if (sscanf(buf, "%u,%u", &st, &sz) != 2) break;
-                g_hud_ph_style[g_hud_nph] = st; g_hud_ph_size[g_hud_nph] = sz; g_hud_nph++;
-            }
-            if (!g_hud_nph) {
-                logf_("[x] [hudprobe] no phases given (P0=style,size).  Refusing --"
-                      " a probe with nothing to cycle would apply cleanly and do nothing.");
-                fail++;
-            } else if (patch_hud_probe()) ok++; else fail++;
-            if (g_chr_enable && GetPrivateProfileIntA("HudProbe", "ChromeScale", 1, ip)) {
-                if (patch_chrome_scale(table_va)) ok++; else fail++;
-            } else if (g_chr_enable) {
-                logf_("[*] [chrome] ChromeScale=0 -- the six fmul operands are LEFT STOCK;"
-                      " this run varies the draw style only");
-            }
-        }
-    }
-
     /* s103: the blit census (FINDINGS 102).  Read-only -- it tallies, it never
      * changes a draw -- but it hooks the hottest path in the game, so it stays
      * off unless the ini asks for it. */
@@ -1501,16 +1466,14 @@ static void apply_patches(void)
                       " -- rotated labels left STOCK and will overhang."
                       " See FINDINGS 86 for the predicted set and how to confirm it.",
                       g_mode_w, g_mode_h, vt_ar);
-            /* Probe now means "log every rotated draw", not "install the hooks":
-             * the hooks ARE the fix, so Fix=1 installs them either way. */
-            g_vt_log   = GetPrivateProfileIntA("VText", "Probe", 0, ip);
+            /* The hooks ARE the fix, so Fix=1 installs them regardless. */
             g_vt_bdh   = GetPrivateProfileIntA("VText", "BldgDH", vt_dialled ?  107 : 0, ip);
             g_vt_bdy   = GetPrivateProfileIntA("VText", "BldgDY", vt_dialled ? -111 : 0, ip);
             if (g_vt_fix && !(g_vt_fw && g_vt_fh)) {
                 logf_("[x] [vtext] Fix=1 needs FixW/FixH -- an ungated correction breaks"
                       " every mode the F2 ladder climbs through");
                 fail++;
-            } else if (GetPrivateProfileIntA("VText", "Probe", 0, ip) || g_vt_fix) {
+            } else if (g_vt_fix) {
                 if (g_vt_fix)
                     logf_("[*] [vtext] fix armed for %dx%d (aspect %.4f): BoxH=%d BoxDY=%d",
                           g_vt_fw, g_vt_fh, vt_ar, g_vt_boxh, g_vt_boxdy);
@@ -1532,17 +1495,6 @@ static void apply_patches(void)
             if (want < 0 || want > 0xffff)
                 logf_("[x] [text] ReadoutColour=%d is not a 16-bit value -- ignored", want);
             else if (patch_readout_colour(want)) ok++; else fail++;
-        }
-    }
-
-    /* s87: horizontal-text probe. Off unless the ini asks -- it is a per-frame path
-     * and exists to answer "which argument carries the colour", not to ship. */
-    {
-        char ip[MAX_PATH];
-        snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-        if (GetPrivateProfileIntA("TextProbe", "Enable", 0, ip)) {
-            g_txt_log = 1;
-            if (patch_text_probe()) ok++; else fail++;
         }
     }
 
@@ -4710,80 +4662,6 @@ static int fix_short(BYTE *stub, int f, int i, const char *what)
  * patch is the exact identity.  That control is built in: if 1600x1200 changes
  * appearance, this is wrong.
  */
-static const BYTE CSCALE_SIG[] = { 0x83,0xec,0x14, 0x56, 0x8b,0xf1,
-                                   0x8b,0x86,0x90,0x00,0x00,0x00, 0x85,0xc0, 0x0f,0x84 };
-
-/* s58: make the path-B rect RECOMPUTE every frame.
- *
- * FUN_005025e0 decides path A vs path B by testing the LIVE rect:
- *      cmp WORD [esi+0x0f],0 ; je pathB ; cmp WORD [esi+0x11],0 ; jne pathA
- * so once FUN_00502510 has written a non-zero rect the widget never revisits
- * path B and the rect is write-once (s53.2).  Every destructive edit this project
- * has made -- run M's compounding multiply, run Q's zeroed position -- has been a
- * mutation of a write-once field, and each one was permanent because nothing
- * recomputes.  That is five failures of one shape.
- *
- * Testing the AUTHORED rect at +0x50/+0x52 instead of the live one at +0x0f/+0x11
- * fixes the class rather than the instance:
- *   - path-A widgets (authored rect non-zero) still take path A, unchanged;
- *   - path-B widgets (authored rect 0x0) take path B EVERY FRAME.
- * The rect is then recomputed from the sprite each frame, so any edit made in the
- * draw is transient by construction and cannot accumulate or persist.  It is also
- * closer to what a path-B widget means: "derive my rect from the art", not
- * "derive it once and keep it forever".
- *
- * Two displacement bytes.  The guard pattern also occurs at 0x518076 in class 1's
- * pre-draw, so it is located from the verified-unique FUN_00502510 anchor rather
- * than by searching for it. */
-static int patch_pathb_recompute(BYTE *layout_fn)
-{
-    static const BYTE G[13] = { 0x66,0x83,0x7e,0x0f,0x00, 0x74,0x07,
-                                0x66,0x83,0x7e,0x11,0x00, 0x75 };
-    BYTE *g = layout_fn + 0xd3;
-    if (memcmp(g, G, sizeof G) != 0) {
-        logf_("[x] [chrome] path-A/B guard not where expected (%p) -- REFUSING", g);
-        return 0;
-    }
-    BYTE lo = 0x50, hi = 0x52;
-    if (!poke(g + 3, &lo, 1) || !poke(g + 10, &hi, 1)) {
-        logf_("[x] [chrome] path-A/B guard not writable"); return 0;
-    }
-    logf_("[+] [chrome] path-A/B guard at %p now tests the AUTHORED rect (+0x50/+0x52)"
-          " instead of the live one -- path-B widgets recompute every frame, so edits"
-          " cannot persist", g);
-    return 1;
-}
-
-static int patch_chrome_scale(DWORD table_va)
-{
-    BYTE *fn = find_unique(CSCALE_SIG, sizeof CSCALE_SIG, g_text, g_textlen,
-                           "path-B layout (FUN_00502510)");
-    if (!fn) return 0;
-    DWORD fx_va = table_va + 0x58;      /* 0x5a0ff8 = 3200 / screen width  */
-    DWORD fy_va = table_va + 0x60;      /* 0x5a1000 = 2400 / screen height */
-    DWORD our_x = (DWORD)(SIZE_T)&g_chr_fx, our_y = (DWORD)(SIZE_T)&g_chr_fy;
-    int nx = 0, ny = 0;
-    for (int k = 0; k + 6 <= 0xd0; k++) {
-        if (fn[k] != 0xd8 || fn[k+1] != 0x0d) continue;       /* fmul dword [imm32] */
-        DWORD op = rd32(fn + k + 2);
-        if      (op == fx_va) { if (poke(fn+k+2, &our_x, 4)) nx++; }
-        else if (op == fy_va) { if (poke(fn+k+2, &our_y, 4)) ny++; }
-    }
-    /* Three of each, every time.  Anything else means this is not the function we
-     * read, and a partial patch would mix two coordinate spaces inside one rect --
-     * which would look plausible and be wrong. */
-    if (nx != 3 || ny != 3) {
-        logf_("[x] [chrome] FUN_00502510 at %p: patched %d width and %d height"
-              " multiplies, expected 3 and 3 -- REFUSING (a partial patch would mix"
-              " coordinate spaces)", fn, nx, ny);
-        return 0;
-    }
-    logf_("[+] [chrome] path-B layout at %p: all 6 scale operands repointed from the"
-          " live mode to the art set's design space", fn);
-    return patch_pathb_recompute(fn);
-}
-
-
 /* FINDINGS section 65: the F2 settings tabs' ROTATED-TEXT geometry, which is
  * HARD-CODED here -- no .WIN file is consulted for this window.  (The almanac's
  * tabs are a different call site, 0x40741e, and may well be data-driven; these
@@ -4892,9 +4770,6 @@ static int patch_vtext(int dy, int dx, int cliph, int have_dy, int have_dx, int 
  * operands (site+0x22 and site+0x49), NOT hardcoded, so the probe survives a
  * build whose globals moved -- the same rule the signatures follow. */
 
-/* (declared with the movie-probe state above) */
-static int   g_vt_logged;                 /* rate limit: this is a per-frame path */
-
 /* The label is END-ANCHORED at the box bottom: measured at 1920x1080 the box runs
  * y 136..250 px and the label 161..250, i.e. its tail sits exactly on the box
  * bottom and it grows upward.  The tab PLATE, however, is only 106 px (136..242),
@@ -4956,32 +4831,6 @@ static void __cdecl vtext_hook(DWORD *a)
             }
         }
     }
-    /* DEDUPE, not a plain counter.  This is a per-frame path, so a simple cap
-     * fills up on the FIRST resolution and never reaches the one under test --
-     * which is exactly what the first probe run did.  Log each DISTINCT
-     * (y, clipT, scale) once instead, so every mode the user climbs through
-     * contributes its three tabs and nothing repeats. */
-    if (!g_vt_log) return;
-    static DWORD seen[96][3];
-    DWORD key0 = a[3], key1 = a[11], key2 = g_vt_ys_va ? *(DWORD *)(SIZE_T)g_vt_ys_va : 0;
-    for (int i = 0; i < g_vt_logged; i++)
-        if (seen[i][0] == key0 && seen[i][1] == key1 && seen[i][2] == key2) return;
-    if (g_vt_logged >= 96) return;
-    seen[g_vt_logged][0] = key0; seen[g_vt_logged][1] = key1; seen[g_vt_logged][2] = key2;
-    g_vt_logged++;
-    float ys = g_vt_ys_va ? *(float *)(SIZE_T)g_vt_ys_va : 0.0f;
-    float xs = g_vt_xs_va ? *(float *)(SIZE_T)g_vt_xs_va : 0.0f;
-    /* a[0]=canvas a[1]=str a[2]=x a[3]=y a[4]=w a[5]=h a[6]=? a[7]=? a[8]=?
-     * a[9]=clipflag a[10..13]=clipL,T,R,B (already PIXELS) a[14]=? a[15]=alpha
-     * a[16]=mode.  x/y/w/h are VIRTUAL; the clip is not. */
-    logf_("  [vt] x=%d y=%d w=%d h=%d | clip L=%d T=%d R=%d B=%d flag=%d mode=%d",
-          (int)a[2], (int)a[3], (int)a[4], (int)a[5],
-          (int)a[10], (int)a[11], (int)a[12], (int)a[13], (int)a[9], (int)a[16]);
-    logf_("       -> MODE %dx%d | box px y=%d h=%d  (ys=%.5f xs=%.5f)  box bottom=%d  clipT-boxY=%d",
-          (int)(xs * 3200.0f + 0.5f), (int)(ys * 2400.0f + 0.5f),
-          (int)((double)(int)a[3] * ys), (int)((double)(int)a[5] * ys), ys, xs,
-          (int)((double)((int)a[3] + (int)a[5]) * ys),
-          (int)a[11] - (int)((double)(int)a[3] * ys));
 }
 
 static int patch_vtext_probe(void)
@@ -5068,8 +4917,6 @@ static int patch_vtext_probe(void)
  * found by following the call at site+0xA9 through its jump thunk, so no address is
  * hardcoded -- the same build-independence rule the signatures follow. */
 
-static int   g_vte_logged;
-
 static void __cdecl vtentry_hook(DWORD *a)
 {
     /* a[0] = return address (the call site); the arguments follow.  Named from the
@@ -5113,42 +4960,6 @@ static void __cdecl vtentry_hook(DWORD *a)
             a[VTE_Y] = (DWORD)((int)a[VTE_Y] + g_vt_bdy);
         }
     }
-
-    if (!g_vt_log) return;
-
-    static DWORD seen[64][3];
-    DWORD ret = a[0];
-    DWORD k1 = a[VTE_Y], k2 = g_vt_ys_va ? *(DWORD *)(SIZE_T)g_vt_ys_va : 0;
-    for (int i = 0; i < g_vte_logged; i++)
-        if (seen[i][0] == ret && seen[i][1] == k1 && seen[i][2] == k2) return;
-    if (g_vte_logged >= 64) return;
-    seen[g_vte_logged][0] = ret; seen[g_vte_logged][1] = k1; seen[g_vte_logged][2] = k2;
-    g_vte_logged++;
-
-    float ys = g_vt_ys_va ? *(float *)(SIZE_T)g_vt_ys_va : 0.0f;
-    float xs = g_vt_xs_va ? *(float *)(SIZE_T)g_vt_xs_va : 0.0f;
-
-    /* The string, so the log says WAGES rather than a heap pointer.  Read defensively:
-     * a[2] is only ASSUMED to be a char*, and a wrong guess here would fault inside a
-     * probe whose whole job is to be safe to leave running. */
-    char txt[24]; txt[0] = 0;
-    {
-        const char *p = (const char *)(SIZE_T)a[2];
-        if (!IsBadReadPtr(p, 1)) {
-            int n = 0;
-            while (n < 23 && !IsBadReadPtr(p + n, 1) && p[n] >= 32 && p[n] < 127) { txt[n] = p[n]; n++; }
-            txt[n] = 0;
-        }
-    }
-
-    logf_("  [vte] ret=%08x \"%s\" rot=%d | box x=%d y=%d w=%d h=%d | clip T=%d B=%d",
-          ret, txt, (int)a[VTE_ROT],
-          (int)a[VTE_X], (int)a[VTE_Y], (int)a[VTE_W], (int)a[VTE_H],
-          (int)a[VTE_CLPT], (int)a[VTE_CLPB]);
-    logf_("        -> MODE %dx%d  box px y=%d h=%d  bottom=%d  (ys=%.5f xs=%.5f)",
-          (int)(xs * 3200.0f + 0.5f), (int)(ys * 2400.0f + 0.5f),
-          (int)((double)(int)a[VTE_Y] * ys), (int)((double)(int)a[VTE_H] * ys),
-          (int)((double)((int)a[VTE_Y] + (int)a[VTE_H]) * ys), ys, xs);
 }
 
 static int patch_vtext_entry(void)
@@ -5254,121 +5065,6 @@ static int patch_readout_colour(int want)
           old, nw,
           (old >> 10) & 31, (old >> 5) & 31, old & 31,
           (nw  >> 10) & 31, (nw  >> 5) & 31, nw  & 31);
-    return 1;
-}
-
-/* ------------------------------------------------ s87 horizontal-text probe
- *
- * WHICH ARGUMENT CARRIES THE COLOUR OF THE BOTTOM-BAR READOUTS.
- *
- * The owner reports Treasury / Date / Swiss Bank / Population as grey and hard to read.
- * The colour CANNOT be in the art: every pixel of all 17 font assets is alpha-run class
- * (922150 of 922150, section 63.4), so a glyph is a pure opacity mask and whatever tints
- * it does so at draw time.
- *
- * FUN_00453ef0 is the horizontal string renderer (section 65.1), `thiscall` with SIXTEEN
- * stack arguments (`ret 0x40`), reached through the thunk at 0x4020db from exactly nine
- * call sites -- so ONE entry hook sees every horizontal draw and the return address names
- * the site. Same instrument that settled section 66.
- *
- * ROUND 1 GOT TWO THINGS WRONG, both recorded because they are the reusable part:
- *   - it assumed a1 was the string, since every site pushes the same 0x60c188. But the
- *     renderer reads 0x60c18c/0x60c18e as signed WORDs, so 0x60c188 is a small struct and
- *     every string logged empty.
- *   - it then deduped on that string's first byte, which was therefore CONSTANT, so
- *     distinct draws collapsed into each other: ten records for an entire map.
- * Round 1 did settle one thing: args 11..14 are a CLIP RECT (-1,-1,-1,-1 for none, or
- * 0,0,0xa00,0x5a0 = the full 2560x1440 screen), not a colour, and a16 varies 0xff/0xc4
- * which reads as alpha rather than colour.
- *
- * So round 2 stops guessing. Dedupe on (site, x, y) -- widgets differ by POSITION, which
- * is knowable without understanding the arguments -- and print a hex+ASCII window at every
- * argument that looks like a readable pointer, letting the text name itself. */
-
-/* (g_txt_log is declared with the shared patch state above) */
-static int   g_txt_logged;
-
-static void __cdecl text_hook(DWORD this_, DWORD *a)
-{
-    if (!g_txt_log) return;
-
-    static DWORD seen[64][3];
-    DWORD k0 = a[0], k1 = a[3], k2 = a[4];
-    for (int i = 0; i < g_txt_logged; i++)
-        if (seen[i][0] == k0 && seen[i][1] == k1 && seen[i][2] == k2) return;
-    if (g_txt_logged >= 64) return;
-    seen[g_txt_logged][0] = k0; seen[g_txt_logged][1] = k1; seen[g_txt_logged][2] = k2;
-    g_txt_logged++;
-
-    logf_("  [txt] ret=%08x this=%08x  x=%d y=%d w=%d h=%d",
-          a[0], this_, (int)a[3], (int)a[4], (int)a[5], (int)a[6]);
-    logf_("        a1=%08x a2=%08x a7=%08x a8=%08x a9=%08x a10=%08x a15=%08x a16=%08x",
-          a[1], a[2], a[7], a[8], a[9], a[10], a[15], a[16]);
-
-    /* Any argument (and `this`) that points at readable memory gets a 24-byte window.
-     * Read defensively: these are only ASSUMED to be pointers, and a probe that faults
-     * is worse than one that prints nothing. */
-    for (int k = 0; k <= 16; k++) {
-        DWORD v = (k == 0) ? this_ : a[k];
-        if (v < 0x10000) continue;
-        const BYTE *q = (const BYTE *)(SIZE_T)v;
-        if (IsBadReadPtr((void *)q, 24)) continue;
-        char hex[96], asc[32];
-        int hp = 0;
-        for (int j = 0; j < 24; j++) {
-            hp += snprintf(hex + hp, (size_t)(sizeof hex - hp), "%02x", q[j]);
-            if ((j & 3) == 3 && j != 23) hp += snprintf(hex + hp, (size_t)(sizeof hex - hp), " ");
-            asc[j] = (q[j] >= 32 && q[j] < 127) ? (char)q[j] : '.';
-        }
-        asc[24] = 0;
-        if (k == 0) logf_("        this-> %s  |%s|", hex, asc);
-        else        logf_("        a%-2d -> %s  |%s|", k, hex, asc);
-    }
-
-    logf_("        globals: 612fb8=%08x 612fc4=%08x 613868=%08x 61308c=%08x",
-          *(DWORD *)(SIZE_T)0x612fb8, *(DWORD *)(SIZE_T)0x612fc4,
-          *(DWORD *)(SIZE_T)0x613868, *(DWORD *)(SIZE_T)0x61308c);
-}
-
-static int patch_text_probe(void)
-{
-    /* The prologue is unique on eight bytes; sixteen are taken for margin. It is
-     * `sub esp,0x3c` + `mov eax,[esp+0x54]` = 3 + 4, so SEVEN bytes relocate -- taking
-     * the five a detour needs would split the mov and corrupt the function. Both are
-     * position-independent: the relocated `sub` runs before the relocated esp-relative
-     * `mov`, exactly as originally, because popad restores esp to its entry value. */
-    static const BYTE pat[] = { 0x83,0xec,0x3c, 0x8b,0x44,0x24,0x54, 0x85,0xc0,
-                                0x53, 0x55, 0x56, 0x8b,0xd9, 0x57, 0x89 };
-    BYTE *entry = NULL;
-    int n = 0;
-    for (SIZE_T i = 0; i + sizeof pat <= g_textlen; i++)
-        if (!memcmp(g_text + i, pat, sizeof pat)) { entry = g_text + i; if (++n > 1) break; }
-    if (!entry) { logf_("[x] [txtprobe] string-renderer signature not found"); return 0; }
-    if (n > 1)  { logf_("[x] [txtprobe] signature matched %d times -- refusing", n); return 0; }
-
-    BYTE *tr = (BYTE *)VirtualAlloc(NULL, 96, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tr) { logf_("[x] [txtprobe] VirtualAlloc failed"); return 0; }
-    int o = 0;
-    tr[o++] = 0x60;                                                 /* pushad             */
-    tr[o++] = 0x9C;                                                 /* pushfd             */
-    tr[o++] = 0x8D; tr[o++] = 0x44; tr[o++] = 0x24; tr[o++] = 0x24; /* lea eax,[esp+0x24] */
-    tr[o++] = 0x50;                                                 /* push eax  (frame)  */
-    tr[o++] = 0x51;                                                 /* push ecx  (this)   */
-    tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&text_hook; memcpy(tr + o, &f, 4); o += 4; }
-    tr[o++] = 0xFF; tr[o++] = 0xD0;                                 /* call eax           */
-    tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x08;                 /* add esp,8 (cdecl)  */
-    tr[o++] = 0x9D;                                                 /* popfd              */
-    tr[o++] = 0x61;                                                 /* popad              */
-    memcpy(tr + o, entry, 7); o += 7;                               /* relocated sub+mov  */
-    tr[o++] = 0xE9; { DWORD r = (DWORD)(SIZE_T)((entry + 7) - (tr + o + 4)); memcpy(tr + o, &r, 4); o += 4; }
-
-    BYTE det[7];
-    det[0] = 0xE9;
-    { DWORD r = (DWORD)(SIZE_T)(tr - (entry + 5)); memcpy(det + 1, &r, 4); }
-    det[5] = 0x90; det[6] = 0x90;      /* pad the tail of the split instruction */
-    if (!poke(entry, det, 7)) { logf_("[x] [txtprobe] VirtualProtect failed"); return 0; }
-    logf_("[+] [txtprobe] string renderer %p detoured -> %p (logs every horizontal draw)",
-          (void *)entry, (void *)tr);
     return 1;
 }
 
@@ -7224,18 +6920,10 @@ static int patch_blit_census(void)
 
 static void maybe_start_hudprobe(void)
 {
-    char path[MAX_PATH];
-    snprintf(path, sizeof path, "%s\\tropico-fix.ini", g_dir);
-    if (!GetPrivateProfileIntA("HudProbe", "Enable", 0, path)) return;
     if (!g_hud_table_va) {
         logf_("[x] [hudprobe] resolution table never located -- not starting");
         return;
     }
-    g_hud_delay = GetPrivateProfileIntA("HudProbe", "Delay", 20, path);
-    g_hud_every = GetPrivateProfileIntA("HudProbe", "Every", 5, path);
-    if (!g_hud_every) g_hud_every = 5;
-    g_hud_dwell = GetPrivateProfileIntA("HudProbe", "Dwell", 15, path);
-    if (!g_hud_dwell) g_hud_dwell = 15;
     if (g_chr_enable) CreateThread(NULL, 0, chrome_factor_thread, NULL, 0, NULL);
     if (!g_hud_nph) { logf_("[x] [hudprobe] no phases -- thread not started"); return; }
     CreateThread(NULL, 0, hudprobe_thread, NULL, 0, NULL);
