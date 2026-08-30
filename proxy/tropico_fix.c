@@ -3164,6 +3164,16 @@ static void choose_monitor(void)
         GetPrivateProfileStringA("Display", "Monitor", "", m, sizeof m, ip);
         GetPrivateProfileStringA("Display", "FollowLaunchMonitor", "", f, sizeof f, ip);
         if (!*m && !*f) return;
+        /* The launcher owns the display and has already chosen the monitor, so the
+         * keys are SUPERSEDED rather than discarded and the advice below would be
+         * actively wrong -- it would tell the player to go and do what the launcher
+         * just did. Say what the SetPrimary=1 path says in the same situation; the
+         * launcher winning is s90.2's rule, not a special case invented here. */
+        if (GetEnvironmentVariableA("TROPICO_LAUNCHER", want2, sizeof want2)) {
+            logf_("  [display] launched by tools/tropico, which has already chosen the"
+                  " monitor -- leaving the display alone");
+            return;
+        }
         what = (*m && *f) ? "[Display] Monitor and FollowLaunchMonitor are"
              : *m         ? "[Display] Monitor is"
                           : "[Display] FollowLaunchMonitor is";
