@@ -22,6 +22,44 @@
 - **Defaults are frozen.** Every surviving ini key keeps its current default value.
 - **Build reproducibly.** `SOURCE_DATE_EPOCH=0` and a fixed image base; identical source must give identical bytes.
 
+## The deletion method (Tasks 4–10)
+
+**Do not delete by section range.** The file's banners do not partition it into
+probes and fixes — functions were appended to whichever section happened to be
+current when they were written. Three shipped fixes have already been found living
+inside sections marked for deletion:
+
+| Function | Sits inside | Actually is |
+|---|---|---|
+| `patch_vtext` | `s49: the HUD shrink probe` | the shipped `[VText] Enable` fix |
+| `patch_world_viewport` | `s103 the blit census` | the shipped `[WorldFix] Ctor` fix |
+| `DllMain` | `s99 file-order probe` | the DLL entry point |
+
+and one probe block lives inside a section marked keep (`patch_hud_probe` /
+`hudprobe_thread` inside `s70.5 scaling mode`). Ranges are a rough guide to where
+to look. They are not the instruction.
+
+**Delete from the call sites, and let the compiler find the rest.** For each task:
+
+1. **Remove the ini branches** the task names, in the patcher, together with the
+   calls they guard. This is the only step needing judgment.
+2. **Rebuild.** `-Wall -Wextra` reports every `static` function and variable that
+   is now unreferenced, by name and line.
+3. **Delete exactly what it named.** Nothing else.
+4. **Repeat from 2** until the build reports nothing new. Deleting one orphan
+   routinely orphans its helpers, so this takes several rounds.
+5. **Run `./dev/tools/refactor-verify.sh`.**
+
+This is sound where range-deletion is not: C's own reachability analysis decides
+what goes, so a fix cannot be deleted merely for sitting in the wrong neighbourhood,
+and a probe cannot survive by hiding in a good one. It also removes any ordering
+dependency between tasks — a helper shared by two probes stays until its last
+caller goes, whichever task that turns out to be.
+
+**Never delete a function the compiler has not named**, and never silence a warning
+by adding a reference. If you believe something should go but the compiler still
+sees a caller, that caller is the thing to remove.
+
 ---
 
 ### Task 1: The verification harness
@@ -505,8 +543,21 @@ Byte-identical build: this moves code and changes nothing."
 **Files:**
 - Modify: `proxy/tropico_fix.c`
 
-Sections, by banner: `the live-memory scan`, `targeted poke`, `write watch`, `framebuffer pixel watch`.
-ini keys removed with them: `[Scan]` (11), `[Poke]` (2), `[Watch]` (2), `[WatchFB]` (10), `[ImgW]` (2), `[WorldW]` (2).
+**Follow "The deletion method" above — call sites first, compiler second.**
+
+ini branches to remove: `[Scan]` (11 keys), `[Poke]` (2), `[Watch]` (2),
+`[WatchFB]` (10), `[ImgW]` (2), `[WorldW]` (2). All of their reads sit together.
+
+**Also remove three calls from `DllMain`'s body**, which is kept code:
+`maybe_start_scan();`, `maybe_start_watchfb();`, `maybe_start_cliplog();`.
+Leave `maybe_start_hudprobe();` — Task 6 owns it.
+
+Where to look (advisory only): `the live-memory scan`, `targeted poke`,
+`write watch`, `framebuffer pixel watch`.
+
+**`wfb_read32` / `wfb_read16` will NOT be orphaned by this task** — probes that
+Tasks 5 and 6 remove still call them. Leave them; the compiler will name them
+when their last caller goes. Do not force it.
 
 - [ ] **Step 1: Confirm the ranges and the total**
 
@@ -559,10 +610,24 @@ unchanged."
 **Files:**
 - Modify: `proxy/tropico_fix.c`
 
-Sections, by banner: `telemetry for the viewport fix`, `the HUD shrink probe`, `s65 probe`, `rotated-text ENTRY probe`, `horizontal-text probe`, `apply-video probe`.
-ini keys removed: `[HudProbe]` (9), `[TextProbe]` (1), `[ClipLog]` (4), and from `[VText]` everything except `Enable` — `Probe`, `Entry`, `Fix`, `FixW`, `FixH`, `DX`, `DY`, `BoxDX`, `BoxDY`, `BoxH`, `ClipH`, `BldgDY`, `BldgDH`.
+**Follow "The deletion method" above — call sites first, compiler second.**
 
-**Keep, and do not confuse with the above:** `the world viewport width` and `the readout colour` sit between these sections and are shipped fixes.
+ini branches to remove: `[HudProbe]` (9 keys), `[TextProbe]` (1), `[ClipLog]` (4),
+and from `[VText]`: `Probe`, `Entry`, `Fix`, `FixW`, `FixH`, `DX`, `DY`, `BoxDX`,
+`BoxDY`, `BoxH`, `ClipH`, `BldgDY`, `BldgDH`.
+
+**`[VText] Enable` STAYS, and so does the function it calls.** `patch_vtext` is
+defined at roughly line 5701, *inside the section banner-named "s49: the HUD shrink
+probe"*, but it is the shipped `[VText] Enable=1` fix — Tier 1, on by default.
+Deleting it would remove a shipped feature. The compiler will never name it,
+because the kept patcher still calls it; that is the check.
+
+Where to look (advisory only): `telemetry for the viewport fix`,
+`the HUD shrink probe`, `s65 probe`, `rotated-text ENTRY probe`,
+`horizontal-text probe`, `apply-video probe`.
+
+Also shipped, also nearby, also not yours: `the world viewport width` and
+`the readout colour`.
 
 - [ ] **Step 1: Confirm ranges, and confirm the two keepers are not in the list**
 
@@ -619,8 +684,24 @@ The world viewport width and the readout colour are shipped fixes and stay."
 **Files:**
 - Modify: `proxy/tropico_fix.c`
 
-Sections, by banner: `the movie blit probe`, `the HUD movie probe`, `the map-preview probe`, `sweep every surface access`, `the blit census`.
-ini keys removed: `[Menu] BlitProbe, HudMovieProbe, PreviewProbe, Probe, SlotProbe, SurfaceProbe, W, H, Fit`; `[Blit] Census, Delay, Every, MinY`; `[DDProbe] Enable`.
+**Follow "The deletion method" above — call sites first, compiler second.**
+
+ini branches to remove: `[Menu] BlitProbe, HudMovieProbe, PreviewProbe, Probe,
+SlotProbe, SurfaceProbe, W, H, Fit`; `[Blit] Census, Delay, Every, MinY`;
+`[DDProbe] Enable`.
+
+**Also remove `maybe_start_hudprobe();` from `DllMain`'s body.** With that gone and
+Task 5's `[HudProbe]` branch already removed, `patch_hud_probe` and
+`hudprobe_thread` — roughly 300 lines living *inside* the kept `s70.5 scaling mode`
+section — finally lose both callers and the compiler will name them. Delete them
+when it does, along with `patch_hud_probe`'s forward declaration near the top.
+
+**`patch_world_viewport` STAYS.** It is defined at roughly line 8134, *inside the
+section banner-named "s103 the blit census"*, but the kept patcher calls it for
+`[WorldFix] Ctor`. The compiler will not name it; that is the check.
+
+Where to look (advisory only): `the movie blit probe`, `the HUD movie probe`,
+`the map-preview probe`, `sweep every surface access`, `the blit census`.
 
 **Keep:** `let the movie blit MAGNIFY`, `the HUD panel's movie is copied 1:1`, `the scenario map preview` — all shipped fixes, all adjacent to the deletions.
 
@@ -741,8 +822,17 @@ Approved knowingly: these are the only instruments for the map-pan drift the REA
 **Files:**
 - Modify: `proxy/tropico_fix.c`
 
-Sections, by banner: `the cursor probe`, `which call sites read the cursor`, `Wine's cursor vs X's cursor`.
-ini keys removed: `[Cursor] Fix, MsgProbe, Probe, Sites, XCompare`; `[Unix] Probe`.
+**Follow "The deletion method" above — call sites first, compiler second.**
+
+ini branches to remove: `[Cursor] Fix, MsgProbe, Probe, Sites, XCompare`;
+`[Unix] Probe`.
+
+Where to look (advisory only): `the cursor probe`, `which call sites read the
+cursor`, `Wine's cursor vs X's cursor`.
+
+**`find_game_window` STAYS** — its real definition is in kept code and the window
+pin calls it. **`hook_import` STAYS** — Task 3 moved it to `shared primitives`
+precisely so this deletion could not take it.
 
 - [ ] **Step 1: Record the recovery SHA before deleting**
 
@@ -798,7 +888,11 @@ Not a probe — an experimental feature whose own documentation warns users away
 **Files:**
 - Modify: `proxy/tropico_fix.c`
 
-Section, by banner: `the virtual desktop`. ini key removed: `[Display] VirtualDesktop`.
+**Follow "The deletion method" above — call sites first, compiler second.**
+
+ini branch to remove: `[Display] VirtualDesktop`.
+
+Where to look (advisory only): `the virtual desktop`.
 
 - [ ] **Step 1: Confirm the range and find every reference**
 
