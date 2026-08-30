@@ -10667,3 +10667,68 @@ the case where the player asked to play on a non-primary monitor. Against that, 
 retires the whole of s113's apparatus on Windows and changes nothing about the
 player's computer. That trade is worth making, and calling it a compromise rather
 than a solution is the honest description.
+
+### 118.15 GREEN. The translation was exact, and DeviceSelect is now the default
+
+Owner, Windows, launching from both monitors alternately. **Both correct, first
+time, every time -- "no repeat launches were required to get the right
+resolutions."** That last clause matters: s110's symptom was a mode one launch
+behind, and it is gone.
+
+The prediction of 118.14 was confirmed to the pixel:
+
+```
+[+] [devsel] \\.\DISPLAY2 is at (-1920,357) in screen space and this device's surface
+    is 0,0-based, so every Blt destination is translated by (1920,-357).
+  [devsel] Blt dst (-1920,357)-(0,1437) -> (0,0)-(1920,1080)
+```
+
+The incoming rect is exactly the off-surface one the section predicted, and the
+translation lands it as an **exact fit** on the surface -- not an approximation
+that happens to be inside. `[worldfix] FIRING` on the same run means a map loaded,
+which required navigating the menus with the mouse, so the input path agrees with
+the picture.
+
+The run launched from the primary in the same session reported *"already the
+primary -- no device to substitute"* and played at 2560x1440. Both directions,
+same build, one log.
+
+**`[Display] DeviceSelect` now defaults to 1.** Leaving it off would have meant a
+feature that helps only the players who read a config file, which 118.10 already
+rejected as a design. It costs nothing where there is nothing to do: a single
+monitor returns early, and launching from the primary finds no device to
+substitute. Its failure mode is bounded and loud -- an unresolvable monitor leaves
+the game on the primary and says so, and `launch_mode_check()` still refuses a
+mode larger than the screen it will land on.
+
+The Wine notice was made conditional in the same change. With the default now 1,
+warning unconditionally would have put a `[!]` line in **every Linux log** about a
+key nobody set; only a player who explicitly set it is owed the explanation.
+
+**THE HONEST LIMIT: one machine, one GPU, one layout.** An AMD RX 7900 XT with a
+1440p primary and a 1080p secondary at a negative origin. Per-head GUIDs are a
+DirectDraw DDI behaviour and there is no reason to expect Intel or NVIDIA to
+differ, but that is a reason, not a measurement. The fallback is what makes
+defaulting it on defensible rather than optimistic: a driver that does not
+enumerate per-head devices lands the player exactly where they were before.
+
+### 118.16 The subject, closed
+
+**Linux:** unchanged throughout. xrandr chooses, the launcher makes it primary for
+the run, a watchdog or exit trap puts it back, and it self-heals. Measured
+unchanged after every commit in this series.
+
+**Windows:** the game opens on the monitor you launched it from, at that monitor's
+own resolution, and **nothing on the computer is changed** -- no display database
+write, no state file to reconcile, no watchdog, nothing a crash can leave behind.
+`SetPrimary` and its apparatus remain for anyone who wants the old behaviour, and
+are now legacy rather than the answer.
+
+It took s113 (the apparatus), s114 (the question), s115 (a presenter, built and
+deleted), s117 (the number that vindicated deleting it), and s118 (the answer) to
+get here. The two expensive detours had the same shape, and it is worth naming
+once more: **s115.1** -- a negative result from a reimplementation is not a
+negative result about the thing it reimplements -- and **s118.14** -- a probe that
+models the caller's capability but not the caller's arguments proves less than it
+appears to. Both are the gap between "the API supports this" and "this program
+does this."

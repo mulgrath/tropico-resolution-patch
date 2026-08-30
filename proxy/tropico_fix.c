@@ -2353,11 +2353,23 @@ static void maybe_install_ddprobe(void)
      * the only code that sees the call. Read here rather than from g_devsel,
      * because maybe_install_ddprobe() runs BEFORE choose_monitor() sets that --
      * the hook has to exist before the game resolves anything. */
-    g_devsel = GetPrivateProfileIntA("Display", "DeviceSelect", 0, ip);
+    /* DEFAULT ON since s118.15's green run. It costs nothing when there is nothing
+     * to do -- one monitor returns early, and launching from the primary finds no
+     * device to substitute -- and its failure mode is bounded: an unresolvable
+     * monitor leaves the game on the primary and says so. */
+    g_devsel = GetPrivateProfileIntA("Display", "DeviceSelect", 1, ip);
     if (g_devsel && running_under_wine()) {
-        logf_("[!] [devsel] DeviceSelect=1 but this is Wine, which reports ONE adapter"
-              " GUID for every head (FINDINGS 114.3). There is nothing to substitute;"
-              " the xrandr path handles the monitor here. Ignoring it.");
+        /* Explicit or defaulted? Now that the default is 1, warning unconditionally
+         * would put a [!] line in EVERY Linux log about a key nobody set. Only the
+         * player who actually asked for this is owed an explanation; for everyone
+         * else it is not applicable, and the xrandr path already says what it did. */
+        char e[16];
+        GetPrivateProfileStringA("Display", "DeviceSelect", "", e, sizeof e, ip);
+        if (e[0])
+            logf_("[!] [devsel] DeviceSelect=%s, but this is Wine -- it reports ONE"
+                  " adapter GUID for every head (FINDINGS 114.3), so there is nothing"
+                  " to substitute. The monitor is chosen the way it always has been"
+                  " here; nothing is lost by leaving this set.", e);
         g_devsel = 0;
     }
     /* s117 rides the same GetProcAddress interception, because this is the code that
