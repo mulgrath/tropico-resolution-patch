@@ -6564,6 +6564,32 @@ desktop, where the game cannot see the monitor layout at all.
   visits any particular region, which rules out "the pointer must enter the negative-y band"
   as the account of the intermittency.
 
+* **2026-08-31: a virtual desktop on STEAM stops it.** The registry route of 100.1, applied
+  straight to the Proton prefix for app 33520 (`Software\\Wine\\Explorer` `Desktop` =
+  `TropicoVD`, `...\\Desktops` `TropicoVD` = `1920x1080`, nothing on the command line), with
+  the window then fullscreened by hand. Confirmed active in-log rather than assumed:
+
+  | | before | with the desktop |
+  |---|---|---|
+  | `SM_CMONITORS` | 2 | **1** |
+  | virtual screen | `4480x1440 at (0,-360)` | **`1920x1080 at (0,0)`** |
+
+  Result: **no drift**, in a session where the preceding several drifted immediately. The
+  game itself ran normally -- 1920x1080, slot 4, 18 applied, 0 failed.
+
+  This reproduces GOG's immunity on Steam and confirms it is structural: what protects GOG is
+  `tools/tropico`'s virtual desktop, not anything about the GOG build.
+
+  **It does not explain the mechanism, and the tension with the measurement above is the
+  interesting part.** Every coordinate the game reads is correct -- 25,000 samples, none out of
+  screen, none negative -- so the drift is not driven by any value the game reads. Yet removing
+  the multi-monitor layout from what Wine presents stops it. Whatever the cause is, it is on the
+  Proton side of the API boundary and does not show up in what crosses it.
+
+  **Caveat:** one clean session against an intermittent bug is suggestive, not proof. It carries
+  weight only because the immediately preceding sessions drifted at once, and because the
+  condition was verified in-log rather than assumed.
+
 **Hypotheses tested and refuted:** the monitor origin reaching the game (no offset in any rect);
 spurious `0,0` samples (suppressed, drift continued); the message hooks themselves acting as an
 accidental fix (removed, drift still absent); a mid-session mode change as the trigger (F2 mode
