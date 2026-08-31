@@ -165,8 +165,8 @@ if [ "$STEAM" = 0 ]; then
   # would be worse: overwriting IS what someone reinstalling wants. Just said out
   # loud, so the surprise is not silent.
   PREV="$APPS/tropico-patch.desktop"
-  if [ -f "$PREV" ] && ! grep -qF "Exec=$HERE/play" "$PREV" 2>/dev/null; then
-    PREVDIR="$(sed -n 's|^Exec=\(.*\)/play$|\1|p' "$PREV" | head -1)"
+  if [ -f "$PREV" ] && ! grep -qF "$HERE/play" "$PREV" 2>/dev/null; then
+    PREVDIR="$(sed -n 's|^Exec="\?\(.*\)/play"\?$|\1|p' "$PREV" | head -1)"
     echo "   - NOTE: the applications-menu entry pointed at ${PREVDIR:-another folder};"
     echo "           it now starts this one. That install still works from its ./play."
   fi
@@ -175,7 +175,13 @@ if [ "$STEAM" = 0 ]; then
     echo "Type=Application"
     echo "Name=Tropico"
     echo "Comment=Tropico, widescreen-patched"
-    echo "Exec=$HERE/play"
+    # QUOTED, and it matters: an unquoted Exec containing a space parses as a
+    # command plus arguments, so the launcher tries to run the first word and the
+    # menu entry silently does nothing. There is no default install folder to rely
+    # on here -- the GOG build is downloaded and put wherever the player likes, and
+    # a folder name with a space in it is an ordinary choice.
+    # The spec wants \ " $ ` escaped inside the quotes.
+    echo "Exec=\"$(printf '%s' "$HERE/play" | sed 's/[\\"$`]/\\&/g')\""
     [ -n "$ICON" ] && echo "Icon=$ICON"
     echo "Terminal=false"
     # Ties the running window to this entry so the taskbar shows the icon rather than
