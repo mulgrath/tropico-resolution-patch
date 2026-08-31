@@ -6539,6 +6539,31 @@ virtual desktop does NOT show it, which places it on the Proton side rather than
 GOG is immune for a structural reason and not by luck: `tools/tropico` runs inside a virtual
 desktop, where the game cannot see the monitor layout at all.
 
+* **2026-08-31, current Proton, drift reproducing instantly and repeatedly.** `[Cursor] Fix`
+  re-run first: **87 zeros in 34,000 calls, every one replaced, drift continued** -- the same
+  refutation as the original 2309-in-1,046,000 run, on a different Proton and a different
+  distribution, so the earlier result was not an artefact of one session.
+
+  Then the last coordinate theory, and the only one that had also explained the intermittency.
+  A drifting run's environment block reads `virtual screen 4480x1440 at (0,-360)`: the second
+  monitor sits 360 px ABOVE the primary's top edge, so pointer coordinates in that space can be
+  negative in y, and an edge-scroll written `if (y < margin) pan_up()` would fire
+  unconditionally. Measured by testing every `GetCursorPos` return against the game's own
+  1920x1080 screen: **25,000 calls, 0 out of screen, 0 with negative y, map drifting from the
+  first moment.**
+
+  (The instrument's first cut printed its counter only once an out-of-screen sample existed,
+  which made a clean run indistinguishable from one where the game never called `GetCursorPos`.
+  A denominator gated on its own numerator cannot report zero. Fixed before the figure above
+  was trusted.)
+
+  **What this closes:** every coordinate the game reads is correct -- rects correct in the
+  original probe, the three streams agreeing, no out-of-range value ever arriving, and
+  suppressing the only anomalous values changing nothing. The drift is NOT driven by the
+  pointer position the game reads. It also begins immediately rather than after the pointer
+  visits any particular region, which rules out "the pointer must enter the negative-y band"
+  as the account of the intermittency.
+
 **Hypotheses tested and refuted:** the monitor origin reaching the game (no offset in any rect);
 spurious `0,0` samples (suppressed, drift continued); the message hooks themselves acting as an
 accidental fix (removed, drift still absent); a mid-session mode change as the trigger (F2 mode
