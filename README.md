@@ -70,15 +70,6 @@ broken on nearly every modern setup, and the game remembers the choice, so picki
 could leave you stuck. The software renderer is the one you are already playing on, and
 a modern processor runs it without effort.
 
-## Known issues
-
-- **Rarely the game shows "DirectDraw Error #150"** and offers to continue. It is a
-  fault in the 2001 game itself, not something this patch causes. Two things are known
-  to provoke it: alt-tabbing away while a map loads, and playing on a second monitor
-  without starting the game from it.
-
-Both are tracked in [Issues](../../issues), along with everything else known to be wrong.
-
 ## Uninstall
 
 Double-click **`uninstall.bat`** (Windows) or run **`./uninstall.sh`** (Linux). It puts

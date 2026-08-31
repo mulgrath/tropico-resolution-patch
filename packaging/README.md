@@ -64,12 +64,6 @@ the choice, picking it could leave you unable to load a map *or* get back to the
 screen. The software renderer is what you are already playing on, and a modern processor
 runs it without effort.
 
-**"DirectDraw error #150", and it offers to continue.** It is a fault in the 2001 game
-itself, not something this patch causes. Two things are known to provoke it:
-alt-tabbing away while a map loads, and playing on a second monitor without starting
-the game from it — start the game from the monitor you want to play on to avoid that
-second cause.
-
 **Changing resolution later:** you usually do not have to. The patch reads the display
 every time it starts and builds artwork to match, so plugging in a different monitor or
 changing your resolution is handled by launching the game. To pin a resolution anyway,
