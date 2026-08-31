@@ -15,12 +15,16 @@ You need `wine` (with 32-bit support) if you play the GOG version. Steam's versi
 nothing extra — Steam provides Wine through Proton. The launcher also uses `xrandr` and
 `python3`, which your desktop almost certainly already has.
 
+1. Extract this tarball into your Tropico folder.
+2. Run:
+
 ```bash
 ./install.sh
 ```
 
-It finds your Tropico — GOG, Steam, or both — and shows you what it found before it
-starts. It takes a moment: it installs two files and nothing else. The interface artwork
+It looks for Tropico in that folder, in an `app` subfolder, and a few folders up, so
+anywhere inside your Tropico installation works — it does not search the rest of your
+machine. It takes a moment: it installs two files and nothing else. The interface artwork
 is built the first time you play at a new resolution, from your own game files, and takes
 about a second.
 
@@ -32,7 +36,9 @@ about a second.
 the Steam version any other way — its copy protection only unlocks for Steam itself.)
 
 If you have two monitors, start the game from the one you want to play on. It matches
-itself to that screen and puts your desktop back the way it was when you quit.
+itself to that screen and puts your desktop back the way it was when you quit. While the
+game runs, that screen becomes your main display, and if the game crashes it can stay
+that way — starting Tropico again puts it back.
 
 ## How to uninstall
 
@@ -61,8 +67,11 @@ runs it without effort.
 **The map pans on its own when I move the mouse (Steam).** It happens when your monitors
 are not top-aligned in your display settings. Aligning them stops it.
 
-**"DirectDraw error #150" on a second monitor.** Start the game from the monitor you
-want to play on, rather than moving it there afterwards.
+**"DirectDraw error #150", and it offers to continue.** It is a fault in the 2001 game
+itself, not something this patch causes. Two things are known to provoke it:
+alt-tabbing away while a map loads, and playing on a second monitor without starting
+the game from it — start the game from the monitor you want to play on to avoid that
+second cause.
 
 **Changing resolution later:** you usually do not have to. The patch reads the display
 every time it starts and builds artwork to match, so plugging in a different monitor or

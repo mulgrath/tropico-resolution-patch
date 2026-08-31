@@ -52,9 +52,11 @@ second. Nothing is downloaded, and no game files are changed.
 
 **Two monitors?** On Linux, start the game from the screen you want to play on: it
 matches itself to that screen and puts your desktop back the way it was when you quit.
+While the game runs, that screen becomes your main display, and if the game crashes it
+can stay that way — starting Tropico again puts it back.
 On Windows, the game opens on whichever monitor you started it from too, at that
-monitor's own resolution — nothing to set, and your desktop's main display is never
-touched.
+monitor's own resolution — nothing to set, and by default your desktop's main display
+is never touched.
 
 **Changing your resolution later** needs nothing from you. The patch checks the display
 every time the game starts.
@@ -74,8 +76,9 @@ a modern processor runs it without effort.
   only happens when your monitors are not top-aligned in your display settings —
   aligning them stops it.
 - **Rarely the game shows "DirectDraw Error #150"** and offers to continue. It is a
-  fault in the 2001 game that this patch does not cause and does not yet cover; alt-tabbing
-  away while a map loads is the reliable way to provoke it.
+  fault in the 2001 game itself, not something this patch causes. Two things are known
+  to provoke it: alt-tabbing away while a map loads, and playing on a second monitor
+  without starting the game from it.
 
 Both are tracked in [Issues](../../issues), along with everything else known to be wrong.
 

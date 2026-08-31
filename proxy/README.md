@@ -1,11 +1,12 @@
 # tropico_fix — runtime patcher (binkw32.dll proxy)
 
-Applies every fix from `../dev/FINDINGS.md` to a **stock, unmodified** `Tropico.EXE` at
-runtime, so nothing of PopTop's is redistributed and the DRM-wrapped Steam build is
-covered too. Nothing on disk is patched: the game is adjusted in memory, each run.
+Applies every fix documented in the project repository's reverse-engineering notes to a
+**stock, unmodified** `Tropico.EXE` at runtime, so nothing of PopTop's is redistributed
+and the DRM-wrapped Steam build is covered too. Nothing on disk is patched: the game is
+adjusted in memory, each run.
 
-Every address below is derived in `../dev/FINDINGS.md` — that file, not this one, is the
-record of how each was found.
+Every address below is derived in the project repository's reverse-engineering notes —
+that record, not this file, documents how each was found.
 
 ## Install
 

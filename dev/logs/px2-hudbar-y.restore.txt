@@ -1,3 +1,6 @@
+# Abandoned experiment from before the runtime approach. Kept as a record only --
+# never used by the patch, and never shipped. The patch itself does not modify or
+# repack the game's archives (see NOTICE).
 px.PK2 offset 333392557 : original b702 (y=695) -> patched 8b01 (y=395)
 restore with:
   printf "\xb7\x02" | dd of="/mnt/Windows/GOG Games/Tropico/app/data/px.PK2" bs=1 seek=333392557 conv=notrunc status=none
