@@ -161,15 +161,6 @@ static int g_slot_log;
 static int patch_force_fullscreen(void);
 /* maybe_install_dispsel() asks this, and it sits far below. */
 static int running_under_wine(void);
-static int install_cursor_fix(void);   /* defined with the cursor fix below */
-
-/* The spurious-0,0 pointer filter; the section below explains it. */
-typedef BOOL (WINAPI *GetCursorPos_t)(LPPOINT);
-static GetCursorPos_t g_real_gcp;
-static int   g_cur_fix;
-static POINT g_cur_last;          /* the last position we believed */
-static int   g_cur_have_last;
-static volatile LONG g_cur_calls, g_cur_zeros, g_cur_dropped;
 static int g_force_fs = 1;   /* never let the engine enter windowed mode */
 static int g_fs_clamped;     /* how many times the clamp has fired */
 /* ------------------------------------------------------------ shared primitives
@@ -1190,18 +1181,6 @@ static void apply_patches(void)
     {
         char ip[MAX_PATH];
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-        /* Wine reports a spurious 0,0 pointer now and then; the game reads that as
-         * "pan up-left". On by default there, off on Windows. */
-        g_cur_fix = GetPrivateProfileIntA("Cursor", "Fix", running_under_wine() ? 1 : 0, ip);
-        if (g_cur_fix) {
-            if (install_cursor_fix())
-                logf_("[+] [cursor] filtering spurious 0,0 pointer samples"
-                      " (a jump to the corner from far away is replaced with the last"
-                      " good position; a genuine corner pan is left alone)");
-            else
-                logf_("[x] [cursor] USER32!GetCursorPos is not in the import table --"
-                      " the map may drift on its own. [Cursor] Fix=0 silences this.");
-        }
         g_bink_pitch = GetPrivateProfileIntA("Menu", "FixMoviePitch", 0, ip);
         if (GetPrivateProfileIntA("Menu", "FixPreview", 2, ip)) {
             if (patch_preview_fix(GetPrivateProfileIntA("Menu", "FixPreview", 2, ip)))
@@ -3324,64 +3303,6 @@ static void launch_mode_check(int dw, int dh)
 }
 
 
-
-/* ----------------------------------------------- the spurious top-left cursor
- *
- * Wine hands the game an exact 0,0 every so often while the pointer is somewhere
- * else entirely -- measured mid-screen, between two good samples. The game reads
- * 0,0 as "pointer in the top-left corner", which is its pan-up-left command, so
- * the map creeps on its own.
- *
- * Two unrelated code paths show it, which is what makes the diagnosis solid
- * rather than a guess about the scroll code: the map edge-scroll drifts, AND a
- * window being dragged snaps to the top-left corner for a few frames before
- * returning to the pointer. Those share nothing except asking Windows where the
- * pointer is.
- *
- * The filter substitutes the last position we believed. It refuses to do so when
- * that position was itself near the corner, so a player genuinely panning into
- * the top-left still gets what they asked for -- the only thing suppressed is a
- * jump to the corner from somewhere far away, which no hand can produce.
- *
- * ON BY DEFAULT UNDER WINE, off on Windows, where these zeros have never been
- * seen. [Cursor] Fix=0 turns it off; =1 forces it on anywhere.
- */
-static BOOL WINAPI hook_GetCursorPos(LPPOINT pt)
-{
-    BOOL r = g_real_gcp(pt);
-
-    if (r && pt) {
-        LONG n = InterlockedIncrement(&g_cur_calls);
-        if (pt->x == 0 && pt->y == 0) {
-            int near_corner = g_cur_have_last &&
-                              g_cur_last.x < 32 && g_cur_last.y < 32;
-            InterlockedIncrement(&g_cur_zeros);
-            if (g_cur_fix && g_cur_have_last && !near_corner) {
-                *pt = g_cur_last;
-                InterlockedIncrement(&g_cur_dropped);
-            }
-        } else {
-            g_cur_last = *pt;
-            g_cur_have_last = 1;
-        }
-        /* A periodic denominator. Zeros alone say nothing without the call count
-         * they came out of, and this is the line that shows whether the filter is
-         * doing anything on a given machine. */
-        if ((n % 2000) == 0 && g_cur_zeros)
-            logf_("[*] [cursor] %ld calls, %ld spurious 0,0, %ld replaced",
-                  n, g_cur_zeros, g_cur_dropped);
-    }
-    return r;
-}
-
-static int install_cursor_fix(void)
-{
-    void *real = NULL;
-    void *slot = hook_import("USER32.dll", "GetCursorPos", (void *)hook_GetCursorPos, &real);
-    if (!slot) return 0;
-    g_real_gcp = (GetCursorPos_t)real;
-    return 1;
-}
 
 /* ------------------------------------------- the world viewport width
  *
