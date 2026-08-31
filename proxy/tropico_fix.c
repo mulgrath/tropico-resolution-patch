@@ -3705,7 +3705,7 @@ static int patch_vtext(int dy, int dx, int cliph, int have_dy, int have_dx, int 
     if (!n) {
         /* A patch that changes nothing applies "cleanly" and teaches nothing.
          * Refuse instead. */
-        logf_("[*] [vtext] no DY/DX/ClipH given -- geometry left STOCK (probe-only run)");
+        logf_("[*] [vtext] no DY/DX/ClipH override given -- tab geometry left stock");
         return 1;
     }
     logf_("[*] [vtext] %d write(s) across %d site(s)", n, nsites);
@@ -3958,7 +3958,7 @@ static int patch_vtext_entry(void)
     det[0] = 0xE9;
     { DWORD r = (DWORD)(SIZE_T)(tr - (entry + 5)); memcpy(det + 1, &r, 4); }
     if (!poke(entry, det, 5)) { logf_("[x] [vtentry] VirtualProtect failed"); return 0; }
-    logf_("[+] [vtentry] wrapper %08x detoured -> %p (logs EVERY rotated draw and its caller)",
+    logf_("[+] [vtentry] rotated-label wrapper %08x detoured -> %p",
           g_vte_entry_va, (void *)tr);
     return 1;
 }
