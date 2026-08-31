@@ -1,7 +1,10 @@
 # Refactor decision record — 2026-08-30 public-release refactor
 
-Every judgment call made while executing
-`dev/plans/2026-08-30-public-release-refactor.md`, in the order it was made.
+Every judgment call made while executing the public-release refactor plan, in the
+order it was made. The plan itself was a task list for work now finished, so it is
+in history rather than the tree:
+
+    git show a8563f7:dev/plans/2026-08-30-public-release-refactor.md
 
 Kept because several of these are corrections to the spec and plan themselves: the
 section-banner deletion unit turned out to be unsound, and four shipped fixes were

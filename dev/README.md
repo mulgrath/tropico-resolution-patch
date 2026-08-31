@@ -9,7 +9,6 @@ builds its payload from an explicit list that does not include this directory.
 - `TESTING.md` — how to test this without fooling yourself. Read before testing.
 - `CONFIG-REFERENCE.md` — the ini keys that are not in the shipped file.
 - `specs/` — design documents.
-- `plans/` — implementation plans.
 - `probes/` — standalone probe programs, built by hand when a question needs one.
 - `logs/` — captured traces that FINDINGS.md cites as evidence.
 - `tools/` — the refactor verification harness.

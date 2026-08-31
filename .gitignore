@@ -37,3 +37,8 @@ dist/
 # Scratch builds of the proxy. Only proxy/binkw32.dll and known-good/binkw32.dll
 # are real artifacts; anything else is a variant from an experiment.
 proxy/binkw32_*.dll
+
+# Captured harness state, not source: refactor-verify.sh holds a build to the tree
+# the baseline was taken on, so a committed copy is only ever stale for someone
+# else. dev/tools/refactor-baseline.sh regenerates it.
+dev/tools/baseline/

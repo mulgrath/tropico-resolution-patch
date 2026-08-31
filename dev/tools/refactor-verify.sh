@@ -4,6 +4,8 @@
 set -eu
 cd "$(git rev-parse --show-toplevel)"
 B=dev/tools/baseline
+[ -d "$B" ] || { echo "no baseline yet: run dev/tools/refactor-baseline.sh first,"
+                 echo "on the tree you want to hold this one to." ; exit 1; } >&2
 STRICT="${1:-}"
 fail=0
 note() { printf '  %-22s %s\n' "$1" "$2"; }
