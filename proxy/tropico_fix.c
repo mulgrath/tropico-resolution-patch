@@ -480,6 +480,18 @@ static void launch_mode_check(int dw, int dh); /* ditto */
  */
 static void log_environment(void)
 {
+    /* ONCE, AND UNCONDITIONALLY. This used to be reached only through
+     * pick_mode_pass(), so a run that took the launch-monitor path -- the common
+     * one on Steam -- recorded nothing about the display layout it ran under.
+     *
+     * That is the wrong way round for the one open bug that is layout-driven and
+     * intermittent: the Proton cursor drift appears with monitors that are not
+     * top-aligned, and four sessions showed it while four later ones could not
+     * reproduce it. Correlating those needs every run to say which layout it had,
+     * whether or not anything went wrong that time. It costs a handful of
+     * GetSystemMetrics calls at startup. */
+    static LONG once;
+    if (InterlockedExchange(&once, 1)) return;
     logf_("--- environment as the GAME sees it ---");
     logf_("  SM_CMONITORS      = %d", GetSystemMetrics(SM_CMONITORS));
     logf_("  SM_CXSCREEN       = %d x %d   (primary monitor)",
@@ -904,6 +916,7 @@ static void apply_patches(void)
 {
     if (InterlockedExchange(&g_done, 1)) return;   /* only ever run the body once */
 
+    log_environment();
     if (!locate_sections()) { logf_("[x] could not locate .text/.data"); return; }
     logf_("[*] module %p  .text %p+%u  .data %p+%u",
           g_base, g_text, (unsigned)g_textlen, g_data, (unsigned)g_datalen);
