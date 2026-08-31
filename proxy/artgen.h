@@ -3,14 +3,15 @@
  * The single implementation. `probes/artgen_*.c` link this file and diff its output
  * against `tools/tropico-artset.py`; `proxy/tropico_fix.c` calls it at launch. That is
  * deliberate and it is the point: a probe that validated its own private copy would be
- * testing code the game never runs. Every byte-identity claim in FINDINGS 93/94/95 is a
- * claim about THIS file.
+ * testing code the game never runs. Every byte-identity claim in ../dev/FINDINGS.md
+ * against the Python oracle (25,820 sprites across four font scales and both filters,
+ * plus the name/asset harvest) is a claim about THIS file.
  *
  * No Windows headers, no CRT beyond stdio/stdlib/string/math, so the probes build
  * natively and the proxy builds for i686-mingw from the same source.
  *
  * BUILD NOTE for 32-bit: -msse2 -mfpmath=sse is required. x87's 80-bit intermediates
- * change box_resample's rounding and break byte-identity (FINDINGS 94).
+ * change box_resample's rounding and break byte-identity against the Python oracle.
  */
 #ifndef ARTGEN_H
 #define ARTGEN_H
@@ -41,7 +42,7 @@ typedef struct { char **v; size_t n, cap; } ag_names;
 /* Every asset the generator should produce, as "<base>.i16" names paired with the
  * archive entry to read from. `with_menu` appends the seven assets PopTop only
  * authored at 640x480, after the sorted main list -- the order is part of the
- * contract (FINDINGS 95). */
+ * contract the oracle diff checks against, so it is not merely cosmetic. */
 typedef struct {
     char           **name;        /* "<base>.i16"                                */
     const ag_entry **src;

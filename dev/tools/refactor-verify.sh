@@ -94,13 +94,16 @@ else note "ini advertises dead" "$DEAD"; fi
 
 # tools/ is in scope: tropico-common.sh prints errors a player reads, e.g.
 # "width 1366 is not a multiple of 4 (FINDINGS 10: it would shear)" -- which tells
-# them to consult a document they do not have.
-LEAK=$(grep -rniE 'FINDINGS|\bs[0-9]{2,3}[.: ]|§[0-9]+' \
+# them to consult a document they do not have. An explicit "../dev/FINDINGS.md" or
+# similar PATH pointer is not a leak -- a reader can follow it -- so the regex
+# excludes "FINDINGS" only when immediately followed by ".md"; a bare chapter
+# citation like "FINDINGS 90" or "FINDINGS s90" still matches.
+LEAK=$(grep -rniP 'FINDINGS(?!\.md)|\bs[0-9]{2,3}[.: ]|§[0-9]+' \
         README.md known-good/tropico-fix.ini packaging/ tools/ proxy/README.md \
         2>/dev/null | wc -l)
 # Files that actually SHIP, per tools/make-release.sh's own list. A citation here
 # reaches a user's disk, so these are counted separately and must reach zero.
-SHIPLEAK=$(grep -rniE 'FINDINGS|\bs[0-9]{2,3}[.: ]|§[0-9]+' \
+SHIPLEAK=$(grep -rniP 'FINDINGS(?!\.md)|\bs[0-9]{2,3}[.: ]|§[0-9]+' \
         README.md known-good/tropico-fix.ini packaging/README.md packaging/windows/ \
         proxy/README.md tools/tropico tools/tropico-common.sh tools/tropico-setmode.sh \
         tools/tropico-launchpoint.py tools/tropico-fullscreen.py 2>/dev/null | wc -l)

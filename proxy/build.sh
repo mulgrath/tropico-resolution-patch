@@ -20,17 +20,11 @@ set -eu
 export SOURCE_DATE_EPOCH=0
 cd "$(dirname "$0")"
 OUT="${1:-binkw32.dll}"
-# WHEN THE ART GENERATOR LANDS HERE, ADD -msse2 -mfpmath=sse. This is a 32-bit
-# target, so gcc emits x87 by default and keeps floating-point intermediates at 80
-# bits. The generator's box filter is validated by BYTE-IDENTITY against the Python
-# oracle, and x87 breaks that: measured, the 32-bit probe diverged from the 64-bit one
-# at one sprite in 25,820 until the flags were added (FINDINGS 94). Not added yet
-# because nothing here depends on float precision, and adding it now would change the
-# shipped binary for no present benefit.
 # artgen.c is the ART GENERATOR, and it is the SAME FILE the probes link. -msse2
 # -mfpmath=sse is required, not cosmetic: this is a 32-bit target, gcc emits x87 by
 # default, and x87's 80-bit intermediates change box_resample's rounding enough to
-# break byte-identity against the Python oracle (FINDINGS 94).
+# break byte-identity against the Python oracle: measured, the 32-bit build diverged
+# from the 64-bit one at one sprite in 25,820 until the flags were added.
 i686-w64-mingw32-gcc -shared -O2 -Wall -Wextra -msse2 -mfpmath=sse \
     -o "$OUT" tropico_fix.c artgen.c binkw32.def \
     -static-libgcc \

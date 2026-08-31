@@ -31,15 +31,15 @@ ends `done: 17 applied, 0 failed`.
 
 | site | fix |
 |---|---|
-| `00514da0` | gate `jge` → `jg`, so a mode exactly as wide as the desktop is kept rather than lost to an off-by-one (§2) |
-| `005a0fa0` + `0052d15a` | point slot 4 at the display's own mode, in **both** the data table and the code compare-chain (§1, §8) |
+| `00514da0` | gate `jge` → `jg`, so a mode exactly as wide as the desktop is kept rather than lost to an off-by-one |
+| `005a0fa0` + `0052d15a` | point slot 4 at the display's own mode, in **both** the data table and the code compare-chain — they must move together, since patching only one leaves the other silently pointing at the wrong slot |
 
 **Rendering the world at that mode**
 
 | site | fix |
 |---|---|
-| `0046b140` | world-extent clamp `3200x2400` → twice the mode (§36) |
-| `00526220` | four forced writes — viewport width, image pixel height, object virtual width and height — gated on viewport width ≥ 1280 (§33) |
+| `0046b140` | world-extent clamp `3200x2400` → twice the mode |
+| `00526220` | four forced writes — viewport width, image pixel height, object virtual width and height — gated on viewport width ≥ 1280 |
 | `0044deaa`, `0044e00f` | map-preview column lookup and row stepping, so previews scale instead of tearing |
 | `00532063` | destination clamps `jl` → `jmp`, letting the movie scaler magnify past the source size |
 
@@ -47,20 +47,20 @@ ends `done: 17 applied, 0 failed`.
 
 | site | fix |
 |---|---|
-| `00515450` | apply-video detoured so the frontend preset resolves to slot 4 — the menu survives a return from a map (§69) |
+| `00515450` | apply-video detoured so the frontend preset resolves to slot 4 — the menu survives a return from a map |
 | `0047c37c`, `0047c39d` | the two startup slot requests redirected to slot 4 |
 | `0047c375` | startup windowed-gate → `mov [obj+0x1c],0`, so a CFG left windowed heals itself |
 | `0040741e`, `0049179e` | the rotated-text (VText) call sites trampolined, arguments rewritten for the aspect |
-| `004526d0` | VText wrapper detour — diagnostic, logs every rotated draw and its caller (§65) |
+| `004526d0` | VText wrapper detour — diagnostic, logs every rotated draw and its caller |
 | `[C2]` colour table | readout colour `6318` → `7fff`: treasury, swiss bank, population, and the date by inheritance |
 
 **Renderer and startup**
 
 | site | fix |
 |---|---|
-| `0052df6f` | Hardware 3D refused by skipping `EnumDevices`, so the game gives its own honest "not available" message rather than bricking the install. `[Hardware] Enable=1` offers it anyway (§16) |
-| `004f92f8` | texture-budget signed compare `jge` → `jae` (§16) |
-| `0052f16b` | renderer branch → `and [settings+0x10],0`; the software path is unconditional, and a CFG that selected Hardware 3D heals itself on the next save (§91) |
+| `0052df6f` | Hardware 3D refused by skipping `EnumDevices`, so the game gives its own honest "not available" message rather than bricking the install. `[Hardware] Enable=1` offers it anyway |
+| `004f92f8` | texture-budget signed compare `jge` → `jae` |
+| `0052f16b` | renderer branch → `and [settings+0x10],0`; the software path is unconditional, and a CFG that selected Hardware 3D heals itself on the next save |
 | `0047c3cc` | intro one-shot guard NOPed, so the startup movie plays every launch |
 
 ## Resolution, and which monitor
@@ -105,7 +105,7 @@ holding the gate — and the Steam build's `.text` is still SteamStub-encrypted 
 DllMain, so patching defers to the first `GetDeviceCaps` call, which provably precedes
 the gate because the gate consumes that call's result. A pending primary-monitor change
 defers the pass for the same reason: from DllMain you may read the display, never
-change it (§99).
+change it.
 
 Every pattern scan **requires a unique match**. Two matches means the signature is not
 specific enough, and the proxy refuses rather than patch the wrong site.

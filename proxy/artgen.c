@@ -2,9 +2,9 @@
  * probes and the proxy rather than copied into each.
  *
  * The codec, the resampling and the name harvest below are carried across VERBATIM
- * from the probes that validated them (FINDINGS 93/94/95): 25,820 sprites byte-identical
- * to tools/tropico-artset.py across four font scales and both filters, and 280 names /
- * 268 resolved assets identical to the Python harvest. Moving them was a cut and paste,
+ * from the probes that validated them (see ../dev/FINDINGS.md): 25,820 sprites
+ * byte-identical to tools/tropico-artset.py across four font scales and both filters,
+ * and 280 names / 268 resolved assets identical to the Python harvest. Moving them was a cut and paste,
  * deliberately, so that "the probe passed" keeps meaning something about this file.
  *
  * New here, and NOT yet covered by those runs when first written: the container writer
@@ -48,7 +48,7 @@ typedef struct { unsigned char kind, a, b; } cell_t;
 
 /* ------------------------------------------------------------------ the codec */
 
-/* Row framing (FINDINGS 28): b < 0x80 -> a 1-byte header declaring length b;
+/* Row framing: b < 0x80 -> a 1-byte header declaring length b;
  * b >= 0x80 -> a 2-byte header declaring ((b&0x7f)<<8)|next. The length COUNTS the
  * header. The blit itself skips the header without reading the length and relies on
  * the 0x00 opcode to advance -- but the length is what makes rows addressable, so
@@ -321,7 +321,7 @@ static int rescale_sprite(const cont_t *c, const sprite_t *s, int nw, int nh, bu
 
 /* ------------------------------------------------------------- the font path
  *
- * FONTS ARE DIFFERENT ON TWO INDEPENDENT COUNTS, both measured (FINDINGS 63/65/86):
+ * FONTS ARE DIFFERENT ON TWO INDEPENDENT COUNTS, both measured against the archives:
  *
  * 1. Every pixel in a font container is alpha-run class -- 922150 of 922150 across
  *    all 17 assets -- against 99% palettised literals for the chrome. An alpha is a
@@ -657,7 +657,7 @@ int ag_index_load(ag_index *ix, const char *datadir)
         if (!raw || fread(raw, 1, (size_t)13 * count, f) != (size_t)13 * count)
         { free(raw); fclose(f); return -1; }
         fclose(f);
-        /* Offsets are RELATIVE to the data region (FINDINGS 19). Absolute reads give
+        /* Offsets are RELATIVE to the data region. Absolute reads give
          * plausible garbage rather than an error, which is how it was first missed. */
         size_t data_start = 8 + (size_t)13 * count;
         if (ix->nent + count > cap) {
@@ -690,8 +690,8 @@ void ag_assets_free(ag_assets *a)
   free(a->from_i06); memset(a, 0, sizeof *a); }
 
 /* All three name sources. The exe alone yields 51; the .WIN records inside the
- * archives take it to 98 (FINDINGS 48.2); the numeric families take it to 280, of
- * which 183 are brNN and 182 of those appear in no file at all (FINDINGS 90). */
+ * archives take it to 98; the numeric families take it to 280, of
+ * which 183 are brNN and 182 of those appear in no file at all. */
 int ag_harvest(const ag_index *ix, const char *exepath, ag_names *out)
 {
     memset(out, 0, sizeof *out);
@@ -784,7 +784,7 @@ int ag_resolve(const ag_index *ix, const ag_names *names, int with_menu, ag_asse
             if (!e) continue;
             snprintf(outn, sizeof outn, "%s.i16", base);
             if (pass) {
-                /* missing_only: FINDINGS 69.5, the seven assets that exist ONLY as
+                /* missing_only: the seven assets that exist ONLY as
                  * .i06 because PopTop authored the menu, credits and folder screens
                  * at 640x480. Appended AFTER the sorted main list, not merged into
                  * it -- the order is part of what the oracle checks. */
@@ -890,9 +890,10 @@ static int ag_exe_path(char *out, size_t n) { (void)out; (void)n; return 0; }
 
 /* --------------------------------------------------------------- the set driver
  *
- * THE CACHE KEY IS THE MODE, AND ONLY THE MODE. The staged-set world needed a
- * separate font-scale stamp beside each set (FINDINGS 86) because the scale was a
- * command-line option that could differ between two runs at the same resolution.
+ * THE CACHE KEY IS THE MODE, AND ONLY THE MODE. The staged-set world (the Python
+ * tooling this was ported from) needed a separate font-scale stamp beside each set
+ * because there the scale was a command-line option that could differ between two
+ * runs at the same resolution.
  * Here it cannot: the generator derives font_scale from the mode as H/1080, so two
  * runs at the same mode produce the same set by construction. One key, no stamp.
  *
@@ -984,7 +985,7 @@ int ag_generate_set(const char *gamedir, int to_w, int to_h, double font_scale,
     }
     if (man) fclose(man);
 
-    /* THE STOCK-CLASS MENU ASSETS (FINDINGS 69.5). Seven assets exist ONLY as .i06,
+    /* THE STOCK-CLASS MENU ASSETS. Seven assets exist ONLY as .i06,
      * because PopTop authored the menu, the credits and the folder screens at 640x480
      * and nothing else. Without them the menu dies with
      *
@@ -1033,7 +1034,7 @@ int ag_generate_set(const char *gamedir, int to_w, int to_h, double font_scale,
         if (sm) fclose(sm);
         if (log) {
             snprintf(msg, sizeof msg, "[+] artgen: %zu stock-class menu asset(s) for"
-                     " slots 1-3 (they exist only at 640x480 -- FINDINGS 69.5)", sok);
+                     " slots 1-3 (they exist only at 640x480)", sok);
             log(msg);
         }
     }
