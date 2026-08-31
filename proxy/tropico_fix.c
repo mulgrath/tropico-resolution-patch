@@ -143,8 +143,8 @@ static int locate_sections(void)
  */
 static int patch_world_viewport(UINT match_w, UINT new_w);
 static int patch_vtext(int dy, int dx, int cliph, int have_dy, int have_dx, int have_cliph);
-static int patch_vtext_probe(void);
-static int patch_vtext_entry(void);
+static int patch_vtext_sites(void);
+static int patch_vtext_wrapper(void);
 static int patch_readout_colour(int want);
 static int patch_intro(void);
 static int g_menu_slot = -1;
@@ -153,14 +153,28 @@ static int patch_blit_scale(void);
 static int patch_hud_movie(void);
 static int patch_preview_fix(int mode);
 static int patch_menu_slot(void);
-static int patch_slot_probe(void);
+static int patch_menu_apply(void);
 static void find_applyvideo(void);
 static DWORD WINAPI pin_thread(LPVOID);
 static DWORD g_preset_ret;   /* return address of the preset-apply call site */
-static int g_slot_log;
 static int patch_force_fullscreen(void);
 /* maybe_install_dispsel() asks this, and it sits far below. */
 static int running_under_wine(void);
+static int install_cursor_fix(void);   /* defined with the pointer filter below */
+
+/* The stray-corner pointer filter; the section below explains it. */
+typedef BOOL  (WINAPI *GetCursorPos_t)(LPPOINT);
+typedef BOOL  (WINAPI *PeekMessageA_t)(LPMSG, HWND, UINT, UINT, UINT);
+typedef BOOL  (WINAPI *GetMessageA_t)(LPMSG, HWND, UINT, UINT);
+typedef DWORD (WINAPI *GetMessagePos_t)(void);
+static GetCursorPos_t   g_real_gcp;
+static PeekMessageA_t   g_real_peek;
+static GetMessageA_t    g_real_getmsg;
+static GetMessagePos_t  g_real_msgpos;
+static int   g_cur_fix;
+static POINT g_cur_screen, g_cur_client;   /* last believed, per coordinate space */
+static int   g_cur_have_screen, g_cur_have_client;
+static volatile LONG g_cur_fixed;
 static int g_force_fs = 1;   /* never let the engine enter windowed mode */
 static int g_fs_clamped;     /* how many times the clamp has fired */
 /* ------------------------------------------------------------ shared primitives
@@ -1194,6 +1208,18 @@ static void apply_patches(void)
     {
         char ip[MAX_PATH];
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
+        /* Wine reports a stray top-left pointer position now and then, which the
+         * game reads as "pan up-left". Not seen on Windows, so not armed there. */
+        g_cur_fix = GetPrivateProfileIntA("Cursor", "Fix", running_under_wine() ? 1 : 0, ip);
+        if (g_cur_fix) {
+            int hooked = install_cursor_fix();
+            if (hooked)
+                logf_("[+] [cursor] stray top-left pointer reports will be corrected"
+                      " (%d input path(s) watched)", hooked);
+            else
+                logf_("[x] [cursor] no pointer entry point could be hooked -- the map"
+                      " may drift on its own. [Cursor] Fix=0 silences this.");
+        }
         g_bink_pitch = GetPrivateProfileIntA("Menu", "FixMoviePitch", 0, ip);
         if (GetPrivateProfileIntA("Menu", "FixPreview", 2, ip)) {
             if (patch_preview_fix(GetPrivateProfileIntA("Menu", "FixPreview", 2, ip)))
@@ -1240,7 +1266,7 @@ static void apply_patches(void)
          * stock behaviour, checkbox and all. */
         g_force_fs = GetPrivateProfileIntA("Display", "ForceFullscreen", 1, ip);
         if (g_force_fs) { if (patch_force_fullscreen()) ok++; else fail++; }
-        if (g_menu_slot >= 0 || g_slot_log || g_force_fs) {
+        if (g_menu_slot >= 0 || g_force_fs) {
             if (!g_vt_xs_va || !g_vt_ys_va) {
                 static const BYTE CS[]  = {0x66,0x3d,0x80,0x02, 0x7e,0x0a,
                                            0xc7,0x44,0x24,0x10,0x80,0x02,0x00,0x00};
@@ -1250,7 +1276,7 @@ static void apply_patches(void)
                 if (c) { g_vt_xs_va = rd32(c + 23); g_vt_ys_va = rd32(c + 69); }
             }
             find_applyvideo();
-            if (patch_slot_probe()) ok++; else fail++;
+            if (patch_menu_apply()) ok++; else fail++;
         }
         if (g_menu_slot >= 0) { if (patch_menu_slot()) ok++; else fail++; }
     }
@@ -1341,8 +1367,8 @@ static void apply_patches(void)
                 if (g_vt_fix)
                     logf_("[*] [vtext] fix armed for %dx%d (aspect %.4f): BoxH=%d BoxDY=%d",
                           g_vt_fw, g_vt_fh, vt_ar, g_vt_boxh, g_vt_boxdy);
-                if (patch_vtext_probe()) ok++; else fail++;
-                if (g_vt_entry) { if (patch_vtext_entry()) ok++; else fail++; }
+                if (patch_vtext_sites()) ok++; else fail++;
+                if (g_vt_entry) { if (patch_vtext_wrapper()) ok++; else fail++; }
             }
         }
     }
@@ -1411,20 +1437,8 @@ typedef int (WINAPI *GetDeviceCaps_t)(HDC, int);
 static GetDeviceCaps_t g_real_gdc;
 static GetDeviceCaps_t *g_gdc_slot;
 
-/* File-order probe. Declared here rather than with the probe because
- * hook_GetDeviceCaps, below, records where its first call lands in the
- * numbered sequence of opens -- that ordering IS the measurement. */
-static int  g_fo_on;
-static LONG g_fo_n;
-
 static int WINAPI hook_GetDeviceCaps(HDC hdc, int index)
 {
-    if (g_fo_on) {
-        static LONG said;
-        if (!InterlockedExchange(&said, 1))
-            logf_("  [fileorder] === GetDeviceCaps first call, after %ld opens ===",
-                  (long)g_fo_n);
-    }
     /* Patch on the first call, and keep retrying until a scan succeeds -- on the
      * Steam build .text is ciphertext until the stub's entry wrapper has run. */
     if (!g_done) {
@@ -3317,6 +3331,117 @@ static void launch_mode_check(int dw, int dh)
 
 
 
+/* --------------------------------------------- stray top-left pointer reports
+ *
+ * Under Wine, with monitors that are not aligned along their top edges, the
+ * pointer position handed to the game occasionally reads as the top-left corner
+ * while the mouse is somewhere else entirely -- measured mid-screen, between two
+ * good samples. The game takes that as "pointer in the top-left corner", which is
+ * its pan-up-left command, so the map creeps on its own; a window being dragged
+ * jumps to the corner for a frame and comes back.
+ *
+ * WHAT MADE THIS HARD TO SEE, recorded because it cost a lot of time:
+ *
+ *   - The stray values are NOT all exactly 0,0. They scatter across the corner --
+ *     0,0 but also 1,0, 0,1, 2,2, 7,0. An earlier filter tested for exactly 0,0,
+ *     caught a fraction, and the symptom survived, which read as the theory being
+ *     wrong rather than the test being too narrow.
+ *   - They arrive on more than one path. This game polls PeekMessageA in its
+ *     main loop and that carries most of them -- measured at roughly eighteen
+ *     times the rate of GetCursorPos -- so filtering the obvious call alone
+ *     leaves the symptom in place.
+ *   - The RATE swings enormously between sessions: measured at ten strays in
+ *     220,000 reads, and at 821 in 25,000. Nothing is present-or-absent; a quiet
+ *     session is simply one nobody notices.
+ *
+ * THE RULE: a report is rejected when it lands in the corner AND is too far from
+ * the last believed position for a hand to have travelled between two reads. A
+ * player genuinely moving into the corner keeps working, because by then the last
+ * position is already near it. Rejected reports are replaced with the last good
+ * one rather than dropped, so nothing downstream sees a gap.
+ *
+ * Mouse-message coordinates are relative to the window and pointer reads are
+ * relative to the screen, so the two keep separate notions of "last believed".
+ *
+ * On by default under Wine, off on Windows, where this has never been observed.
+ */
+#define CUR_CORNER_PX   16    /* how close to the corner counts as the corner */
+#define CUR_TELEPORT_PX 200   /* a jump no hand makes between consecutive reads */
+
+static int cursor_stray(LONG *x, LONG *y, POINT *last, int *have)
+{
+    if (*have && *x <= CUR_CORNER_PX && *y <= CUR_CORNER_PX &&
+        (labs(last->x - *x) > CUR_TELEPORT_PX || labs(last->y - *y) > CUR_TELEPORT_PX)) {
+        LONG n = InterlockedIncrement(&g_cur_fixed);
+        *x = last->x; *y = last->y;
+        /* Once, then rarely. This is a per-frame path and a line per event would
+         * cost more than the fault does. */
+        if (n == 1 || (n % 500) == 0)
+            logf_("[*] [cursor] %ld stray top-left report(s) corrected", n);
+        return 1;
+    }
+    last->x = *x; last->y = *y; *have = 1;
+    return 0;
+}
+
+static BOOL WINAPI hook_GetCursorPos(LPPOINT pt)
+{
+    BOOL r = g_real_gcp(pt);
+    if (r && pt) {
+        LONG x = pt->x, y = pt->y;
+        if (cursor_stray(&x, &y, &g_cur_screen, &g_cur_have_screen))
+            { pt->x = x; pt->y = y; }
+    }
+    return r;
+}
+
+static void cursor_fix_msg(LPMSG m)
+{
+    LONG x, y;
+    if (!m || m->message != WM_MOUSEMOVE) return;
+    x = (LONG)(short)LOWORD(m->lParam);
+    y = (LONG)(short)HIWORD(m->lParam);
+    if (cursor_stray(&x, &y, &g_cur_client, &g_cur_have_client))
+        m->lParam = (LPARAM)MAKELONG((WORD)(SHORT)x, (WORD)(SHORT)y);
+}
+
+static BOOL WINAPI hook_PeekMessageA(LPMSG m, HWND h, UINT a, UINT b, UINT f)
+{ BOOL r = g_real_peek(m, h, a, b, f); if (r) cursor_fix_msg(m); return r; }
+
+static BOOL WINAPI hook_GetMessageA(LPMSG m, HWND h, UINT a, UINT b)
+{ BOOL r = g_real_getmsg(m, h, a, b); if (r) cursor_fix_msg(m); return r; }
+
+static DWORD WINAPI hook_GetMessagePos(void)
+{
+    DWORD d = g_real_msgpos();
+    LONG x = (LONG)(short)LOWORD(d), y = (LONG)(short)HIWORD(d);
+    if (cursor_stray(&x, &y, &g_cur_screen, &g_cur_have_screen))
+        d = (DWORD)MAKELONG((WORD)(SHORT)x, (WORD)(SHORT)y);
+    return d;
+}
+
+/* Every path the game might read the pointer through. Which ones exist depends on
+ * the build, so a missing import is normal and not worth a warning; what would be
+ * worth one is hooking none of them. */
+static int install_cursor_fix(void)
+{
+    void *real;
+    int n = 0;
+    real = NULL;
+    if (hook_import("USER32.dll", "GetCursorPos", (void *)hook_GetCursorPos, &real))
+        { g_real_gcp = (GetCursorPos_t)real; n++; }
+    real = NULL;
+    if (hook_import("USER32.dll", "PeekMessageA", (void *)hook_PeekMessageA, &real))
+        { g_real_peek = (PeekMessageA_t)real; n++; }
+    real = NULL;
+    if (hook_import("USER32.dll", "GetMessageA", (void *)hook_GetMessageA, &real))
+        { g_real_getmsg = (GetMessageA_t)real; n++; }
+    real = NULL;
+    if (hook_import("USER32.dll", "GetMessagePos", (void *)hook_GetMessagePos, &real))
+        { g_real_msgpos = (GetMessagePos_t)real; n++; }
+    return n;
+}
+
 /* ------------------------------------------- the world viewport width
  *
  * FUN_0050af10, the constructor for display-object class 0x57e110 (the world),
@@ -3808,7 +3933,7 @@ static void __cdecl vtext_hook(DWORD *a)
     }
 }
 
-static int patch_vtext_probe(void)
+static int patch_vtext_sites(void)
 {
     static const BYTE pat[]  = { 0xe8,0x00,0x00,0x00,0x00, 0x8d,0x5e,0x05,
                                  0x81,0xc6,0x23,0x01,0x00,0x00, 0x89,0x74,0x24,0x20,
@@ -3824,12 +3949,12 @@ static int patch_vtext_probe(void)
         for (; j < sizeof pat; j++) if (mask[j] && g_text[i + j] != pat[j]) break;
         if (j == sizeof pat && n < 8) sites[n++] = g_text + i;
     }
-    if (!n) { logf_("[x] [vtprobe] no tab-layout sites"); return 0; }
+    if (!n) { logf_("[x] [vtext] no tab-layout sites"); return 0; }
 
     /* scale-factor VAs, read from the site's own fmul operands */
     g_vt_ys_va = rd32(sites[0] + 0x22);
     g_vt_xs_va = rd32(sites[0] + 0x49);
-    logf_("[*] [vtprobe] yscale @%08x  xscale @%08x", g_vt_ys_va, g_vt_xs_va);
+    logf_("[*] [vtext] yscale @%08x  xscale @%08x", g_vt_ys_va, g_vt_xs_va);
 
     int ok = 0;
     for (int k = 0; k < n; k++) {
@@ -3869,7 +3994,7 @@ static int patch_vtext_probe(void)
 
 /* ------------------------------------------------- rotated-text ENTRY probe
  *
- * WHY A SECOND PROBE.  patch_vtext_probe() hooks the two tab-layout CALL SITES, so
+ * WHY A SECOND PROBE.  patch_vtext_sites() hooks the two tab-layout CALL SITES, so
  * it can only ever see the two panels whose layout matches that signature.  The
  * owner reports the building panel's contextual label (Owners / Wages / Rent) as
  * rotated too, which the call-site probe cannot confirm or refute -- absence of a
@@ -3892,7 +4017,7 @@ static int patch_vtext_probe(void)
  * found by following the call at site+0xA9 through its jump thunk, so no address is
  * hardcoded -- the same build-independence rule the signatures follow. */
 
-static void __cdecl vtentry_hook(DWORD *a)
+static void __cdecl vtext_wrapper_hook(DWORD *a)
 {
     /* a[0] = return address (the call site); the arguments follow.  Named from the
      * first run's dump, cross-checked against the call-site probe's view of the
@@ -3937,10 +4062,10 @@ static void __cdecl vtentry_hook(DWORD *a)
     }
 }
 
-static int patch_vtext_entry(void)
+static int patch_vtext_wrapper(void)
 {
     if (!g_vte_entry_va) {
-        logf_("[x] [vtentry] wrapper address unknown -- the call-site scan must run first");
+        logf_("[x] [vtext] wrapper address unknown -- the call-site scan must run first");
         return 0;
     }
     BYTE *entry = (BYTE *)(SIZE_T)g_vte_entry_va;
@@ -3948,18 +4073,18 @@ static int patch_vtext_entry(void)
      * A different build could open with something else, and relocating the wrong
      * five bytes would corrupt the function silently. */
     if (entry[0] != 0xB8) {
-        logf_("[x] [vtentry] %08x does not open with `mov eax,imm32` (%02x) -- refusing",
+        logf_("[x] [vtext] %08x does not open with `mov eax,imm32` (%02x) -- refusing",
               g_vte_entry_va, entry[0]);
         return 0;
     }
     BYTE *tr = (BYTE *)VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tr) { logf_("[x] [vtentry] VirtualAlloc failed"); return 0; }
+    if (!tr) { logf_("[x] [vtext] VirtualAlloc failed"); return 0; }
     int o = 0;
     tr[o++] = 0x60;                                                 /* pushad             */
     tr[o++] = 0x9C;                                                 /* pushfd             */
     tr[o++] = 0x8D; tr[o++] = 0x44; tr[o++] = 0x24; tr[o++] = 0x24; /* lea eax,[esp+0x24] */
     tr[o++] = 0x50;                                                 /* push eax           */
-    tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&vtentry_hook; memcpy(tr + o, &f, 4); o += 4; }
+    tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&vtext_wrapper_hook; memcpy(tr + o, &f, 4); o += 4; }
     tr[o++] = 0xFF; tr[o++] = 0xD0;                                 /* call eax           */
     tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x04;                 /* add esp,4          */
     tr[o++] = 0x9D;                                                 /* popfd              */
@@ -3970,8 +4095,8 @@ static int patch_vtext_entry(void)
     BYTE det[5];
     det[0] = 0xE9;
     { DWORD r = (DWORD)(SIZE_T)(tr - (entry + 5)); memcpy(det + 1, &r, 4); }
-    if (!poke(entry, det, 5)) { logf_("[x] [vtentry] VirtualProtect failed"); return 0; }
-    logf_("[+] [vtentry] rotated-label wrapper %08x detoured -> %p",
+    if (!poke(entry, det, 5)) { logf_("[x] [vtext] VirtualProtect failed"); return 0; }
+    logf_("[+] [vtext] rotated-label wrapper %08x detoured -> %p",
           g_vte_entry_va, (void *)tr);
     return 1;
 }
@@ -4256,7 +4381,7 @@ static DWORD WINAPI pin_thread(LPVOID p)
     return 0;
 }
 
-static void __cdecl slotprobe_hook(DWORD *a)
+static void __cdecl menu_apply_hook(DWORD *a)
 {
     pin_window_to_primary("apply-video");
     /* a[] from the trampoline: 0 flags, 1 EDI, 2 ESI, 3 EBP, 4 ESP, 5 EBX,
@@ -4297,37 +4422,14 @@ static void __cdecl slotprobe_hook(DWORD *a)
     }
     if (g_menu_slot >= 0 && g_preset_ret && a[9] == g_preset_ret && (int)a[11] == 0) {
         a[11] = (DWORD)g_menu_slot;
-        if (!g_slot_log) return;
-        logf_("  [slotprobe] frontend preset asked for slot 0 -> rewritten to %d", g_menu_slot);
         return;
     }
-    if (!g_slot_log) return;
-
-    /* NO DEDUPE. The first version deduped on (caller, slot) and that hid the
-     * event we were looking for: the menu re-entry either repeats a pair already
-     * seen or makes no call at all, and those two have completely different fixes.
-     * A plain sequence with a generous cap distinguishes them. */
-    static int nseq;
-    if (nseq >= 300) return;
-    nseq++;
-    /* The live mode, read from the engine's own virtual->pixel scale globals, so
-     * every call is stamped with the mode in force when it was made. That is what
-     * says whether a mode CHANGE happened, rather than only what was requested. */
-    int lw = 0, lh = 0;
-    if (g_vt_xs_va && g_vt_ys_va) {
-        lw = (int)(*(float *)(SIZE_T)g_vt_xs_va * 3200.0f + 0.5f);
-        lh = (int)(*(float *)(SIZE_T)g_vt_ys_va * 2400.0f + 0.5f);
-    }
-    logf_("  [slotprobe] #%d caller %08lx  SLOT(arg2)=%d  arg1=%d arg3=%d  ecx=%d edx=%d"
-          "  (mode now %dx%d)",
-          nseq, (unsigned long)a[9], (int)a[11], (int)a[10], (int)a[12],
-          (int)a[7], (int)a[6], lw, lh);
 }
 
-static int patch_slot_probe(void)
+static int patch_menu_apply(void)
 {
     if (!g_applyvideo_va) {
-        logf_("[x] [slotprobe] apply-video routine not located");
+        logf_("[x] [menu] apply-video routine not located");
         return 0;
     }
     BYTE *entry = (BYTE *)(SIZE_T)g_applyvideo_va;
@@ -4335,18 +4437,18 @@ static int patch_slot_probe(void)
      * else would corrupt the function silently, and this runs on two builds. */
     static const BYTE PRO[] = {0x83,0xec,0x08, 0xa1};
     if (memcmp(entry, PRO, sizeof PRO) != 0) {
-        logf_("[x] [slotprobe] %08lx does not open with `sub esp,8 / mov eax,imm32`"
+        logf_("[x] [menu] %08lx does not open with `sub esp,8 / mov eax,imm32`"
               " (%02x %02x %02x %02x) -- refusing",
               (unsigned long)g_applyvideo_va, entry[0], entry[1], entry[2], entry[3]);
         return 0;
     }
     BYTE *tr = (BYTE *)VirtualAlloc(NULL, 96, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tr) { logf_("[x] [slotprobe] VirtualAlloc failed"); return 0; }
+    if (!tr) { logf_("[x] [menu] VirtualAlloc failed"); return 0; }
     int o = 0;
     tr[o++] = 0x60;                                                 /* pushad          */
     tr[o++] = 0x9C;                                                 /* pushfd          */
     tr[o++] = 0x54;                                                 /* push esp        */
-    tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&slotprobe_hook; memcpy(tr + o, &f, 4); o += 4; }
+    tr[o++] = 0xB8; { DWORD f = (DWORD)(SIZE_T)&menu_apply_hook; memcpy(tr + o, &f, 4); o += 4; }
     tr[o++] = 0xFF; tr[o++] = 0xD0;                                 /* call eax        */
     tr[o++] = 0x83; tr[o++] = 0xC4; tr[o++] = 0x04;                 /* add esp,4       */
     tr[o++] = 0x9D;                                                 /* popfd           */
@@ -4358,7 +4460,7 @@ static int patch_slot_probe(void)
     det[0] = 0xE9;
     { DWORD r = (DWORD)(SIZE_T)(tr - (entry + 5)); memcpy(det + 1, &r, 4); }
     det[5] = det[6] = det[7] = 0x90;   /* pad the 3 bytes the jmp does not cover */
-    if (!poke(entry, det, 8)) { logf_("[x] [slotprobe] VirtualProtect failed"); return 0; }
+    if (!poke(entry, det, 8)) { logf_("[x] [menu] VirtualProtect failed"); return 0; }
     logf_("[+] [menu] apply-video %08lx detoured -> %p"
           " (frontend preset -> slot %d, so the menu survives a return from a map)",
           (unsigned long)g_applyvideo_va, (void *)tr, g_menu_slot);
@@ -4531,7 +4633,7 @@ static int patch_menu_slot(void)
  * something finally tries to draw at the real mode. Deleting the CFG fixes it,
  * which is exactly the kind of remedy nobody finds on their own.
  *
- * The clamp in slotprobe_hook() stops the flag being SET. This clears one that is
+ * The clamp in menu_apply_hook() stops the flag being SET. This clears one that is
  * already set, and it is the same 7 bytes: the gate is replaced with the store
  * that zeroes the field. eax already holds the settings object, and the encoding
  * is the one the engine itself uses 20 bytes further down, so nothing is invented

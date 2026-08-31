@@ -1,4 +1,5 @@
 [Art] Generate
+[Cursor] Fix
 [Display] DeviceSelect
 [Display] FollowLaunchMonitor
 [Display] ForceFullscreen

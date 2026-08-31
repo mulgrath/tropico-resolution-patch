@@ -64,9 +64,6 @@ the choice, picking it could leave you unable to load a map *or* get back to the
 screen. The software renderer is what you are already playing on, and a modern processor
 runs it without effort.
 
-**The map pans on its own when I move the mouse (Steam).** It happens when your monitors
-are not top-aligned in your display settings. Aligning them stops it.
-
 **"DirectDraw error #150", and it offers to continue.** It is a fault in the 2001 game
 itself, not something this patch causes. Two things are known to provoke it:
 alt-tabbing away while a map loads, and playing on a second monitor without starting

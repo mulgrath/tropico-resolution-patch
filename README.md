@@ -72,9 +72,6 @@ a modern processor runs it without effort.
 
 ## Known issues
 
-- **On Linux under Steam, the map sometimes pans on its own** as you move the mouse. It
-  only happens when your monitors are not top-aligned in your display settings —
-  aligning them stops it.
 - **Rarely the game shows "DirectDraw Error #150"** and offers to continue. It is a
   fault in the 2001 game itself, not something this patch causes. Two things are known
   to provoke it: alt-tabbing away while a map loads, and playing on a second monitor
