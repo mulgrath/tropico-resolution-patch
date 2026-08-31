@@ -1,6 +1,6 @@
 /*
  * tropico_fix -- runtime patcher for PopTop Tropico (2001), shipped as a
- * binkw32.dll proxy.  See ../FINDINGS.md for how every address here was derived.
+ * binkw32.dll proxy.  See ../dev/FINDINGS.md for how every address here was derived.
  *
  * WHY A PROXY, AND WHY binkw32:
  *   The obvious vehicle, a ddraw.dll proxy, does not work.  Tropico does not
@@ -56,10 +56,10 @@ static void logf_(const char *fmt, ...)
     fclose(f);
 }
 
-/* APPEND, NEVER TRUNCATE -- the proxy's half of FINDINGS 110.2.
+/* APPEND, NEVER TRUNCATE -- the same fix the launcher's own log already needed.
  *
  * DllMain used to DeleteFileA() this log on every run. That is exactly the defect
- * 110.1 names in the launcher and 110.2 fixed there, left standing in the other
+ * already fixed in the launcher, left standing in the other
  * component: "it came up wrong, so I ran it again and it was right" is the single
  * commonest sequence this patch is involved in, and the second run destroyed the
  * log of the first. Every time. The only run whose evidence ever survived was the
@@ -150,7 +150,7 @@ static int patch_intro(void);
 static int g_menu_slot = -1;
 static int g_bink_pitch;
 static int patch_blit_scale(void);
-static int patch_hud_movie(void);        /* s106 */
+static int patch_hud_movie(void);
 static int patch_preview_fix(int mode);
 static int patch_menu_slot(void);
 static int patch_slot_probe(void);
@@ -159,9 +159,9 @@ static DWORD WINAPI pin_thread(LPVOID);
 static DWORD g_preset_ret;   /* return address of the preset-apply call site */
 static int g_slot_log;
 static int patch_force_fullscreen(void);
-/* s118: maybe_install_ddprobe() asks this, and it sits far below. */
+/* maybe_install_ddprobe() asks this, and it sits far below. */
 static int running_under_wine(void);
-static int g_force_fs = 1;   /* s79: never let the engine enter windowed mode */
+static int g_force_fs = 1;   /* never let the engine enter windowed mode */
 static int g_fs_clamped;     /* how many times the clamp has fired */
 /* ------------------------------------------------------------ shared primitives
  *
@@ -196,10 +196,10 @@ static void *hook_import(const char *dll, const char *fn, void *replacement, voi
     return NULL;
 }
 
-/* -------------------------------------------- s118: choose the DEVICE, not the primary
+/* -------------------------------------------- choose the DEVICE, not the primary
  *
- * MEASURED ON WINDOWS 11, and it is the result the whole s113/s114 apparatus was
- * waiting for. DirectDrawEnumerateExA(DDENUM_ATTACHEDSECONDARYDEVICES) hands back
+ * MEASURED ON WINDOWS 11, and it is the result the whole primary-switching apparatus
+ * below was waiting for. DirectDrawEnumerateExA(DDENUM_ATTACHEDSECONDARYDEVICES) hands back
  * a DIFFERENT GUID per head, and DirectDrawCreateEx with the secondary's GUID
  * produces a device that takes exclusive fullscreen on that monitor, sets THAT
  * monitor's mode, and blits without #150 -- while the OS primary is never touched.
@@ -210,15 +210,16 @@ static void *hook_import(const char *dll, const char *fn, void *replacement, voi
  * and Windows moved the window back to the primary and rendered there. So the
  * GUID decides and window placement does not, on real Windows exactly as on Wine.
  *
- * WHAT THIS REPLACES. s113's whole apparatus exists to make the player's chosen
+ * WHAT THIS REPLACES. The primary-switching apparatus exists to make the player's chosen
  * monitor primary for the length of the game and give it back afterwards: the
  * state file, the ExitProcess hook, the window watcher, the 5 s deadline. None of
  * it is needed if the game simply renders on the right device. That is a change
- * to the GAME rather than to the PLAYER'S COMPUTER, which is what s114 set out to
- * find and what s113.8 settled for the absence of.
+ * to the GAME rather than to the PLAYER'S COMPUTER, which is what the DirectDraw
+ * probe set out to find, and what the primary-switching approach settled for before
+ * that answer existed.
  *
  * WINDOWS ONLY, and not by policy. Wine hands back ONE adapter GUID for both
- * heads (s114.3) -- it names the adapter, not the head -- so there is nothing to
+ * heads -- it names the adapter, not the head -- so there is nothing to
  * substitute there and the xrandr path stays exactly as it is. This is the
  * Windows half of the prize and the Linux half is not on offer.
  *
@@ -229,10 +230,10 @@ static char  g_devsel_want[64];     /* the \\.\DISPLAYn choose_monitor picked */
 static GUID  g_devsel_guid;
 static int   g_devsel_have;         /* the GUID was resolved */
 static int   g_devsel_tried;        /* resolution has been attempted; do not repeat */
-/* s118.14: the target monitor's origin in VIRTUAL-SCREEN space, and the reason the
+/* The target monitor's origin in VIRTUAL-SCREEN space, and the reason the
  * first in-game run of this feature failed with #150 on every frame.
  *
- * s115.4 measured how this engine presents: Blt(primary <- offscreen), with the
+ * Measured: this engine presents via Blt(primary <- offscreen), with the
  * destination rect being the game's window rect IN SCREEN COORDINATES. That is
  * fine on the primary, where the monitor origin IS (0,0) -- and it is wrong
  * everywhere else. Point the game at \\.\DISPLAY2 sitting at (-1920,357) and its
@@ -242,7 +243,7 @@ static int   g_devsel_tried;        /* resolution has been attempted; do not rep
  * The sign is not the point: a monitor at +2560 fails identically. THE GAME
  * ASSUMES THE MONITOR ORIGIN IS (0,0), WHICH IS ONLY EVER TRUE FOR THE PRIMARY.
  *
- * s114's probe could not have caught this. Its blits used explicit
+ * The DirectDraw probe could not have caught this. Its blits used explicit
  * surface-relative rects, so it proved the DEVICE works and never exercised the
  * one thing the GAME does differently. */
 static long  g_devsel_ox, g_devsel_oy;
@@ -263,13 +264,13 @@ static DWORD g_vt_ys_va, g_vt_xs_va;
 static UINT  g_mode_w, g_mode_h;
 static int g_vt_entry, g_vt_bdh, g_vt_bdy, g_vt_boxdx;
 static DWORD g_vte_entry_va;
-/* s65 vtext hook state -- declared here because apply_patches() sets it from the
+/* vtext hook state -- declared here because apply_patches() sets it from the
  * ini long before the hook that reads it is defined. */
 static int g_vt_fix, g_vt_fw, g_vt_fh, g_vt_boxh, g_vt_boxdy;
 static DWORD g_hud_table_va;
 static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
                             UINT objm, UINT objw, UINT objhm, UINT objh, int force, UINT guard);
-/* s90/s99, and the split between them is the whole point: choose_monitor() only
+/* The split between choose_monitor() and apply_monitor() is the whole point: choose_monitor() only
  * READS the display, which is safe from DllMain; apply_monitor() CHANGES it and
  * waits for Wine to agree, which is not. See apply_monitor() for the measurement. */
 /* What choose_monitor() decided, kept because apply_monitor() runs much later and
@@ -277,7 +278,7 @@ static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
 static char  g_mon_to[64], g_mon_from[64];
 static DWORD g_mon_to_w, g_mon_to_h;
 static int   g_mon_pending;
-/* s113. Which display source answered, because the two need different verbs to
+/* Which display source answered, because the two need different verbs to
  * change anything: xrandr on the host, ChangeDisplaySettingsEx here. */
 static int   g_mon_win32;
 /* The primary to return to when this process is done with the display. Loaded from
@@ -350,7 +351,7 @@ static int poke(void *dst, const void *src, SIZE_T len)
 /* All signatures below wildcard their absolute operands (mask byte 0) so they match
  * ANY build of the game, and the real addresses are read back from the match. */
 
-/* FINDINGS section 2: the desktop-width gate.
+/* The desktop-width gate.
  *   cmp eax,<resolution table VA> / je +8 / cmp [eax],ebx / jge <end of loop>
  * The table VA is discovered first, from the data table itself, then spliced in --
  * which also proves the two finds agree about the same build. */
@@ -360,7 +361,7 @@ static const BYTE GATE_MASK[] = {   1,1,1,1,1,    1,   1,    1,   1,    1,   1,0
 #define GATE_PATCH_LEN 1
 #define GATE_PATCH_BYTE 0x8f
 
-/* FINDINGS section 16: the Hardware 3D gate, an x87 SIGNED compare.
+/* The Hardware 3D gate, an x87 SIGNED compare.
  *   fild dword [vidmem] / mov [x],ebx / fcomp qword [thresh] / fnstsw / test ah,41 / jne
  * Exactly 25 bytes in any build; only the three operands move. */
 static const BYTE VRAM_SIG[]  = {0xdb,0x05,0,0,0,0,
@@ -372,14 +373,14 @@ static const BYTE VRAM_MASK[] = {   1,   1,0,0,0,0,
                                     1,   1,0,0,0,0,
                                     1,   1,    1,   1,   1,    1,0};
 
-/* FINDINGS section 16: the second signed test, a texture budget. jge -> jae.
+/* The second signed test, a texture budget. jge -> jae.
  *   cmp dword [vidmem],0xd00000 / jge
  * Its operand must be the SAME global the fild used -- a free cross-check. */
 static const BYTE BUDGET_SIG[]  = {0x81,0x3d,0,0,0,0, 0x00,0x00,0xd0,0x00, 0x7d};
 static const BYTE BUDGET_MASK[] = {   1,   1,0,0,0,0,    1,   1,   1,   1,    1};
 #define BUDGET_PATCH_OFF 10
 
-/* FINDINGS section 91: the renderer branch on the mode-set path.
+/* The renderer branch on the mode-set path.
  *   mov edx,[settings] / mov eax,[edx+0x10] / test eax,eax / je <software path>
  *   xor edi,edi / mov [swbase],edi
  * `[settings+0x10]` is the renderer selector -- TROPICO.CFG file offset 0x23a,
@@ -402,36 +403,36 @@ static const BYTE RND_MASK[] = {   1,   1,0,0,0,0,
                                    1,   1,    1,   1,0,0,0,0};
 #define RND_PATCH_OFF 6
 
-/* FINDINGS section 8: the code compare-chain, slot 4's arm. No absolute operands. */
+/* The code compare-chain, slot 4's arm. No absolute operands. */
 static const BYTE CHAIN_SIG[] = {0x81,0xf9,0x40,0x06,0x00,0x00, 0x75,0x16,
                                  0x81,0xfa,0xb0,0x04,0x00,0x00};
 #define CHAIN_W_OFF 2
 #define CHAIN_H_OFF 10
 
-/* FINDINGS section 1: the resolution table, 5 x {DWORD w; DWORD h}, in .data. */
+/* The resolution table, 5 x {DWORD w; DWORD h}, in .data. */
 static const DWORD TABLE_SIG[10] = {640,480, 800,600, 1024,768, 1280,1024, 1600,1200};
 #define SLOT4_OFF 32
 
 /* ------------------------------------------------------- resolution selection
  *
  * Policy (owner's decision, 2026-08-19): leave slots 0-3 stock and choose only
- * slot 4 at runtime.  Constraints, all from FINDINGS:
- *   s11  the HUD/background art is drawn at the slot's STOCK width, so the target
+ * slot 4 at runtime.  Constraints:
+ *   the HUD/background art is drawn at the slot's STOCK width, so the target
  *        width must not exceed it -- 1600 for slot 4.  This is the hard ceiling
  *        on widescreen and the reason slot 4 is the only usable home.
- *   s10  width % 4 == 0, else the row pitch is padded and the image shears.
- *   s9   the compare-chain dispatches on width and rejects on a height mismatch
+ *   width % 4 == 0, else the row pitch is padded and the image shears.
+ *   the compare-chain dispatches on width and rejects on a height mismatch
  *        rather than falling through, so widths must be unique across slots.
- *   s7   the mode must actually exist, or the game cannot set it.
+ *   the mode must actually exist, or the game cannot set it.
  */
 #define ART_WIDTH_CAP 1600
-/* s42/s82: the world image's stock pixel width. The size gate compares against this
+/* The world image's stock pixel width. The size gate compares against this
  * value, so the gate's threshold must never exceed it. */
 #define WORLD_STOCK_W 1600
 
 typedef struct { DWORD w, h; } mode_t;
-static int launch_override(mode_t *m);   /* s90, defined with the monitor code */
-static void launch_mode_check(int dw, int dh); /* s108, ditto */
+static int launch_override(mode_t *m);   /* defined with the monitor code */
+static void launch_mode_check(int dw, int dh); /* ditto */
 
 /* ------------------------------------------------------- display scaling (DPI)
  *
@@ -455,7 +456,7 @@ static void launch_mode_check(int dw, int dh); /* s108, ditto */
  * 3840x2160 while the proxy measured the LOGICAL desktop and saw 1920x1080, so the
  * configured mode was rejected, no staged set matched, and the run fell through to the
  * stock art caps at ~1400x1050. Resolved by making the installer measure logically
- * too, so both ends agree. See FINDINGS 92.
+ * too, so both ends agree.
  *
  * DirectDraw mode setting is not DPI-virtualized, so asking for 1920x1080 on a 4K
  * panel yields a genuine 1080p signal the display upscales at an exact 2x, rather
@@ -513,7 +514,7 @@ static void log_environment(void)
           GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
 
     /* This is the exact pair the desktop-width gate reads at 0x515160 and stores
-     * in [0x60c118] -- FINDINGS section 2. If it disagrees with the monitor the
+     * in [0x60c118]. If it disagrees with the monitor the
      * game actually lands on, that is the bug, not the mode list. */
     HDC dc = GetDC(NULL);
     if (dc) {
@@ -546,7 +547,7 @@ static int collides_with_stock(DWORD w)
 
 /* ---------------------------------------------- art sets: GENERATED, not staged
  *
- * s85 used to live here: the installer staged one set per connected monitor into
+ * An earlier version of this logic used to live here: the installer staged one set per connected monitor into
  * artsets\<WxH>\ and the proxy copied one into data\ when the mode it picked did
  * not match what the launcher had staged. All of it -- staged_dir, mode_is_staged,
  * active_artset_is, activate_artset and the two-pass picker they fed -- is deleted.
@@ -554,7 +555,7 @@ static int collides_with_stock(DWORD w)
  * It existed to answer one question: DOES ART EXIST AT THIS SIZE? The answer used to
  * depend on what an installer had guessed, ahead of time, about a display it could not
  * see. Now the proxy generates the set itself, from the user's archives, once the mode
- * is known -- about a second (FINDINGS 96) -- so the answer is unconditionally yes and
+ * is known -- about a second -- so the answer is unconditionally yes and
  * the machinery for asking has nothing left to do.
  *
  * What went with it: the per-monitor prediction, 226 MB of duplicate art on disk, two
@@ -596,22 +597,22 @@ static int pick_mode_pass(mode_t *out, int capped)
         if (!EnumDisplaySettingsA(NULL, i, &dm)) break;
         DWORD w = dm.dmPelsWidth, h = dm.dmPelsHeight;
         if (!w || !h) continue;
-        if (w % 4) continue;                       /* s10: pitch shear         */
-        /* s85: two passes. The stock-art caps below are a ROUGH PROXY for "does art
+        if (w % 4) continue;                       /* pitch shear              */
+        /* Two passes. The stock-art caps below are a ROUGH PROXY for "does art
          * exist at this size" -- they were written before art was generated per mode,
          * and they now reject 2560x1440 outright (h > 1200) even when its art set is
          * staged and ready. A staged set answers that question exactly, so when one
          * exists the caps are not consulted; when none does, they are, and the old
          * behaviour is preserved verbatim for an install with no artsets\ at all. */
         if (capped) {
-            if (w > ART_WIDTH_CAP) continue;       /* s11: art width ceiling   */
+            if (w > ART_WIDTH_CAP) continue;       /* art width ceiling        */
             if (h > 1200) continue;                /* stock slot-4 art height  */
         }
         if (w > deskw || h > deskh) continue;      /* must fit the desktop     */
         /* Slot 4 is the LARGEST slot. If we cannot beat slot 3's stock 1280, we have
          * nothing to offer and should leave slot 4 alone rather than shrink it. */
         if (w <= 1280) continue;
-        if (collides_with_stock(w)) continue;      /* s9: unique widths        */
+        if (collides_with_stock(w)) continue;      /* unique widths            */
 
         /* Wine lists every mode once per bit depth; only log each geometry once. */
         int dup = 0;
@@ -640,7 +641,7 @@ static int pick_mode_pass(mode_t *out, int capped)
 
 /* Prefer a mode whose art is staged; fall back to the stock-art caps if none is.
  * Only the fallback path ever gets here -- see ini_override(). */
-/* ------------------------------------------------ s96: runtime art generation
+/* ------------------------------------------------ runtime art generation
  *
  * The art set is generated HERE, at launch, from the user's own archives -- not
  * staged ahead of time by an installer that had to guess which resolution the game
@@ -654,8 +655,8 @@ static int pick_mode_pass(mode_t *out, int capped)
  * with no launcher -- Windows, and Steam's Play button, where nothing runs before
  * the process does.
  *
- * The cache key is the MODE ALONE. font_scale is derived from it as H/1080
- * (FINDINGS 86), so two runs at one resolution cannot disagree about the art.
+ * The cache key is the MODE ALONE. font_scale is derived from it as H/1080,
+ * so two runs at one resolution cannot disagree about the art.
  */
 static void artgen_log(const char *s) { logf_("%s", s); }
 
@@ -700,20 +701,20 @@ static int ini_override(mode_t *m)
     if (g_ini_mode_unusable) return 0;   /* does not fit this screen -- see above */
     if (w % 4) { logf_("  ini: width %u is not a multiple of 4 -- ignoring (would shear)", w); return 0; }
     if (collides_with_stock(w)) { logf_("  ini: width %u collides with a stock slot -- ignoring (would be unreachable)", w); return 0; }
-    /* s11's art cap describes STOCK art, and the generator replaces stock art at
+    /* The stock art cap describes STOCK art, and the generator replaces stock art at
      * whatever size we are about to use -- so past the cap is only a problem when
      * generation is switched off. */
     if (w > ART_WIDTH_CAP && !g_artgen_enabled)
         logf_("  ini: WARNING width %u exceeds the %d stock art cap and [Art] Generate=0,"
-              " so nothing will build art for %ux%u -- expect an unpainted strip"
-              " (FINDINGS s11). Remove Generate=0 to have it generated at launch.",
+              " so nothing will build art for %ux%u -- expect an unpainted strip."
+              " Remove Generate=0 to have it generated at launch.",
               w, ART_WIDTH_CAP, w, h);
     m->w = w; m->h = h;
     logf_("  ini override: %ux%u", w, h);
     return 1;
 }
 
-/* ------------------------------------------ s113 the ini's mode against the screen
+/* ------------------------------------------ the ini's mode against the screen
  *
  * Lifted out of the patch pass so it can also run from DllMain, where on a run with
  * no pending monitor change it is already answerable -- and it HAS to run before
@@ -755,9 +756,9 @@ static void ini_fit_check(void)
     g_ini_mode_unusable = 1;
 }
 
-/* ------------------------------------------------------- s113 decide_mode
+/* ------------------------------------------------------- decide_mode
  *
- * ONE ANSWER, COMPUTED ONCE, AND THE REASON IT HAS TO BE CACHED IS FINDINGS 98:
+ * ONE ANSWER, COMPUTED ONCE, AND THE REASON IT HAS TO BE CACHED:
  * the art has to exist before the game indexes data\, which on the Steam edition
  * is before the entry point -- so the mode has to be known in DllMain, while the
  * table it is written into cannot be patched until much later.
@@ -784,7 +785,7 @@ static int decide_mode(mode_t *out)
     return 1;
 }
 
-/* ------------------------------------------------- the world-extent clamp (FINDINGS 35)
+/* ------------------------------------------------- the world-extent clamp
  *
  * Found by decompiling, after byte-searching for 1600 failed six different ways:
  * the clamp is not ON 1600. It is on 0xC80 = 3200 and 0x960 = 2400 -- exactly
@@ -799,7 +800,7 @@ static int decide_mode(mode_t *out)
  *   46b172  be 60 09 00 00     mov esi,0x960      ; ...clamp to 2400  (= 1200 px)
  *
  * That is why the terrain stopped at exactly 1600 on both a 1680- and a 1920-wide
- * screen (FINDINGS 31): the clamp is absolute, not relative to the mode.
+ * screen: the clamp is absolute, not relative to the mode.
  *
  * Raise both to twice the mode actually selected -- computed, not hardcoded, so it
  * stays correct for any slot-4 geometry.
@@ -825,17 +826,17 @@ static const BYTE VCLAMP_MASK[] = {
 #define VCLAMP_H1 41
 #define VCLAMP_H2 51
 
-/* --------------------------------------------- s91: refuse Hardware 3D, gracefully
+/* --------------------------------------------- refuse Hardware 3D, gracefully
  *
  * Hardware 3D renders correctly on exactly one of the three runtimes this game
  * meets: the GOG build under system wine. It smears at every resolution under
- * Proton (FINDINGS 23) and it crashes on map entry on native Windows -- and that
+ * Proton and it crashes on map entry on native Windows -- and that
  * crash BRICKS the install, because the choice persists to TROPICO.CFG and F2 is
  * then unreachable to undo it. The owner's decision (2026-08-23) is to stop
  * offering it: the hardware path was there to spare a 2001 CPU, and a modern one
  * runs the software renderer without noticing.
  *
- * REVERTING the section 16 fix is NOT the way to do that, and it was considered.
+ * REVERTING the Hardware 3D gate fix is NOT the way to do that, and it was considered.
  * The stock gate is a SIGNED `fild` of whatever GetAvailableVidMem reports against
  * 8.5 MB, so it refuses only when that DWORD happens to have its high bit set --
  * true under Wine, which reports a fixed 0xFF816FFF, and unknowable anywhere else.
@@ -847,7 +848,7 @@ static const BYTE VCLAMP_MASK[] = {
  * So: keep both fixes and make the refusal explicit, in two places.
  *
  *   1. The gate branch is made UNCONDITIONAL (`jbe` -> `jmp`, one byte of our own
- *      replacement, so the 25-byte layout section 16 verified is otherwise
+ *      replacement, so the 25-byte layout that gate fix verified is otherwise
  *      untouched). IDirect3D7::EnumDevices is never called, the callback never
  *      writes a `d1 == 1` descriptor, and the best-match search fails for any
  *      hardware request -- so the engine raises its OWN Tropico.lng string 1721,
@@ -919,12 +920,12 @@ static void apply_patches(void)
     }
     DWORD table_va = (DWORD)(ULONG_PTR)tbl;
 
-    /* --- 0.5 the monitor, BEFORE ANYTHING READS THE DISPLAY (s90/s99) -------
+    /* --- 0.5 the monitor, BEFORE ANYTHING READS THE DISPLAY -------
      *
      * The choice itself was made in DllMain, so the art could be built against it
-     * before the game indexed data\ (FINDINGS 98). Only the CHANGE waited for
+     * before the game indexed data\. Only the CHANGE waited for
      * here, because a display change made from DllMain is never noticed by the
-     * process that made it (FINDINGS 99).
+     * process that made it.
      *
      * It goes at the TOP of the patch pass, not next to the mode picker where it
      * used to sit. Three things below read SM_CXSCREEN -- the "desktop as Wine
@@ -939,14 +940,14 @@ static void apply_patches(void)
     /* What Wine believes the screen is, logged UNCONDITIONALLY. Everything the
      * patch computes is relative to this, and when it is stale -- a wineserver that
      * outlived an xrandr change caches the old geometry into the prefix -- the
-     * symptom is DDERR_INVALIDRECT on the next launch and nothing says why
-     * (FINDINGS 75). One line here turns that into an obvious diagnosis. */
+     * symptom is DDERR_INVALIDRECT on the next launch and nothing says why.
+     * One line here turns that into an obvious diagnosis. */
     logf_("[*] desktop as Wine sees it: %dx%d", GetSystemMetrics(SM_CXSCREEN),
           GetSystemMetrics(SM_CYSCREEN));
     /* Both of these read SM_CXSCREEN, so they belong AFTER apply_monitor() and not
      * before it -- the screen they judge against has to be the one the game will run
      * on. ini_fit_check() is a no-op when DllMain already ran it, which it does on
-     * every run with no pending switch (s113); the check itself moved there so a
+     * every run with no pending switch; the check itself moved there so a
      * DllMain mode decision cannot adopt an ini mode this would have rejected. */
     ini_fit_check();
     launch_mode_check(GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
@@ -995,8 +996,8 @@ static void apply_patches(void)
             fix[k++] = 0xa1; memcpy(fix + k, &vidmem, 4); k += 4;          /* mov eax,[vidmem]   */
             fix[k++] = 0x89; fix[k++] = 0x1d; memcpy(fix + k, &store, 4); k += 4; /* mov [store],ebx */
             fix[k++] = 0x3d; { DWORD t = 0x880000; memcpy(fix + k, &t, 4); } k += 4; /* cmp eax,8.5MB */
-            /* s91: one byte decides whether the compare is a compare at all. `jbe`
-             * keeps the section 16 behaviour (unsigned, hardware offered when the
+            /* One byte decides whether the compare is a compare at all. `jbe`
+             * keeps the stock gate's behaviour (unsigned, hardware offered when the
              * card really is too small); `jmp` skips EnumDevices unconditionally,
              * which is how Hardware 3D is refused through the engine's own string
              * 1721 rather than through anything invented here. The other 24 bytes
@@ -1033,13 +1034,13 @@ static void apply_patches(void)
         }
     } else { logf_("[-] budget: signature not found"); fail++; }
 
-    /* --- 3.2 heal a CFG that already selected Hardware 3D (s91) -------------
+    /* --- 3.2 heal a CFG that already selected Hardware 3D -------------
      * Only when we are refusing hardware. With Enable=1 the field must be left
      * alone, or the player's choice would be silently overridden. */
     if (!hw_enable) { if (patch_block_hardware()) ok++; else fail++; }
 
     /* --- 4. slot 4, in BOTH tables ----------------------------------------- *
-     * FINDINGS s8: patching the data table alone is not enough. A parallel
+     * Patching the data table alone is not enough. A parallel
      * mapping lives in code and silently drops any mode it does not recognise. */
     mode_t m;
     {
@@ -1051,7 +1052,7 @@ static void apply_patches(void)
     if (!decide_mode(&m)) {
         logf_("[-] no mode satisfied the constraints; leaving slot 4 stock (1600x1200)");
     } else {
-        /* s85's fallback art-switch used to sit here: on the path where the configured
+        /* An earlier fallback art-switch used to sit here: on the path where the configured
          * mode did not fit, the staged art was for the unusable mode and had to be
          * swapped for a different staged set. There is nothing to swap now -- whatever
          * mode we ended up with, the art for it is generated below. The fallback path
@@ -1087,7 +1088,7 @@ static void apply_patches(void)
                           logf_("[+] slot 4 -> %lux%lu  (data table %p, code chain %p)", m.w, m.h, tbl, chain); ok++; }
             else { logf_("[x] slot 4: VirtualProtect failed"); fail++; }
             /* The world-extent clamp must move with the mode or the terrain still
-             * stops at 1600 no matter how wide the screen is (FINDINGS 29-35). */
+             * stops at 1600 no matter how wide the screen is. */
             BYTE *vc = find_unique_masked(VCLAMP_SIG, VCLAMP_MASK, sizeof VCLAMP_SIG,
                                           g_text, g_textlen, "world-extent clamp");
             if (vc) {
@@ -1103,12 +1104,13 @@ static void apply_patches(void)
             }
         } else {
             logf_("[-] slot 4: code compare-chain not found -- NOT patching the data table"
-                  " either, they must move together (FINDINGS s8)");
+                  " either, since a code mapping that silently drops unrecognised modes"
+                  " must move together with it");
             fail++;
         }
     }
 
-    /* §43: the world viewport. Off by default -- it is the newest patch here and
+    /* The world viewport. Off by default -- it is the newest patch here and
      * the one most likely to need tuning, so it is opted into from the ini
      * rather than inflicted on a working configuration. */
     {
@@ -1133,7 +1135,7 @@ static void apply_patches(void)
             int force = GetPrivateProfileIntA("WorldFix", "Force", 1, ip);
             /* -1 = auto; 0 = no gate at all.
              *
-             * s82: auto was plain m.w/2, justified as "the main viewport is always
+             * auto was plain m.w/2, justified as "the main viewport is always
              * 2666/3200 = 83% of the mode width".  That premise is false, and it is
              * false BECAUSE OF THE BUG THIS PATCH FIXES: the value the gate compares
              * (`[ecx+0x10]`, the image pixel width) is the STOCK 1600 at gate time,
@@ -1143,7 +1145,7 @@ static void apply_patches(void)
              * says the patch applied, because that is logged at install time and the
              * gate rejects at draw time.
              *
-             * Measured at 3840x2160 (s82): guard 1920 > 1600, world painted
+             * Measured at 3840x2160: guard 1920 > 1600, world painted
              * 1600x864 of a 3840x2160 screen.  With the guard pinned to 1600 the
              * same run painted 3839x2159.  This is NOT 4K-only: every mode wider
              * than 3200 is affected, which includes 3440x1440 and 3840x1600
@@ -1152,7 +1154,7 @@ static void apply_patches(void)
              * Capping at the stock width keeps every mode <= 3200 bit-for-bit
              * identical to what was verified before, and stops the gate climbing
              * past the very value it is testing.  The zoomed detail preview this
-             * gate exists to exclude (s46) is far narrower than 1600. */
+             * gate exists to exclude is far narrower than 1600. */
             int gi = GetPrivateProfileIntA("WorldFix", "Guard", -1, ip);
             UINT auto_guard = (UINT)m.w / 2;
             if (auto_guard > WORLD_STOCK_W) auto_guard = WORLD_STOCK_W;
@@ -1175,7 +1177,7 @@ static void apply_patches(void)
         }
     }
 
-    /* s69: the movie/menu window. Off unless the ini asks. */
+    /* The movie/menu window. Off unless the ini asks. */
     {
         char ip[MAX_PATH];
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
@@ -1190,7 +1192,7 @@ static void apply_patches(void)
         if (GetPrivateProfileIntA("Menu", "FixHudMovie", 1, ip)) {
             if (patch_hud_movie()) ok++; else fail++;
         }
-        /* s69: the menu renders at slot 4 -- but ONLY if the seven 640x480-only
+        /* The menu renders at slot 4 -- but ONLY if the seven 640x480-only
          * assets were synthesised into data/. Defaulting this ON unconditionally
          * would kill the menu with "Error opening pack file item 'setuplb.i16'"
          * for anyone who dropped the DLL in without running the installer, so the
@@ -1208,18 +1210,18 @@ static void apply_patches(void)
                 logf_("  [menu] no synthesised menu art; leaving the menu at stock 640x480");
         }
 
-        /* s73: the frontend preset. Installed whenever the menu slot is redirected
+        /* The frontend preset. Installed whenever the menu slot is redirected
          * -- without it the menu is correct at startup and drops back to 640x480 the
          * moment you return to it from a map. */
-        /* s74: keep the window on the monitor Wine measures. On by default --
+        /* Keep the window on the monitor Wine measures. On by default --
          * the failure it prevents is DDERR_INVALIDRECT, which is unreadable. */
         g_pin_primary = GetPrivateProfileIntA("Display", "PinToPrimary", 1, ip);
         if (g_pin_primary) {
             logf_("[+] [display] watching for the game window, to keep it on the monitor"
-                  " Wine measures (FINDINGS 74)");
+                  " Wine measures");
             CloseHandle(CreateThread(NULL, 0, pin_thread, NULL, 0, NULL));
         }
-        /* s79: windowed mode is the documented failure path (FINDINGS 6), and one
+        /* Windowed mode is a documented failure path, and one
          * click of the F2 "Fullscreen" box persists it into TROPICO.CFG and bricks
          * every later launch. On by default; Display ForceFullscreen=0 restores the
          * stock behaviour, checkbox and all. */
@@ -1240,7 +1242,7 @@ static void apply_patches(void)
         if (g_menu_slot >= 0) { if (patch_menu_slot()) ok++; else fail++; }
     }
 
-    /* s68: force the startup movie. Off unless the ini asks. */
+    /* Force the startup movie. Off unless the ini asks. */
     {
         char ip[MAX_PATH];
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
@@ -1249,7 +1251,7 @@ static void apply_patches(void)
         }
     }
 
-    /* s65: rotated tab-label placement.  Off unless the ini asks. */
+    /* Rotated tab-label placement.  Off unless the ini asks. */
     {
         char ip[MAX_PATH];
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
@@ -1266,9 +1268,9 @@ static void apply_patches(void)
                 fail++;
             } else if (patch_vtext(dy, dx, ch, dy != -1000, dx != -1000, ch != -1000)) ok++;
             else fail++;
-            /* THE FIVE DIALS DEPEND ON THE ASPECT ALONE (FINDINGS 86, correcting 72.4).
+            /* THE FIVE DIALS DEPEND ON THE ASPECT ALONE.
              *
-             * 72.4 recorded these as un-derivable. What it actually refuted is a
+             * An earlier attempt recorded these as un-derivable. What it actually refuted is a
              * rewrite that is exact for EVERY label: the defect is
              *     0.5 * (1 - ys/xs) * label_px
              * and the hook is handed the box, never label_px, so one rewrite cannot
@@ -1291,11 +1293,12 @@ static void apply_patches(void)
              * defect is zero and PopTop's geometry is already right. Any other aspect
              * has a different (1 - ys/xs) and no confirmed set, so it is left stock:
              * rotated labels overhang, nothing else is affected, and the log says so.
-             * The predicted 16:10 set is in FINDINGS 86 -- one probe run to confirm,
-             * not a dialling pass. An explicit ini value always wins.
+             * A 16:10 set can likely be derived by the same reasoning above, but it has
+             * not been confirmed in game -- that would be one probe run, not a dialling
+             * pass. An explicit ini value always wins.
              *
              * THE ART MUST MATCH. These values assume fonts at H/1080. A set staged by
-             * a pre-86 build has stock fonts and would be mis-dialled by that factor;
+             * an older build has stock fonts and would be mis-dialled by that factor;
              * tropico-setmode.sh stamps the scale it built at and rebuilds any set
              * whose stamp is missing or stale, so such a set cannot reach this code. */
             const double vt_ar = g_mode_h ? (double)g_mode_w / (double)g_mode_h : 0.0;
@@ -1309,8 +1312,10 @@ static void apply_patches(void)
             g_vt_entry = GetPrivateProfileIntA("VText", "Entry", vt_dialled, ip);
             if (!vt_dialled && !g_vt_boxh && !g_vt_boxdy)
                 logf_("[-] [vtext] no dials for %ux%u (aspect %.4f; only 16:9 is confirmed)"
-                      " -- rotated labels left STOCK and will overhang."
-                      " See FINDINGS 86 for the predicted set and how to confirm it.",
+                      " -- rotated labels left STOCK and will overhang. A set for this"
+                      " aspect can likely be derived the same way the 16:9 one was, but it"
+                      " needs confirming in game; set VText Fix=1 with your own"
+                      " BoxH/BoxDY/BoxDX/Entry once you have measured values.",
                       g_mode_w, g_mode_h, vt_ar);
             /* The hooks ARE the fix, so Fix=1 installs them regardless. */
             g_vt_bdh   = GetPrivateProfileIntA("VText", "BldgDH", vt_dialled ?  107 : 0, ip);
@@ -1329,7 +1334,7 @@ static void apply_patches(void)
         }
     }
 
-    /* s87.2: repaint the bottom-bar readouts. ON by default, like every other fix
+    /* Repaint the bottom-bar readouts. ON by default, like every other fix
      * here; [Text] Enable=0 leaves them PopTop's grey. Colour is a raw RGB555 word
      * in DECIMAL, because GetPrivateProfileIntA does not parse hex: 32767 = 0x7fff
      * = white, 30653 = 0x77bd = the near-white the engine uses at entry 23. */
@@ -1345,8 +1350,8 @@ static void apply_patches(void)
     }
 
     /* CROSS-CHECK THE ART AGAINST THE MODE. tropico-setmode.sh stamps the mode
-     * whose art set is currently unpacked into data/ (FINDINGS 72). A half-applied
-     * swap -- ini moved, art not, or the reverse -- looks exactly like the section 11
+     * whose art set is currently unpacked into data/. A half-applied
+     * swap -- ini moved, art not, or the reverse -- looks exactly like the stock
      * art-mismatch symptom, which is an expensive thing to re-diagnose from a
      * screenshot. Cheap to check here, so check here. */
     if (g_mode_w && g_mode_h) {
@@ -1393,7 +1398,7 @@ typedef int (WINAPI *GetDeviceCaps_t)(HDC, int);
 static GetDeviceCaps_t g_real_gdc;
 static GetDeviceCaps_t *g_gdc_slot;
 
-/* s99 file-order probe. Declared here rather than with the probe because
+/* File-order probe. Declared here rather than with the probe because
  * hook_GetDeviceCaps, below, records where its first call lands in the
  * numbered sequence of opens -- that ordering IS the measurement. */
 static int  g_fo_on;
@@ -1461,13 +1466,13 @@ static int install_iat_hook(void)
     return 0;
 }
 
-/* ------------------------------------------------- s114: the DirectDraw probe
+/* ------------------------------------------------- the DirectDraw probe
  *
  * WHICH ENTRY POINT DOES THE GAME ACTUALLY OBTAIN, AND WITH WHAT ARGUMENTS?
  *
  * The question matters because of what it would license. If DirectDraw can be
  * pointed at a monitor, the patch could open the game on the player's chosen
- * screen WITHOUT making it primary -- retiring s113's whole apparatus: the
+ * screen WITHOUT making it primary -- retiring the whole primary-switching apparatus: the
  * SetPrimary opt-in, the state file, the ExitProcess hook, the 5 s deadline and
  * the Linux xrandr watchdog. Substituting the device at creation is where that
  * interception would go, so the first thing to establish is what there is to
@@ -1489,7 +1494,8 @@ static int install_iat_hook(void)
  * device GUID is a one-line change or a fight.
  *
  * IT CHANGES NOTHING. Every wrapper forwards its arguments untouched and returns
- * what the real function returned. Off unless [DDProbe] Enable=1 asks for it.
+ * what the real function returned. Installed only when [Display] DeviceSelect or
+ * [FrameCount] Enable asks for it.
  *
  * IT IS INSTALLED FROM DllMain, which the file header licenses: the IAT lives in
  * .idata, which SteamStub leaves in the clear, and the ddraw load happens at
@@ -1528,7 +1534,8 @@ static const char *ddp_guid(const GUID *g)
 #define DDP_CALLER() (__builtin_return_address(0))
 
 /* Defined below: the createex wrapper is the only place that sees the
- * IDirectDraw7 before the game uses it. s117 and s118.14 both ride it. */
+ * IDirectDraw7 before the game uses it. The frame counter and the device-origin
+ * translation both ride it. */
 static void dd_attach(IDirectDraw7 *dd);
 
 static HRESULT WINAPI ddp_create(GUID *guid, void **out, IUnknown *unk)
@@ -1541,15 +1548,15 @@ static HRESULT WINAPI ddp_create(GUID *guid, void **out, IUnknown *unk)
           hr == 0 ? " (DD_OK)" : "", out ? *out : NULL);
     if (!guid)
         logf_("[ddprobe]   NOTE: NULL device. A device GUID substituted here is exactly"
-              " the interception s114 is asking about.");
+              " the interception device selection would need.");
     return hr;
 }
 
 /* Name -> GUID, by asking DirectDraw the same question the probe asked.
  *
  * Deliberately NOT done from DllMain. The lookup needs ddraw.dll, and loading a
- * library under the loader lock is the one hazard s99 did not have to face --
- * reading the display from there is safe, LoadLibrary is not. By the time the
+ * library under the loader lock is a hazard reading the display from DllMain does
+ * not have to face -- reading the display from there is safe, LoadLibrary is not. By the time the
  * game calls DirectDrawCreateEx it has loaded ddraw itself, so the module is
  * already there and this costs nothing.
  *
@@ -1604,7 +1611,7 @@ static HRESULT WINAPI ddp_createex(GUID *guid, void **out, const IID *iid, IUnkn
     logf_("[ddprobe] DirectDrawCreateEx(guid=%s, out=%p, iid=%s, unk=%p) from %p",
           ddp_guid(guid), (void *)out, ddp_guid((const GUID *)iid), (void *)unk,
           DDP_CALLER());
-    /* s118: THE SUBSTITUTION. One argument, at the one call site, and only when
+    /* THE SUBSTITUTION. One argument, at the one call site, and only when
      * the game asked for the default device -- a game that named a device itself
      * has an opinion we have no business overriding. */
     if (g_devsel && !guid) {
@@ -1619,7 +1626,7 @@ static HRESULT WINAPI ddp_createex(GUID *guid, void **out, const IID *iid, IUnkn
                 logf_("[+] [devsel] %s is at (%ld,%ld) in screen space and this device's"
                       " surface is 0,0-based, so every Blt destination is translated by"
                       " (%ld,%ld). Without this the game blits outside its own surface"
-                      " and every frame is #150 (FINDINGS 118.14).",
+                      " and every frame is #150.",
                       g_devsel_want, g_devsel_ox, g_devsel_oy,
                       -g_devsel_ox, -g_devsel_oy);
             }
@@ -1635,7 +1642,7 @@ static HRESULT WINAPI ddp_createex(GUID *guid, void **out, const IID *iid, IUnkn
               " primary. Set [Display] DeviceSelect=0 and report this log.");
     if (!guid)
         logf_("[ddprobe]   NOTE: NULL device.");
-    /* s117: this is the only moment the object exists and nothing has been asked
+    /* This is the only moment the object exists and nothing has been asked
      * of it yet, so it is the only safe moment to patch its vtable. */
     if (hr == 0 && out && *out) dd_attach((IDirectDraw7 *)*out);
     return hr;
@@ -1711,14 +1718,14 @@ static int hook_slot(void **slot, void *replacement, void **real)
     return poke(slot, &replacement, sizeof replacement);
 }
 
-/* ------------------------------------------------------ s117: the frame counter
+/* ------------------------------------------------------ the frame counter
  *
- * s115.9 stopped the presenter on a cost objection and then admitted the cost had
- * never been measured -- "the performance number should have come before any
- * cosmetic fix". This is that number. It also answers a second question: whether
- * the software renderer is still fast enough at the resolutions this patch now
- * reaches, which is the only argument for restoring Hardware 3D that s91's
- * deterministic refusal does not already dispose of.
+ * An earlier presenter-rewrite attempt was stopped on a cost objection and then
+ * admitted the cost had never been measured -- "the performance number should
+ * have come before any cosmetic fix". This is that number. It also answers a
+ * second question: whether the software renderer is still fast enough at the
+ * resolutions this patch now reaches, which is the only argument for restoring
+ * Hardware 3D that the deterministic refusal above does not already dispose of.
  *
  * WHERE A FRAME IS. Not assumed -- read off a WINEDEBUG `+ddraw` trace of a real
  * map load, on the stock path with no interception of any kind:
@@ -1731,7 +1738,7 @@ static int hook_slot(void **slot, void *replacement, void **real)
  * ambiguity about which call ends a frame: ONE Blt on the primary IS one frame.
  * That is why this counts Blt rather than something cleverer.
  *
- * It rides s114's GetProcAddress interception because that is the only code in
+ * It rides the DirectDraw probe's GetProcAddress interception because that is the only code in
  * the proxy that ever sees the IDirectDraw7 -- the game keeps it in a global at
  * 0x61c80c and hands it to no one. NOTHING THE GAME RELIES ON IS INTERCEPTED: the
  * cooperative level and both mode calls are not hooked at all, CreateSurface
@@ -1821,10 +1828,10 @@ static void fc_tick(void)
 
 /* Two jobs, and only one of them touches anything.
  *
- * s117 counts: the arguments are not read and not rewritten, because a counter
+ * The frame counter counts: the arguments are not read and not rewritten, because a counter
  * that changed what it counted would be worthless.
  *
- * s118.14 translates, and ONLY when DeviceSelect put the game on a monitor whose
+ * The device-origin translation translates, and ONLY when DeviceSelect put the game on a monitor whose
  * origin is not (0,0). A NULL destination means "the whole surface" and is left
  * exactly as it is -- rewriting it would invent a rectangle the game did not ask
  * for. On the primary, and with DeviceSelect off, g_devsel_xlate is 0 and this is
@@ -1842,7 +1849,7 @@ static HRESULT WINAPI hook_Blt(IDirectDrawSurface7 *self, RECT *dst, IDirectDraw
             r.top    -= g_devsel_oy; r.bottom -= g_devsel_oy;
             /* The first few, before and after. This is the measurement that proves
              * the diagnosis as well as the fix: if the incoming rects are not the
-             * off-surface ones 118.14 predicts, the theory was wrong and the log
+             * off-surface ones this translation predicts, the theory was wrong and the log
              * says so rather than quietly succeeding for another reason. */
             if (g_devsel_logged < 3) {
                 logf_("  [devsel] Blt dst (%ld,%ld)-(%ld,%ld) -> (%ld,%ld)-(%ld,%ld)",
@@ -1860,7 +1867,7 @@ static HRESULT WINAPI hook_Blt(IDirectDrawSurface7 *self, RECT *dst, IDirectDraw
 /* Which surface the per-frame Blt will be aimed at -- the one thing both consumers
  * need from CreateSurface. The descriptor is forwarded EXACTLY as the game wrote
  * it and the surface that comes back is the game's own; all this does is remember
- * it and hook Blt on it, once. s117 then counts on it, s118.14 translates on it,
+ * it and hook Blt on it, once. The frame counter then counts on it, the translation acts on it,
  * and with both off it is never hooked at all. */
 static HRESULT WINAPI hook_CreateSurface(IDirectDraw7 *self, DDSURFACEDESC2 *desc,
                                          IDirectDrawSurface7 **out, IUnknown *unk)
@@ -1948,7 +1955,7 @@ static FARPROC WINAPI hook_GetProcAddress(HMODULE mod, LPCSTR name)
          * route this hook did not see (LoadLibraryW, GetModuleHandle, a handle
          * cached before we installed), and a probe that stayed quiet there would
          * report "the game never resolved DirectDrawCreate" when it had. That is
-         * the s113.6 failure shape: a silent path read as a negative result. */
+         * a silent path read as a negative result. */
         if (strncmp(name, "DirectDraw", 10)) return p;
         logf_("[ddprobe] GetProcAddress(module %p, \"%s\") from %p -> %p"
               "   -- NOT the module LoadLibraryA reported (%p); adopting it",
@@ -1986,11 +1993,11 @@ static void maybe_install_ddprobe(void)
 {
     char ip[MAX_PATH];
     snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-    /* s118: DirectDrawCreateEx is where the device GUID is chosen, and this is the
+    /* DirectDrawCreateEx is where the device GUID is chosen, and this is the
      * only code that sees the call. Read here rather than from g_devsel, because
      * maybe_install_ddprobe() runs BEFORE choose_monitor() sets that -- the hook
      * has to exist before the game resolves anything. */
-    /* DEFAULT ON since s118.15's green run. It costs nothing when there is nothing
+    /* DEFAULT ON since a full test run confirmed it works cleanly. It costs nothing when there is nothing
      * to do -- one monitor returns early, and launching from the primary finds no
      * device to substitute -- and its failure mode is bounded: an unresolvable
      * monitor leaves the game on the primary and says so. */
@@ -2004,12 +2011,12 @@ static void maybe_install_ddprobe(void)
         GetPrivateProfileStringA("Display", "DeviceSelect", "", e, sizeof e, ip);
         if (e[0])
             logf_("[!] [devsel] DeviceSelect=%s, but this is Wine -- it reports ONE"
-                  " adapter GUID for every head (FINDINGS 114.3), so there is nothing"
+                  " adapter GUID for every head, so there is nothing"
                   " to substitute. The monitor is chosen the way it always has been"
                   " here; nothing is lost by leaving this set.", e);
         g_devsel = 0;
     }
-    /* s117 rides the same GetProcAddress interception, because this is the code that
+    /* The frame counter rides the same GetProcAddress interception, because this is the code that
      * sees the IDirectDraw7 being created and the game hands it to no one else. */
     g_fc = GetPrivateProfileIntA("FrameCount", "Enable", 0, ip);
     g_fc_interval = GetPrivateProfileIntA("FrameCount", "Interval", 5, ip);
@@ -2034,14 +2041,14 @@ static void maybe_install_ddprobe(void)
 }
 
 
-/* --------------------------------------------- s90: the monitor, from inside
+/* --------------------------------------------- the monitor, from inside
  *
  * Measured: a Windows process under Proton CAN execute host binaries through
  * `start.exe /unix`, and xrandr run that way sees the real display -- both outputs,
  * their modes and their positions, on DISPLAY=:1. So the proxy can do for the Steam
  * edition what tools/tropico does for GOG: make the monitor the game will run on the
  * PRIMARY one, because Wine measures only the primary and a game sized for another
- * screen dies with DirectDraw #150 (s74).
+ * screen dies with DirectDraw #150.
  *
  * Deliberately conservative. Changing the primary output moves the user's panels and
  * icons for the duration of the game, so it happens ONLY when the primary's current
@@ -2089,19 +2096,19 @@ static int write_host_file(const char *leaf, const char *body)
     return 1;
 }
 
-/* s90.3: ask X where the pointer is, not Wine.
+/* Ask X where the pointer is, not Wine.
  *
  * GetCursorPos returns 0,0 at this point in startup -- Wine has no pointer state
  * before the game has a window -- and 0,0 maps inside the primary monitor whatever
  * the layout, so the launch-monitor detector always answered "the primary". It looked
  * correct whenever the primary WAS the launch monitor, which is exactly the case that
- * needs no detection. (Same shape as the s89 zero samples: an in-band value that is
+ * needs no detection. (Same shape as any zero-sample defect: an in-band value that is
  * indistinguishable from a real answer.)
  *
  * XQueryPointer has no such ambiguity and reports ROOT coordinates -- the same space
  * xrandr reports output positions in -- so no conversion is needed either. */
 static const char POINTER_PY[] =
-    /* s111: XQueryPointer is DEAD ON WAYLAND. XWayland is only sent pointer events
+    /* XQueryPointer is DEAD ON WAYLAND. XWayland is only sent pointer events
      * while the pointer is over an XWayland surface, so once it moves onto a native
      * Wayland window it reports the last position it ever saw -- measured on COSMIC as
      * twelve identical samples in six seconds with child=0, naming the wrong monitor.
@@ -2201,7 +2208,7 @@ static int unix_sh(const char *script, int wait_ms)
      * word first ("No file found"), which is worse than useless in front of a player.
      * CreateProcess on the Unix binary itself skips it: Wine execs the ELF and then
      * returns ERROR_BAD_EXE_FORMAT because it cannot produce a Windows process object
-     * for it. Measured in the s90 probe -- the touch marker appeared on disk from the
+     * for it. Measured -- the touch marker appeared on disk from the
      * call that "failed". So the error is expected and is not evidence of anything;
      * the caller polls for the script's OUTPUT instead of trusting a return code. */
     snprintf(cmd, sizeof cmd, "\"Z:\\bin\\sh\" \"%s/tropico-host-%ld.sh\"", udir, (long)n);
@@ -2268,7 +2275,7 @@ static DWORD WINAPI heartbeat_thread(LPVOID p)
 typedef struct { char name[64]; int primary; DWORD w, h; long x, y; } xout_t;
 
 static long g_ptr_x = -1, g_ptr_y = -1;   /* root coords, from the host helper */
-static char g_ptr_how[16] = "";           /* s111: which method answered      */
+static char g_ptr_how[16] = "";           /* which method answered            */
 
 static int xrandr_outputs(xout_t *out, int cap)
 {
@@ -2283,7 +2290,7 @@ static int xrandr_outputs(xout_t *out, int cap)
         if (!strncmp(line, "POINTER ", 8)) {
             long qx, qy;
             char how[16];
-            /* The third field is which method answered (s111). Optional, so an older
+            /* The third field is which method answered. Optional, so an older
              * helper still parses -- but a report that does not say whether the answer
              * came from the pointer or from window placement cannot be diagnosed. */
             if (sscanf(line + 8, "%ld %ld %15s", &qx, &qy, how) >= 2) {
@@ -2315,7 +2322,7 @@ static int xrandr_outputs(xout_t *out, int cap)
     return n;
 }
 
-/* ------------------------------------------- s113 the same list, from Win32
+/* ------------------------------------------- the same list, from Win32
  *
  * WHY THIS HAS TO EXIST. Everything above reads the display by shelling out to
  * xrandr through unix_sh, and unix_sh goes through game_unix_dir, which refuses
@@ -2336,8 +2343,8 @@ static int xrandr_outputs(xout_t *out, int cap)
  * xrandr_outputs() already reports, so choose_monitor()'s pointer arithmetic needs
  * no case of its own.
  *
- * XRANDR STAYS FIRST WHERE IT ANSWERS. Under Wine the Win32 view is the thing
- * FINDINGS 74 is about -- Wine measures only the primary and renormalises the rest
+ * XRANDR STAYS FIRST WHERE IT ANSWERS. Under Wine the Win32 view is what
+ * Wine measures only the primary and renormalises the rest
  * to negative coordinates -- which is why the launcher asks X directly. This is a
  * fallback for the platform with no host to ask, not a replacement, and on Linux
  * nothing reaches it.
@@ -2369,9 +2376,9 @@ static int win32_outputs(xout_t *out, int cap)
     return n;
 }
 
-/* s118.10: WHICH MONITOR WAS THIS LAUNCHED FROM, on Windows.
+/* WHICH MONITOR WAS THIS LAUNCHED FROM, on Windows.
  *
- * s77 settled this on Linux and the answer was not the pointer: "the mouse can sit
+ * An earlier probe settled this on Linux and the answer was not the pointer: "the mouse can sit
  * on a monitor holding no focus -- move it across without clicking and it points at
  * a screen the desktop is ignoring." tools/tropico-launchpoint.py reads
  * _NET_ACTIVE_WINDOW and falls back to the pointer. That conclusion never reached
@@ -2408,7 +2415,7 @@ static int win32_launch_point(long *px, long *py, char *how, size_t howcap)
     return 0;
 }
 
-/* ------------------------------------- s113 putting the primary back afterwards
+/* ------------------------------------- putting the primary back afterwards
  *
  * The Linux side leaves a HOST WATCHDOG behind: a shell loop outside the process
  * that polls a heartbeat file and runs `xrandr --primary` again when it goes
@@ -2433,7 +2440,7 @@ static int win32_launch_point(long *px, long *py, char *how, size_t howcap)
  * the game outright and the primary stays on the game's monitor until Tropico is
  * started again, or until the player changes it back in Display settings.
  *
- * [Display] SetPrimary=0 switches all of it off, and has since s90.
+ * [Display] SetPrimary=0 switches all of it off.
  */
 static void primary_state_path(char *out, size_t cap)
 {
@@ -2528,7 +2535,7 @@ static int is_primary_win32(const char *dev)
  * TOWARDS, so a run killed between the writes and the apply has still left the
  * player's own arrangement recorded rather than the game's.
  *
- * WHY THERE IS MORE THAN ONE OF THESE (s113.6). The version below marked
+ * WHY THERE IS MORE THAN ONE OF THESE. The version below marked
  * `baseline` is the sequence MSDN documents, sample and all, and on the owner's
  * Windows 11 24H2 machine it moved nothing while reporting success. That is not a
  * coding error -- NirSoft's MultiMonitorTool shipped a 2.15 release whose notes
@@ -2574,7 +2581,7 @@ static int cds_set_primary(const char *dev, int keep_fields, int noreset, int ap
         {
             DWORD flags = CDS_UPDATEREGISTRY | (noreset ? CDS_NORESET : 0);
             if (!_stricmp(dd.DeviceName, dev)) { flags |= CDS_SET_PRIMARY; found = 1; }
-            /* EVERY RETURN CODE IS READ. Discarding these is what made s113's first
+            /* EVERY RETURN CODE IS READ. Discarding these is what made an earlier
              * Windows run undiagnosable from its own log: the staging calls could all
              * fail and nothing said so. */
             r = ChangeDisplaySettingsExA(dd.DeviceName, &dm, NULL, flags, NULL);
@@ -2603,7 +2610,7 @@ static int cds_set_primary(const char *dev, int keep_fields, int noreset, int ap
 
 static int sp_baseline(const char *dev) { return cds_set_primary(dev, 0, 1, 1); }
 
-/* THE OTHER THREE ARE GONE, AND MEASURED (s113.6). probes/primaryprobe.c tried all
+/* THE OTHER THREE ARE GONE, AND MEASURED. probes/primaryprobe.c tried all
  * five on the owner's Windows 11 24H2 machine and the CDS family loses in a way no
  * amount of DEVMODE shaping can rescue: the CDS_SET_PRIMARY call itself returns
  * DISP_CHANGE_FAILED. Widening dmFields did not help, and neither did a second
@@ -2617,7 +2624,7 @@ static int sp_baseline(const char *dev) { return cds_set_primary(dev, 0, 1, 1); 
  * probe run away from being understood, and re-deriving them then would be work
  * done twice. */
 
-/* ------------------------------------------------- s113.6 the same job, via CCD
+/* ------------------------------------------------- the same job, via CCD
  *
  * QueryDisplayConfig/SetDisplayConfig, Windows 7 and later, and the API Windows'
  * own Display settings page uses to apply "resolution, layout, orientation,
@@ -2695,7 +2702,7 @@ static int sp_ccd(const char *dev)
     return is_primary_win32(dev);
 }
 
-/* ------------------------------------------------------ s113.6 try, then CHECK
+/* ------------------------------------------------------ try, then CHECK
  *
  * Ordered by "least disruptive that might work" -- the documented sequence first,
  * the per-device-apply one last because it is the one that walks the desktop
@@ -2728,8 +2735,8 @@ static int set_primary_win32(const char *dev)
      * came in, and a guard that said "the first one" would silently have changed
      * what Wine does. Under Wine this function is reachable only when the xrandr
      * read failed (a game folder off Z:, say); Wine keeps exactly the behaviour it
-     * had before s113.6, which is what keeps the Linux path identical in its log
-     * (s113.3). */
+     * had before this whole CCD investigation, which is what keeps the Linux path
+     * identical in its log. */
     if (running_under_wine()) return sp_baseline(dev);
 
     if (g_setprim_pick >= 0) {
@@ -2770,9 +2777,9 @@ static void restore_primary(const char *why)
     }
 }
 
-/* --------------------------------------------- s113.7 giving it back, on the way out
+/* --------------------------------------------- giving it back, on the way out
  *
- * WHAT THIS REPLACES, AND WHY IT WAS THE WRONG SIGNAL. s113.4 watched for the
+ * WHAT THIS REPLACES, AND WHY IT WAS THE WRONG SIGNAL. An earlier version watched for the
  * game's window to appear and then vanish, and restored on the disappearance. Two
  * separate faults, both visible in the 1.3-rc1 log once the switch actually worked:
  *
@@ -2793,7 +2800,7 @@ static void restore_primary(const char *why)
  * moment which is both late enough to be correct and still safe: every thread is
  * alive, the loader lock is not held, and the WM_DISPLAYCHANGE broadcast that
  * ChangeDisplaySettingsEx/SetDisplayConfig sends has somewhere to go. It is the
- * moment DLL_PROCESS_DETACH is NOT, which is why s113.4 refused to restore there
+ * moment DLL_PROCESS_DETACH is NOT, which is why that earlier version refused to restore there
  * and why that refusal still stands.
  *
  * THE OTHER TWO LAYERS ARE UNCHANGED IN JOB AND SMALLER IN SCOPE. tropico-primary
@@ -2820,7 +2827,7 @@ static VOID WINAPI hook_ExitProcess(UINT code)
 {
     HANDLE h;
     /* BOUNDED, and the bound is the whole reason this is on a thread rather than
-     * inline. s113.4's judgement was that "a desktop on the wrong primary is
+     * inline. The judgement was that "a desktop on the wrong primary is
      * annoying and fixable; a game that will not close is neither" -- and moving
      * the restore onto the exit path is exactly what would put that at risk. The
      * display call belongs to the driver and this is the last moment we control,
@@ -2897,7 +2904,7 @@ static void apply_monitor_win32(void)
     arm_primary_restore();
 }
 
-/* s90.2: the monitor is chosen from WHERE THE GAME WAS LAUNCHED, not from the mode
+/* The monitor is chosen from WHERE THE GAME WAS LAUNCHED, not from the mode
  * in the ini.
  *
  * The first version let the configured mode decide, which inverts cause and effect:
@@ -2929,7 +2936,7 @@ static void choose_monitor(void)
     long px, py;
 
     snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-    /* DEFAULT OFF ON WINDOWS, ON UNDER WINE, AND THE ASYMMETRY IS THE POINT (s113.8).
+    /* DEFAULT OFF ON WINDOWS, ON UNDER WINE, AND THE ASYMMETRY IS THE POINT.
      *
      * Making a monitor primary is a change to the PLAYER'S COMPUTER, not to the game,
      * and the two platforms can undo it to completely different standards.
@@ -2961,22 +2968,22 @@ static void choose_monitor(void)
     /* SAY WHY, when the player has asked for something this gate discards.
      *
      * The return above happens BEFORE [Display] Monitor and FollowLaunchMonitor are
-     * read, so on Windows -- where SetPrimary now defaults to 0 (s113.8) -- setting
-     * either of them did nothing at all, and did it without a word. That is the
-     * s113.6 shape: a silence that reads as a result. The keys are not wrong and the
+     * read, so on Windows -- where SetPrimary now defaults to 0 -- setting
+     * either of them did nothing at all, and did it without a word. That is a
+     * silence that reads as a result. The keys are not wrong and the
      * gate is not wrong; what was missing was the sentence joining them.
      *
      * Both are checked as STRINGS with an empty default, because
      * GetPrivateProfileInt cannot tell "absent" from "set to the default" and
      * FollowLaunchMonitor's default is 1 -- so an int read would stay silent for the
      * player who set it explicitly, which is exactly the player being addressed. */
-    /* s118 splits this gate. Everything above the "RECORD IT" block at the bottom
+    /* Device selection splits this gate. Everything above the "RECORD IT" block at the bottom
      * only READS the display, and DeviceSelect needs those reads -- which monitor
      * was launched from and what mode it is in -- while wanting the primary left
      * exactly where it is. So SetPrimary gates the WRITE at the bottom, and this
      * early return survives only for the case where neither feature is on.
      *
-     * That preserves s113.8's guarantee literally: with SetPrimary=0 and
+     * That preserves the guarantee above literally: with SetPrimary=0 and
      * DeviceSelect=0 -- both the Windows defaults -- the function still returns
      * here, g_launch_w is still never set, and pick_mode() still validates against
      * SM_CXSCREEN. Nothing about the default path moves. */
@@ -2991,7 +2998,7 @@ static void choose_monitor(void)
          * keys are SUPERSEDED rather than discarded and the advice below would be
          * actively wrong -- it would tell the player to go and do what the launcher
          * just did. Say what the SetPrimary=1 path says in the same situation; the
-         * launcher winning is s90.2's rule, not a special case invented here. */
+         * launcher winning is the same rule as above, not a special case invented here. */
         if (GetEnvironmentVariableA("TROPICO_LAUNCHER", want2, sizeof want2)) {
             logf_("  [display] launched by tools/tropico, which has already chosen the"
                   " monitor -- leaving the display alone");
@@ -3062,7 +3069,7 @@ static void choose_monitor(void)
         if (chosen < 0)
             logf_("[!] [display] Monitor=%s is not a connected output -- ignoring it", want);
     }
-    /* s118.10: native Windows asks the desktop what it is focused on, and only then
+    /* Native Windows asks the desktop what it is focused on, and only then
      * the pointer. Win32 puts the primary at (0,0), so both answers are already in
      * the virtual-screen coordinates outs[] uses -- no translation, unlike the Wine
      * fallback below. */
@@ -3125,7 +3132,7 @@ static void choose_monitor(void)
               (unsigned long)g_launch_w, (unsigned long)g_launch_h);
     }
 
-    /* s118: the target, as the name DirectDraw will be asked for. Recorded here
+    /* The target, as the name DirectDraw will be asked for. Recorded here
      * because this is where "which monitor" is decided; resolved to a GUID much
      * later, at DirectDrawCreateEx, where loading ddraw.dll is safe. */
     if (g_devsel) {
@@ -3143,7 +3150,7 @@ static void choose_monitor(void)
             g_devsel_ox = outs[chosen].x;
             g_devsel_oy = outs[chosen].y;
             logf_("[+] [devsel] target %s %lux%lu -- the game will be pointed at that"
-                  " DEVICE and the primary %s is NOT being changed (FINDINGS 118)",
+                  " DEVICE and the primary %s is NOT being changed",
                   outs[chosen].name, (unsigned long)outs[chosen].w,
                   (unsigned long)outs[chosen].h, outs[prim].name);
         }
@@ -3171,7 +3178,7 @@ static void choose_monitor(void)
           " patch pass, where the change can actually take effect", g_mon_to, g_mon_from);
 }
 
-/* ------------------------------------------------------ s99 apply_monitor
+/* ------------------------------------------------------ apply_monitor
  *
  * WHY THIS IS NOT DONE WHERE IT IS DECIDED.
  *
@@ -3190,7 +3197,7 @@ static void choose_monitor(void)
  * noticing: the loop below polls SM_CXSCREEN for six seconds and it expired
  * still reporting the old primary's size. The process then asked for a 2560x1440
  * mode on a desktop it believed was 1920x1080, which renders NOTHING -- the intro
- * audio plays over a black screen and it looks exactly like a crash (FINDINGS 75).
+ * audio plays over a black screen and it looks exactly like a crash.
  *
  * The reason is that a display change is noticed by work this process cannot do
  * while it holds the loader lock: the heartbeat thread below cannot run its
@@ -3210,7 +3217,7 @@ static void apply_monitor(void)
     char script[MAX_PATH * 4], udir[MAX_PATH];
     if (!g_mon_pending) {
         /* Nothing to change for this run -- but a previous one may still owe the
-         * player their primary back (s113). Hand it back when the game closes, not
+         * player their primary back. Hand it back when the game closes, not
          * now: moving the desktop out from under a game that has already measured
          * it is the fault this whole section exists to avoid. */
         if (g_mon_win32 && g_prev_primary[0]) arm_primary_restore();
@@ -3263,10 +3270,10 @@ static int launch_override(mode_t *m)
     return 1;
 }
 
-/* ------------------- s108 the adopted mode has to fit the screen too
+/* ------------------- the adopted mode has to fit the screen too
  *
  * The "MODE MUST FIT THE SCREEN" guard tested `[Resolution]` only. It predates
- * launch_override(), which since s90 takes PRIORITY over the ini -- so on the Steam
+ * launch_override(), which takes PRIORITY over the ini -- so on the Steam
  * edition, where `[Resolution]` is empty and the mode comes entirely from the launch
  * monitor, the mode the game actually gets was never checked against the screen at all.
  *
@@ -3276,8 +3283,8 @@ static int launch_override(mode_t *m)
  * desktop. IT TAKES EFFECT ON THE NEXT LAUNCH` and `desktop as Wine sees it: 1920x1080`
  * three lines apart, and nothing compared them.
  *
- * A virtual desktop cannot be resized from inside the process it already contains
- * (s100), so this is not an error to refuse -- it is a mode that arrives one launch
+ * A virtual desktop cannot be resized from inside the process it already contains,
+ * so this is not an error to refuse -- it is a mode that arrives one launch
  * early. Run at the size the screen really is, and say that the next launch gets what
  * was asked for. */
 static void launch_mode_check(int dw, int dh)
@@ -3297,7 +3304,7 @@ static void launch_mode_check(int dw, int dh)
 
 
 
-/* ------------------------------------------- the world viewport width (§43)
+/* ------------------------------------------- the world viewport width
  *
  * FUN_0050af10, the constructor for display-object class 0x57e110 (the world),
  * copies the object's own size fields into the embedded image's PIXEL size:
@@ -3307,8 +3314,8 @@ static void launch_mode_check(int dw, int dh)
  *   0050af91  mov   [esi+0x8e],ecx              ; -> image.height  (= image+0x14)
  *   0050afa9  mov   [esi+0x8a],eax              ; -> image.width   (= image+0x10)
  *
- * §42 measured that image at 1600x864 px while the screen was 1920x1080, and
- * §43 showed that forcing its width to 1920 at DRAW time makes Hardware 3D
+ * Measured: that image sat at 1600x864 px while the screen was 1920x1080, and
+ * forcing its width to 1920 at DRAW time was shown to make Hardware 3D
  * render the full width correctly.  Doing it HERE instead sets the size before
  * anything downstream is prepared from it, which is the difference between a
  * debug-register hack and a patch that can ship -- and it is the only way to
@@ -3320,7 +3327,7 @@ static void launch_mode_check(int dw, int dh)
  * An inline detour rather than a debug register: no exception per frame, and it
  * survives without the VEH.
  */
-/* The DRAW-time detour: the one that is known to work (§43).
+/* The DRAW-time detour: the one that is known to work.
  *
  * The constructor patch below applied cleanly and never fired, so the viewport
  * size is not final when the object is built -- it is set again later, most
@@ -3336,7 +3343,7 @@ static void launch_mode_check(int dw, int dh)
  * identified by [esp] == 0x50b15b and no other image blit is touched.  ECX is
  * the image; [ecx+0x10] is its pixel width.
  */
-/* --- telemetry for the viewport fix (s88) ---------------------------------
+/* --- telemetry for the viewport fix ---------------------------------
  *
  * The Steam build shipped a patch that installed cleanly, logged four [+] lines,
  * and never executed one of its own stores: the return-address filter below was a
@@ -3401,7 +3408,7 @@ static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
     /* The world's call INTO the painter is indirect -- `lea ecx,[esi+0x7a]; call edi`
      * -- so it cannot be found by scanning for a call rel32 that targets the painter,
      * which is why this was a hardcoded RVA and why it silently did nothing on the
-     * Steam build (s88). Match the call site itself instead, wildcarding the one
+     * Steam build. Match the call site itself instead, wildcarding the one
      * absolute operand in it, and read the return address out of the match. The two
      * `push 0` are what separate this site from the two other `lea ecx,[esi+0x7a];
      * call edi` pairs in the same function. */
@@ -3436,7 +3443,7 @@ static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
     /* Size gate.  The return address proves the CALL SITE is the world's; it does
      * not prove the VIEWPORT is the main one.  The zoomed detail preview in the
      * corner is drawn through this same call, and Force=1 was overwriting its size
-     * with the full mode -- which displaced it to the north-west (s46).
+     * with the full mode -- which displaced it to the north-west.
      * The main viewport is always 2666/3200 = 83% of the mode width, and the
      * preview is a small panel, so "at least half the screen wide" separates them
      * at every mode without knowing either stock value. */
@@ -3447,7 +3454,7 @@ static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
     }
 
     /* Telemetry, recorded BEFORE the return-address filter and only for draws big
-     * enough to be the main viewport (s88). This is what turns "the fix did not
+     * enough to be the main viewport. This is what turns "the fix did not
      * work" into "the fix was looking for %08x and this build calls from %08x",
      * without a second run and without a debugger. */
     {
@@ -3550,9 +3557,9 @@ static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
 }
 
 
-/* ------------------------------------------------- s49: the HUD shrink probe
+/* ------------------------------------------------- the HUD shrink probe
  *
- * The question s49 leaves open is whether the sprite blit STRETCHES its sprite
+ * The question this probe leaves open is whether the sprite blit STRETCHES its sprite
  * onto the destination rectangle or copies it 1:1 into a rectangle that may be
  * the wrong size.  Growing a rect cannot answer it (a stretched sprite and a
  * stock sprite in a bigger box look alike); shrinking one can.
@@ -3562,7 +3569,7 @@ static int patch_world_draw(UINT match_w, UINT new_w, UINT match_h, UINT new_h,
  * in the virtual 3200x2400 space.  Halving the size at the entry therefore halves
  * the destination rect and nothing else.
  *
- * IDENTIFICATION, and s46's lesson that one property is not enough: the detour
+ * IDENTIFICATION, learned from an earlier case that one property is not enough: the detour
  * site proves we are in the class-4 draw, and the exact rect 560x560 proves which
  * widget.  That rect is unique to MAINWIN.WIN across all 19 parsed .WIN files --
  * ten widgets, all the bottom-right building panel stack (br00, brempty, and a
@@ -3579,7 +3586,7 @@ static volatile DWORD g_hud_hash[4], g_hud_live[4];
 /* written by the phase thread, read by the stub every draw */
 static volatile DWORD g_hud_style = 0, g_hud_cx = 0, g_hud_cy = 0;
 static volatile DWORD g_hud_style_want = 0;
-/* s53: the chrome bar.  int_main widget 17 is PATH B (s48.3) -- authored rect
+/* The chrome bar.  int_main widget 17 is PATH B -- authored rect
  * 0x0, so FUN_00502510 recomputes its rect every frame from the art sprite's own
  * PIXEL coordinates using the LIVE mode's factors, which is an identity
  * round-trip and pins the bar to the resolution the art was drawn for.
@@ -3594,7 +3601,7 @@ static volatile DWORD g_chr_rect, g_chr_pos;
 static volatile DWORD g_chr_ox, g_chr_oy;
 static volatile DWORD g_chr_zero;
 /* Absolute writes, learned once and replayed every frame.  The rect is write-once
- * (the pre-draw is not called per frame, so s58's guard patch did not make it
+ * (the pre-draw is not called per frame, so an earlier guard patch elsewhere did not make it
  * recompute), and every relative edit this project has tried either compounded or
  * stuck.  Writing a REMEMBERED ABSOLUTE value is idempotent whatever the engine
  * does, so a phase can be entered and left without damaging anything. */
@@ -3602,12 +3609,12 @@ static volatile DWORD g_chr_base;
 static volatile DWORD g_chr_apply, g_chr_setx, g_chr_sety, g_chr_setcx, g_chr_setcy;
 static volatile DWORD g_chr_dirty;
 
-/* s53: correct the path-B conversion at its source.
+/* Correct the path-B conversion at its source.
  *
  * FUN_00502510 turns the art sprite's stored PIXEL coordinates into the widget's
  * virtual rect by multiplying with the LIVE mode's factors (3200/W at 0x5a0ff8 and
  * 2400/H at 0x5a1000).  That round-trip is the identity, which is why a 1200-tall
- * design lands at its stored pixel row on any screen (s48.3).
+ * design lands at its stored pixel row on any screen.
  *
  * Repointing all six fmul operands at our own pair of floats -- 3200/art_w and
  * 2400/art_h, the ART SET's design size rather than the live mode -- makes the
@@ -3617,7 +3624,7 @@ static volatile DWORD g_chr_dirty;
  * patch is the exact identity.  That control is built in: if 1600x1200 changes
  * appearance, this is wrong.
  */
-/* FINDINGS section 65: the F2 settings tabs' ROTATED-TEXT geometry, which is
+/* The F2 settings tabs' ROTATED-TEXT geometry, which is
  * HARD-CODED here -- no .WIN file is consulted for this window.  (The almanac's
  * tabs are a different call site, 0x40741e, and may well be data-driven; these
  * are not.  Three runs' worth of loose .WIN overrides did nothing because of it.)
@@ -3696,8 +3703,8 @@ static int patch_vtext(int dy, int dx, int cliph, int have_dy, int have_dx, int 
     }
     }
     if (!n) {
-        /* A patch that changes nothing applies "cleanly" and teaches nothing --
-         * the section 54 failure mode.  Refuse instead. */
+        /* A patch that changes nothing applies "cleanly" and teaches nothing.
+         * Refuse instead. */
         logf_("[*] [vtext] no DY/DX/ClipH given -- geometry left STOCK (probe-only run)");
         return 1;
     }
@@ -3706,7 +3713,7 @@ static int patch_vtext(int dy, int dx, int cliph, int have_dy, int have_dx, int 
 }
 
 
-/* ------------------------------------------------------------------ s65 probe
+/* ------------------------------------------------------------------ the rotated-text placement probe
  *
  * WHY A PROBE.  DY moves the rotated tab label DOWN but not UP at 1920x1080,
  * while at the stock modes it moves both ways, and ClipH reaches the label at
@@ -3847,7 +3854,7 @@ static int patch_vtext_probe(void)
     return ok > 0;
 }
 
-/* ------------------------------------------------- s66 rotated-text ENTRY probe
+/* ------------------------------------------------- rotated-text ENTRY probe
  *
  * WHY A SECOND PROBE.  patch_vtext_probe() hooks the two tab-layout CALL SITES, so
  * it can only ever see the two panels whose layout matches that signature.  The
@@ -3956,7 +3963,7 @@ static int patch_vtext_entry(void)
     return 1;
 }
 
-/* ------------------------------------------------- s87.2 the readout colour
+/* ------------------------------------------------- the readout colour
  *
  * The four bottom-bar readouts are grey and hard to read. They are NOT four
  * problems: the probe above caught all four coming from ONE call site as a 2x2
@@ -4023,20 +4030,20 @@ static int patch_readout_colour(int want)
     return 1;
 }
 
-/* -------------------------------------------------------- s73 apply-video probe
+/* -------------------------------------------------------- apply-video probe
  *
  * WHICH CALL ASKS FOR 640x480 WHEN THE MENU IS RE-ENTERED FROM A MAP.
  *
  * FUN_00515450 is the engine's apply-video-settings routine and takes the five
  * settings as ecx, edx, arg1, arg2, arg3 -> fields +0xc, +0x10, +0x14, +0x18,
- * +0x1c, with arg2 the resolution slot and -1 meaning "keep" (section 69.4).
+ * +0x1c, with arg2 the resolution slot and -1 meaning "keep".
  *
- * A static sweep of all 19 call sites (section 73.1) shows only the TWO startup
+ * A static sweep of all 19 call sites shows only the TWO startup
  * sites pass slot 0 as a literal, and those are already redirected. Every other
  * site either passes -1 or computes the slot at runtime -- so the return-to-menu
  * path cannot be identified by reading immediates, and the honest instrument is
- * to log what the routine is ACTUALLY handed, and by whom. Same move that settled
- * section 66.
+ * to log what the routine is ACTUALLY handed, and by whom. The same approach
+ * settles similar ambiguity elsewhere in this file.
  *
  * The routine opens `sub esp,8` / `mov eax,[0x612fec]` = 3 + 5 bytes, so the
  * detour relocates EIGHT, not five: taking five would split the mov and corrupt
@@ -4045,7 +4052,7 @@ static int patch_readout_colour(int want)
  * The address is not hardcoded. It is read from the rel32 of the call that ends
  * the startup-slot signature, so it survives a build whose addresses moved --
  * which is the whole reason the Steam build patches at all. */
-/* ------------------------------------------------ s74 pin the window to primary
+/* ------------------------------------------------ pin the window to primary
  *
  * WHY THIS EXISTS. Wine measures ONLY the primary monitor and renormalises it to
  * (0,0), which pushes every other monitor to NEGATIVE coordinates -- measured:
@@ -4055,7 +4062,7 @@ static int patch_readout_colour(int want)
  * Placement is decided separately, by the compositor, from the launching context.
  * So if the game's window lands on a monitor that is not the one Wine measured,
  * the engine computes its rects for a screen the window is not on, and DirectDraw
- * rejects them with DDERR_INVALIDRECT -- the infamous #150 (FINDINGS 18, 74).
+ * rejects them with DDERR_INVALIDRECT -- the infamous #150.
  *
  * Every earlier attempt at this tried to control PLACEMENT from outside the game
  * (make the target monitor primary, launch from the right screen). That is a
@@ -4120,13 +4127,14 @@ static void pin_window_to_primary(const char *src)
     HWND w;
     HMONITOR m, prim;
     MONITORINFO mi, pi;
-    /* s118.11: DeviceSelect and this have OPPOSITE opinions about where the window
-     * belongs. s74 drags it to the primary because that is where Wine's DirectDraw
+    /* DeviceSelect and this have OPPOSITE opinions about where the window
+     * belongs. Pinning drags it to the primary because that is where Wine's DirectDraw
      * will render whatever we do; with a device GUID substituted, the game renders
      * on the chosen monitor instead and DirectDraw places the window to match
-     * (s118.3, arm 3 -- Windows moved a window to suit the device). Dragging it back
-     * would leave the picture on one screen and the mouse on another, which is s89's
-     * failure with a new cause. The device decides; this stands down. */
+     * (measured: Windows moved a window to suit the device). Dragging it back
+     * would leave the picture on one screen and the mouse on another -- the same
+     * picture/pointer mismatch as the pointer-detection failure above, with a new
+     * cause. The device decides; this stands down. */
     if (g_devsel && g_devsel_want[0]) {
         static int said;
         if (!said) {
@@ -4192,7 +4200,7 @@ static void pin_window_to_primary(const char *src)
     if (m == prim) {
         if (!g_pin_done) logf_("[+] [display] (%s) window moved onto the primary monitor", src);
         g_pin_done = 1;
-        /* Moving it is not the same as it STAYING moved. Measured (FINDINGS 75):
+        /* Moving it is not the same as it STAYING moved. Measured:
          * the fullscreen window is positioned from the surface's PHYSICAL output,
          * which the compositor owns, so a move can be undone within 100 ms and the
          * run still fails with #150. Say so once, with the command that does work,
@@ -4240,9 +4248,9 @@ static void __cdecl slotprobe_hook(DWORD *a)
     pin_window_to_primary("apply-video");
     /* a[] from the trampoline: 0 flags, 1 EDI, 2 ESI, 3 EBP, 4 ESP, 5 EBX,
      * 6 EDX, 7 ECX, 8 EAX, 9 return address, 10 arg1, 11 arg2, 12 arg3. */
-    /* THE FIX (s73). Returning to the main menu from a map re-applies the FRONTEND
+    /* THE FIX. Returning to the main menu from a map re-applies the FRONTEND
      * preset row, whose stored resolution slot is 0 -- PopTop put 640x480 there
-     * because the menu art only ever existed at that size (s69.5). The startup
+     * because the menu art only ever existed at that size. The startup
      * redirect does not cover it: that patches two `push 0` immediates inside
      * FUN_0047c370, and this is a different call site reading a different row.
      *
@@ -4250,9 +4258,9 @@ static void __cdecl slotprobe_hook(DWORD *a)
      * theirs, and ONLY for this call site. A blanket "slot 0 becomes slot 4" would
      * also override a deliberate 640x480 chosen from the F2 settings screen, which
      * is a legal choice arriving through a different caller. */
-    /* THE FIX (s79). arg3 is the windowed flag (+0x1c). The F2 video screen's
+    /* THE FIX. arg3 is the windowed flag (+0x1c). The F2 video screen's
      * "Fullscreen" checkbox is the only thing that ever passes 1, and windowed is
-     * not a mode this game supports in any useful sense -- FINDINGS 6 measured it:
+     * not a mode this game supports in any useful sense -- measured:
      * windowed means DDSCL_NORMAL, no SetDisplayMode, and a clipper blit into an
      * offscreen surface. Unchecking the box mid-game therefore hands DirectDraw a
      * destination rect for a screen that no longer exists and it answers #150.
@@ -4270,7 +4278,7 @@ static void __cdecl slotprobe_hook(DWORD *a)
         a[12] = 0;
         if (++g_fs_clamped <= 4)
             logf_("  [fullscreen] caller %08lx asked for windowed mode (arg3=1)"
-                  " -- forced back to fullscreen (FINDINGS 79)%s",
+                  " -- forced back to fullscreen%s",
                   (unsigned long)a[9],
                   g_fs_clamped == 4 ? "  [further clamps not logged]" : "");
     }
@@ -4344,7 +4352,7 @@ static int patch_slot_probe(void)
     return 1;
 }
 
-/* ------------------------------------------------------------- s68 startup movie
+/* ------------------------------------------------------------- startup movie
  *
  * The startup movie never plays. Established by measurement, not inference:
  *   - the proxy is NOT the cause -- a control run with the stock binkw32.dll
@@ -4388,7 +4396,7 @@ static int patch_intro(void)
     return 1;
 }
 
-/* ------------------------------------------ s69c the startup ASKS for 640x480
+/* ------------------------------------------ the startup ASKS for 640x480
  *
  * Two earlier attempts failed and both were aimed at the wrong thing:
  *   (a) hooking the per-screen assignment in FUN_004e9f30 -- never fired
@@ -4435,7 +4443,7 @@ static void find_applyvideo(void)
         break;
     }
 
-    /* The PRESET-APPLY call site (s73). It loads all five settings out of the
+    /* The PRESET-APPLY call site. It loads all five settings out of the
      * preset arrays indexed by the current preset row:
      *
      *   mov edx,[eax+ecx*4+0x48]   ; the resolution slot
@@ -4447,7 +4455,7 @@ static void find_applyvideo(void)
      *   call apply-video
      *
      * Row 0 is the in-game preset and row 1 the frontend one, and PopTop stored
-     * 640x480 in row 1 because the menu art only existed at that size (s69.5).
+     * 640x480 in row 1 because the menu art only existed at that size.
      * Matched by signature rather than hardcoded so the Steam build works too. */
     {
         static const BYTE PS[]  = {0x8b,0x54,0x88,0x48, 0x6a,0xff, 0x52,
@@ -4492,7 +4500,7 @@ static int patch_menu_slot(void)
     return 1;
 }
 
-/* ------------------------------------------- s79 the windowed flag is a trap
+/* ------------------------------------------- the windowed flag is a trap
  *
  * Unchecking "Fullscreen" on the F2 video screen sets [0x612fec+0x1c] and the
  * setting is written to TROPICO.CFG at file offset 0x246. From then on the very
@@ -4558,13 +4566,13 @@ static int patch_force_fullscreen(void)
     return 1;
 }
 
-/* s69 the movie/menu window (removed): [Menu] W/H/Fit widened the movie-window
- * clamp at 0x515e58 to a pillarboxed size, and [Menu] Probe logged which branch
- * FUN_00515d30 took -- the stock path (clamp+centre) or the `videowin.win`
- * branch at 0x515f86, which bypasses both. Neither is a shipped fix; the movie
+/* The movie/menu window (an earlier, removed approach): ini keys used to widen the
+ * movie-window clamp at 0x515e58 to a pillarboxed size, and a probe key logged which
+ * branch FUN_00515d30 took -- the stock path (clamp+centre) or the `videowin.win`
+ * branch at 0x515f86, which bypasses both. Neither was a shipped fix; the movie
  * fixes that ship are below. */
 
-/* ------------------------------------------ s69.6 let the movie blit MAGNIFY
+/* ------------------------------------------ let the movie blit MAGNIFY
  *
  * Measured, not guessed: the probe showed the SCALING path taken, destination rect
  * 0..1919 x 0..1079, movie 640x480. The machinery is engaged and still tiles.
@@ -4611,13 +4619,13 @@ static int patch_blit_scale(void)
     return 1;
 }
 
-/* ------------------------- s106 the HUD panel's movie is copied 1:1, not scaled
+/* ------------------------- the HUD panel's movie is copied 1:1, not scaled
  *
  * The little edict/build movie in the bottom-right panel is `mainwin.win` widget 8:
  * class 0x040, virtual rect 2572,1481 560x560, painted by FUN_00531990.
  *
  * The DESTINATION is not the problem. That method scales its rect per-axis exactly
- * like every other widget class (s104.3):
+ * like every other widget class:
  *
  *     movsx eax,[obj+0x0b] / fmul [0x5a0ffc]   -> destination left   (W/3200)
  *     movsx edx,[obj+0x0d] / fmul [0x5a1004]   -> destination top    (H/2400)
@@ -4650,7 +4658,7 @@ static int patch_blit_scale(void)
  * cannot fix that -- the movie is the wrong SIZE for the panel, and has to be scaled
  * the way PopTop scaled it for 1280x1024.
  *
- * Setting the flag makes the engine's own comparison run and its own scaler (s69.6)
+ * Setting the flag makes the engine's own comparison run and its own scaler
  * do the work. It is a no-op wherever the two already agree, so at 640x480 and
  * 800x600 nothing changes at all.
  *
@@ -4661,14 +4669,11 @@ static int patch_blit_scale(void)
  * PopTop's own included. Flipping the flag in the shared code would magnify the
  * credits movie 2.5x at stock -- a change nobody asked for, somewhere that is not
  * broken. So this keys on the one widget's rect and refuses to fire on anything else.
- * That is s46's lesson read the other way round: a patch too BROAD, firing where it
+ * That is the same lesson as the north-west displacement above, read the other way round: a patch too BROAD, firing where it
  * should not.
  *
- * The tidier route -- editing `mainwin.win` and shipping it loose -- does not work.
- * s65.6: `.WIN` has its own loader and loose overrides are not read.
- *
- * Read-only counterpart: [Menu] HudMovieProbe logs what each class-0x040 paint
- * actually resolves to, so the numbers above can be checked rather than believed. */
+ * The tidier route -- editing `mainwin.win` and shipping it loose -- does not work:
+ * `.WIN` has its own loader and loose overrides are not read. */
 static int g_hm_fixed;
 
 static void __cdecl hm_fix_hook(BYTE *obj)
@@ -4680,7 +4685,7 @@ static void __cdecl hm_fix_hook(BYTE *obj)
     short cx = *(short *)(obj + 0x0f);
     short cy = *(short *)(obj + 0x11);
     if (x != 2572 || y != 1481 || cx != 560 || cy != 560) return;
-    /* TWO flags, and the second one is the whole bug (s106.7).  obj+0x7e is read in
+    /* TWO flags, and the second one is the whole bug.  obj+0x7e is read in
      * exactly one place -- 0x531545, right after BinkOpen -- where it means "resize
      * this widget to the movie", and it overwrites the authored 560x560 with the
      * movie's own size in virtual units.  Clearing it keeps the panel's rect;
@@ -4747,7 +4752,7 @@ static int patch_hud_movie(void)
     return 1;
 }
 
-/* -------------------------------------------- s70 the scenario map preview
+/* -------------------------------------------- the scenario map preview
  *
  * FUN_0044da90 draws it (identified by sweeping every surface access; site 0x44de89
  * fires as the scenario screen loads). Its destination arithmetic is correct and the
@@ -4775,7 +4780,7 @@ static int patch_hud_movie(void)
  * and it is correct rather than corrupt.
  *
  * 172 is read from the stride immediate the code itself carries, not hardcoded. */
-/* ---- s70.5 scaling mode --------------------------------------------------------
+/* ---- scaling mode --------------------------------------------------------
  *
  * The owner identified the second shape: it is the NEXT MAP's preview. Every map's
  * preview lives in ONE array, 172-entry rows stacked consecutively, so overrunning
@@ -5017,7 +5022,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     if (slash) *slash = 0;
     snprintf(g_logpath, sizeof g_logpath, "%s\\tropico-fix.log", g_dir);
     log_begin();
-    logf_("tropico_fix (binkw32 proxy) -- see FINDINGS.md for every address used here");
+    logf_("tropico_fix (binkw32 proxy) starting -- attach tropico-fix.log to any bug report");
 
     /* USER32 is initialised before us: the exe's import descriptors are ordered
      * GDI32, USER32, binkw32, mss32, KERNEL32, and the loader walks them in that
@@ -5037,8 +5042,9 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         return TRUE;
     }
 
-    /* s114: for the same reason, and one of its own -- the game resolves
-     * DirectDraw at 0x514e55, which is early. Off unless [DDProbe] Enable=1. */
+    /* For the same reason, and one of its own -- the game resolves
+     * DirectDraw at 0x514e55, which is early. Installed only when
+     * [Display] DeviceSelect or [FrameCount] Enable asks for it. */
     maybe_install_ddprobe();
 
     /* ART BEFORE THE GAME'S ENTRY POINT, WHICH IS THE ONLY MOMENT EARLY ENOUGH.
@@ -5047,12 +5053,12 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
      * SteamStub keeps .text encrypted, so patching defers to the first
      * GetDeviceCaps, and art generated there arrives after the index. The symptom
      * was a menu dying on "Error opening pack file item 'setuplb.i16'" for a file
-     * that was present, valid and byte-identical to GOG's (FINDINGS 98).
+     * that was present, valid and byte-identical to GOG's.
      *
      * Generating here fixes that and is measured to work: 267 assets in 1333 ms,
      * from DllMain, with no index error afterwards.
      *
-     * WHICH MODE, AND WHY THE ANSWER IS NOT ALWAYS THE LAUNCH MONITOR'S (s113).
+     * WHICH MODE, AND WHY THE ANSWER IS NOT ALWAYS THE LAUNCH MONITOR'S.
      *
      * With a primary switch still pending, the launch monitor's own mode is the
      * only answer that does not depend on what the display currently measures --
@@ -5061,19 +5067,19 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
      * alone and leaves the rest to the patch pass, exactly as before.
      *
      * WITH NOTHING PENDING, THE WHOLE DECISION IS ALREADY ANSWERABLE, and until
-     * s113 it was not being asked. `launch_override()` needs g_launch_w, which is
+     * this fix it was not being asked. `launch_override()` needs g_launch_w, which is
      * set only by choose_monitor()'s host-side monitor read -- and that read is
      * structurally unavailable on native Windows (game_unix_dir refuses anything
      * not on Z:) and skipped on a single-monitor Linux desktop. So this block did
      * nothing at all on Windows: on GOG that is invisible, because the unwrapped
      * build patches from inside DllMain anyway and generates on the way through,
      * but on Steam the patch pass defers to GetDeviceCaps and the art then lands
-     * AFTER the game has indexed data\ -- which is FINDINGS 98, reproduced on the
-     * first native-Windows install as
+     * AFTER the game has indexed data\ -- reproducing, on the
+     * first native-Windows install, the same
      *
      *     Error opening pack file item 'setuplb.i16'
      *
-     * on the first launch and gone on the second. The fix for 98 was real; it was
+     * on the first launch and gone on the second. That fix was real; it was
      * reachable only through a Linux-only code path.
      *
      * decide_mode() caches, so the patch pass reuses this answer rather than
@@ -5108,7 +5114,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
      *
      * The unwrapped GOG build patches from here, inside DllMain, which is fine
      * until something has to change the display: apply_monitor() cannot work
-     * there (FINDINGS 99), and neither can the mode validation that follows it,
+     * there, and neither can the mode validation that follows it,
      * because it would be measuring the monitor we are about to stop using.
      *
      * Started through tools/tropico this never arises -- the launcher chose the
@@ -5122,7 +5128,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
      * the alternative is a black screen, so it is the better of the two. */
     if (g_mon_pending)
         logf_("[*] a primary-monitor change is pending -- deferring the patch pass so it"
-              " runs outside DllMain, where the display can actually change (FINDINGS 99)");
+              " runs outside DllMain, where the display can actually change");
 
     if (!force_defer && !g_mon_pending && locate_sections()
         && find_unique(CHAIN_SIG, sizeof CHAIN_SIG, g_text, g_textlen, "chain-probe")) {
@@ -5142,7 +5148,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     return TRUE;
 }
 
-/* ==================================================== s67 Bink
+/* ==================================================== Bink
  *
  * The proxy replaces binkw32.dll. Of its 81 exports, only BinkCopyToBuffer is a
  * real wrapper -- it carries the movie-pitch correction below. The other 80,
