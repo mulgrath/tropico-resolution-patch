@@ -159,7 +159,7 @@ static DWORD WINAPI pin_thread(LPVOID);
 static DWORD g_preset_ret;   /* return address of the preset-apply call site */
 static int g_slot_log;
 static int patch_force_fullscreen(void);
-/* maybe_install_ddprobe() asks this, and it sits far below. */
+/* maybe_install_dispsel() asks this, and it sits far below. */
 static int running_under_wine(void);
 static int g_force_fs = 1;   /* never let the engine enter windowed mode */
 static int g_fs_clamped;     /* how many times the clamp has fired */
@@ -1509,13 +1509,13 @@ typedef HRESULT  (WINAPI *ddc_t)   (GUID *, void **, IUnknown *);
 typedef HRESULT  (WINAPI *ddcex_t) (GUID *, void **, const IID *, IUnknown *);
 typedef HRESULT  (WINAPI *ddenumex_t)(void *, void *, DWORD);
 
-static loadlib_t  g_ddp_loadlib;
-static getproc_t  g_ddp_getproc;
-static freelib_t  g_ddp_freelib;
-static ddc_t      g_ddp_real_create;
-static ddcex_t    g_ddp_real_createex;
-static ddenumex_t g_ddp_real_enumex;
-static HMODULE    g_ddp_mod;          /* the ddraw the game loaded */
+static loadlib_t  g_dispsel_loadlib;
+static getproc_t  g_dispsel_getproc;
+static freelib_t  g_dispsel_freelib;
+static ddc_t      g_dispsel_real_create;
+static ddcex_t    g_dispsel_real_createex;
+static ddenumex_t g_dispsel_real_enumex;
+static HMODULE    g_dispsel_mod;          /* the ddraw the game loaded */
 
 static const char *ddp_guid(const GUID *g)
 {
@@ -1531,23 +1531,23 @@ static const char *ddp_guid(const GUID *g)
 /* The caller's return address, so the log names the call site in the game rather
  * than merely the fact of a call. The header says the load is at 0x514e55; this
  * is how that claim gets extended to the resolutions and the creation itself. */
-#define DDP_CALLER() (__builtin_return_address(0))
+#define DISPSEL_CALLER() (__builtin_return_address(0))
 
 /* Defined below: the createex wrapper is the only place that sees the
  * IDirectDraw7 before the game uses it. The frame counter and the device-origin
  * translation both ride it. */
 static void dd_attach(IDirectDraw7 *dd);
 
-static HRESULT WINAPI ddp_create(GUID *guid, void **out, IUnknown *unk)
+static HRESULT WINAPI dispsel_create(GUID *guid, void **out, IUnknown *unk)
 {
     HRESULT hr;
-    logf_("[ddprobe] DirectDrawCreate(guid=%s, out=%p, unk=%p) from %p",
-          ddp_guid(guid), (void *)out, (void *)unk, DDP_CALLER());
-    hr = g_ddp_real_create(guid, out, unk);
-    logf_("[ddprobe]   -> 0x%08lx%s, object %p", (unsigned long)hr,
+    logf_("[dispsel] DirectDrawCreate(guid=%s, out=%p, unk=%p) from %p",
+          ddp_guid(guid), (void *)out, (void *)unk, DISPSEL_CALLER());
+    hr = g_dispsel_real_create(guid, out, unk);
+    logf_("[dispsel]   -> 0x%08lx%s, object %p", (unsigned long)hr,
           hr == 0 ? " (DD_OK)" : "", out ? *out : NULL);
     if (!guid)
-        logf_("[ddprobe]   NOTE: NULL device. A device GUID substituted here is exactly"
+        logf_("[dispsel]   NOTE: NULL device. A device GUID substituted here is exactly"
               " the interception device selection would need.");
     return hr;
 }
@@ -1583,34 +1583,34 @@ static void devsel_resolve(void)
     g_devsel_tried = 1;
     if (!g_devsel || !g_devsel_want[0]) return;
 
-    m = g_ddp_mod ? g_ddp_mod : GetModuleHandleA("ddraw.dll");
+    m = g_dispsel_mod ? g_dispsel_mod : GetModuleHandleA("ddraw.dll");
     if (!m) m = LoadLibraryA("ddraw.dll");
-    if (!m) { logf_("[x] [devsel] ddraw.dll is not loadable -- cannot resolve %s",
+    if (!m) { logf_("[x] [dispsel] ddraw.dll is not loadable -- cannot resolve %s",
                     g_devsel_want); return; }
 
     /* The real export, never the wrapper: this enumeration is ours and must not
      * be mistaken for the game's in the log, nor run the game's callback. */
     ex = (ddenumex_t)(void *)GetProcAddress(m, "DirectDrawEnumerateExA");
-    if (!ex) { logf_("[x] [devsel] DirectDrawEnumerateExA is missing -- this build of"
+    if (!ex) { logf_("[x] [dispsel] DirectDrawEnumerateExA is missing -- this build of"
                      " DirectDraw cannot name a monitor"); return; }
 
     ex((void *)devsel_cb, NULL, DDENUM_ATTACHEDSECONDARYDEVICES);
     if (g_devsel_have)
-        logf_("[+] [devsel] %s resolves to device %s", g_devsel_want,
+        logf_("[+] [dispsel] %s resolves to device %s", g_devsel_want,
               ddp_guid(&g_devsel_guid));
     else
-        logf_("[x] [devsel] no enumerated device is named %s. The game will be left on"
-              " the primary, at the mode already chosen -- check the [ddprobe] device"
+        logf_("[x] [dispsel] no enumerated device is named %s. The game will be left on"
+              " the primary, at the mode already chosen -- check the [dispsel] device"
               " lines, or set [Display] Monitor to a name that appears there.",
               g_devsel_want);
 }
 
-static HRESULT WINAPI ddp_createex(GUID *guid, void **out, const IID *iid, IUnknown *unk)
+static HRESULT WINAPI dispsel_createex(GUID *guid, void **out, const IID *iid, IUnknown *unk)
 {
     HRESULT hr;
-    logf_("[ddprobe] DirectDrawCreateEx(guid=%s, out=%p, iid=%s, unk=%p) from %p",
+    logf_("[dispsel] DirectDrawCreateEx(guid=%s, out=%p, iid=%s, unk=%p) from %p",
           ddp_guid(guid), (void *)out, ddp_guid((const GUID *)iid), (void *)unk,
-          DDP_CALLER());
+          DISPSEL_CALLER());
     /* THE SUBSTITUTION. One argument, at the one call site, and only when
      * the game asked for the default device -- a game that named a device itself
      * has an opinion we have no business overriding. */
@@ -1618,12 +1618,12 @@ static HRESULT WINAPI ddp_createex(GUID *guid, void **out, const IID *iid, IUnkn
         devsel_resolve();
         if (g_devsel_have) {
             guid = &g_devsel_guid;
-            logf_("[+] [devsel] DirectDrawCreateEx: NULL -> %s (%s). The game will render"
+            logf_("[+] [dispsel] DirectDrawCreateEx: NULL -> %s (%s). The game will render"
                   " on that monitor; the OS primary is NOT being changed.",
                   ddp_guid(guid), g_devsel_want);
             if (g_devsel_ox || g_devsel_oy) {
                 g_devsel_xlate = 1;
-                logf_("[+] [devsel] %s is at (%ld,%ld) in screen space and this device's"
+                logf_("[+] [dispsel] %s is at (%ld,%ld) in screen space and this device's"
                       " surface is 0,0-based, so every Blt destination is translated by"
                       " (%ld,%ld). Without this the game blits outside its own surface"
                       " and every frame is #150.",
@@ -1633,15 +1633,15 @@ static HRESULT WINAPI ddp_createex(GUID *guid, void **out, const IID *iid, IUnkn
         }
     }
 
-    hr = g_ddp_real_createex(guid, out, iid, unk);
-    logf_("[ddprobe]   -> 0x%08lx%s, object %p", (unsigned long)hr,
+    hr = g_dispsel_real_createex(guid, out, iid, unk);
+    logf_("[dispsel]   -> 0x%08lx%s, object %p", (unsigned long)hr,
           hr == 0 ? " (DD_OK)" : "", out ? *out : NULL);
     if (g_devsel && g_devsel_have && hr != 0)
-        logf_("[x] [devsel] the substituted device FAILED to create. The game is now"
+        logf_("[x] [dispsel] the substituted device FAILED to create. The game is now"
               " without a DirectDraw object; if it starts at all it will be on the"
               " primary. Set [Display] DeviceSelect=0 and report this log.");
     if (!guid)
-        logf_("[ddprobe]   NOTE: NULL device.");
+        logf_("[dispsel]   NOTE: NULL device.");
     /* This is the only moment the object exists and nothing has been asked
      * of it yet, so it is the only safe moment to patch its vtable. */
     if (hr == 0 && out && *out) dd_attach((IDirectDraw7 *)*out);
@@ -1659,8 +1659,8 @@ static HRESULT WINAPI ddp_createex(GUID *guid, void **out, const IID *iid, IUnkn
  * past. Its return value is logged too, because FALSE means the game stopped
  * the enumeration early, and stopping early is what choosing looks like from
  * out here. */
-typedef WINBOOL (CALLBACK *ddp_cb_t)(GUID *, char *, char *, void *, HMONITOR);
-static ddp_cb_t g_ddp_gamecb;
+typedef WINBOOL (CALLBACK *dispsel_cb_t)(GUID *, char *, char *, void *, HMONITOR);
+static dispsel_cb_t g_dispsel_gamecb;
 
 static WINBOOL CALLBACK ddp_enum_tramp(GUID *guid, char *desc, char *drv,
                                        void *ctx, HMONITOR hm)
@@ -1669,28 +1669,28 @@ static WINBOOL CALLBACK ddp_enum_tramp(GUID *guid, char *desc, char *drv,
     MONITORINFOEXA mi;
     memset(&mi, 0, sizeof mi);
     mi.cbSize = sizeof mi;
-    logf_("[ddprobe]   device: guid=%s desc=\"%s\" driver=\"%s\" hmonitor=%p",
+    logf_("[dispsel]   device: guid=%s desc=\"%s\" driver=\"%s\" hmonitor=%p",
           ddp_guid(guid), desc ? desc : "", drv ? drv : "", (void *)hm);
     if (hm && GetMonitorInfoA(hm, (MONITORINFO *)&mi))
-        logf_("[ddprobe]           -> %s at (%ld,%ld)-(%ld,%ld)%s", mi.szDevice,
+        logf_("[dispsel]           -> %s at (%ld,%ld)-(%ld,%ld)%s", mi.szDevice,
               mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom,
               (mi.dwFlags & MONITORINFOF_PRIMARY) ? "  PRIMARY" : "");
-    r = g_ddp_gamecb ? g_ddp_gamecb(guid, desc, drv, ctx, hm) : TRUE;
+    r = g_dispsel_gamecb ? g_dispsel_gamecb(guid, desc, drv, ctx, hm) : TRUE;
     if (!r)
-        logf_("[ddprobe]           the game returned FALSE -- it STOPPED the enumeration"
+        logf_("[dispsel]           the game returned FALSE -- it STOPPED the enumeration"
               " here, which is what making a choice looks like");
     return r;
 }
 
-static HRESULT WINAPI ddp_enumex(void *cb, void *ctx, DWORD flags)
+static HRESULT WINAPI dispsel_enumex(void *cb, void *ctx, DWORD flags)
 {
     HRESULT hr;
-    logf_("[ddprobe] DirectDrawEnumerateExA(cb=%p, ctx=%p, flags=0x%08lx) from %p"
+    logf_("[dispsel] DirectDrawEnumerateExA(cb=%p, ctx=%p, flags=0x%08lx) from %p"
           " -- THE GAME IS ENUMERATING DEVICES ITSELF",
-          cb, ctx, (unsigned long)flags, DDP_CALLER());
-    g_ddp_gamecb = (ddp_cb_t)cb;
-    hr = g_ddp_real_enumex(cb ? (void *)ddp_enum_tramp : NULL, ctx, flags);
-    logf_("[ddprobe]   -> 0x%08lx", (unsigned long)hr);
+          cb, ctx, (unsigned long)flags, DISPSEL_CALLER());
+    g_dispsel_gamecb = (dispsel_cb_t)cb;
+    hr = g_dispsel_real_enumex(cb ? (void *)ddp_enum_tramp : NULL, ctx, flags);
+    logf_("[dispsel]   -> 0x%08lx", (unsigned long)hr);
     return hr;
 }
 
@@ -1852,11 +1852,11 @@ static HRESULT WINAPI hook_Blt(IDirectDrawSurface7 *self, RECT *dst, IDirectDraw
              * off-surface ones this translation predicts, the theory was wrong and the log
              * says so rather than quietly succeeding for another reason. */
             if (g_devsel_logged < 3) {
-                logf_("  [devsel] Blt dst (%ld,%ld)-(%ld,%ld) -> (%ld,%ld)-(%ld,%ld)",
+                logf_("  [dispsel] Blt dst (%ld,%ld)-(%ld,%ld) -> (%ld,%ld)-(%ld,%ld)",
                       dst->left, dst->top, dst->right, dst->bottom,
                       r.left, r.top, r.right, r.bottom);
                 if (++g_devsel_logged == 3)
-                    logf_("  [devsel] (further translations not logged)");
+                    logf_("  [dispsel] (further translations not logged)");
             }
             dst = &r;
         }
@@ -1897,7 +1897,7 @@ static HRESULT WINAPI hook_CreateSurface(IDirectDraw7 *self, DDSURFACEDESC2 *des
                   (unsigned long)g_fc_w, (unsigned long)g_fc_h,
                   (unsigned long)g_fc_bpp, (void *)*out, g_fc_interval);
         if (g_devsel_xlate)
-            logf_("[+] [devsel] Blt hooked on the primary surface %lux%lu (%p) --"
+            logf_("[+] [dispsel] Blt hooked on the primary surface %lux%lu (%p) --"
                   " destinations will be translated into it.",
                   (unsigned long)g_fc_w, (unsigned long)g_fc_h, (void *)*out);
     } else {
@@ -1934,22 +1934,22 @@ static void dd_attach(IDirectDraw7 *dd)
 
 static HMODULE WINAPI hook_LoadLibraryA(LPCSTR name)
 {
-    HMODULE m = g_ddp_loadlib(name);
+    HMODULE m = g_dispsel_loadlib(name);
     if (name && ddp_names_ddraw(name)) {
-        g_ddp_mod = m;
-        logf_("[ddprobe] LoadLibraryA(\"%s\") from %p -> %p", name, DDP_CALLER(), (void *)m);
+        g_dispsel_mod = m;
+        logf_("[dispsel] LoadLibraryA(\"%s\") from %p -> %p", name, DISPSEL_CALLER(), (void *)m);
     }
     return m;
 }
 
 static FARPROC WINAPI hook_GetProcAddress(HMODULE mod, LPCSTR name)
 {
-    FARPROC p = g_ddp_getproc(mod, name);
+    FARPROC p = g_dispsel_getproc(mod, name);
     /* HIWORD==0 means an ordinal, not a string -- dereferencing it as a name is
      * the classic way to turn a probe into a crash. */
     if (!name || !((ULONG_PTR)name >> 16)) return p;
 
-    if (mod != g_ddp_mod) {
+    if (mod != g_dispsel_mod) {
         /* Not the module LoadLibraryA reported -- but a name beginning
          * "DirectDraw" is worth catching anyway. It means ddraw arrived by a
          * route this hook did not see (LoadLibraryW, GetModuleHandle, a handle
@@ -1957,45 +1957,45 @@ static FARPROC WINAPI hook_GetProcAddress(HMODULE mod, LPCSTR name)
          * report "the game never resolved DirectDrawCreate" when it had. That is
          * a silent path read as a negative result. */
         if (strncmp(name, "DirectDraw", 10)) return p;
-        logf_("[ddprobe] GetProcAddress(module %p, \"%s\") from %p -> %p"
+        logf_("[dispsel] GetProcAddress(module %p, \"%s\") from %p -> %p"
               "   -- NOT the module LoadLibraryA reported (%p); adopting it",
-              (void *)mod, name, DDP_CALLER(), (void *)p, (void *)g_ddp_mod);
-        g_ddp_mod = mod;
+              (void *)mod, name, DISPSEL_CALLER(), (void *)p, (void *)g_dispsel_mod);
+        g_dispsel_mod = mod;
     } else {
-        logf_("[ddprobe] GetProcAddress(ddraw, \"%s\") from %p -> %p",
-              name, DDP_CALLER(), (void *)p);
+        logf_("[dispsel] GetProcAddress(ddraw, \"%s\") from %p -> %p",
+              name, DISPSEL_CALLER(), (void *)p);
     }
     if (!p) return p;
 
     if (!strcmp(name, "DirectDrawCreate")) {
-        g_ddp_real_create = (ddc_t)(void *)p;
-        return (FARPROC)(void *)ddp_create;
+        g_dispsel_real_create = (ddc_t)(void *)p;
+        return (FARPROC)(void *)dispsel_create;
     }
     if (!strcmp(name, "DirectDrawCreateEx")) {
-        g_ddp_real_createex = (ddcex_t)(void *)p;
-        return (FARPROC)(void *)ddp_createex;
+        g_dispsel_real_createex = (ddcex_t)(void *)p;
+        return (FARPROC)(void *)dispsel_createex;
     }
     if (!strcmp(name, "DirectDrawEnumerateExA")) {
-        g_ddp_real_enumex = (ddenumex_t)(void *)p;
-        return (FARPROC)(void *)ddp_enumex;
+        g_dispsel_real_enumex = (ddenumex_t)(void *)p;
+        return (FARPROC)(void *)dispsel_enumex;
     }
     return p;
 }
 
 static BOOL WINAPI hook_FreeLibrary(HMODULE mod)
 {
-    if (mod && mod == g_ddp_mod)
-        logf_("[ddprobe] FreeLibrary(ddraw %p) from %p", (void *)mod, DDP_CALLER());
-    return g_ddp_freelib(mod);
+    if (mod && mod == g_dispsel_mod)
+        logf_("[dispsel] FreeLibrary(ddraw %p) from %p", (void *)mod, DISPSEL_CALLER());
+    return g_dispsel_freelib(mod);
 }
 
-static void maybe_install_ddprobe(void)
+static void maybe_install_dispsel(void)
 {
     char ip[MAX_PATH];
     snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
     /* DirectDrawCreateEx is where the device GUID is chosen, and this is the
      * only code that sees the call. Read here rather than from g_devsel, because
-     * maybe_install_ddprobe() runs BEFORE choose_monitor() sets that -- the hook
+     * maybe_install_dispsel() runs BEFORE choose_monitor() sets that -- the hook
      * has to exist before the game resolves anything. */
     /* DEFAULT ON since a full test run confirmed it works cleanly. It costs nothing when there is nothing
      * to do -- one monitor returns early, and launching from the primary finds no
@@ -2010,7 +2010,7 @@ static void maybe_install_ddprobe(void)
         char e[16];
         GetPrivateProfileStringA("Display", "DeviceSelect", "", e, sizeof e, ip);
         if (e[0])
-            logf_("[!] [devsel] DeviceSelect=%s, but this is Wine -- it reports ONE"
+            logf_("[!] [dispsel] DeviceSelect=%s, but this is Wine -- it reports ONE"
                   " adapter GUID for every head, so there is nothing"
                   " to substitute. The monitor is chosen the way it always has been"
                   " here; nothing is lost by leaving this set.", e);
@@ -2027,16 +2027,16 @@ static void maybe_install_ddprobe(void)
     if (!g_fc && !g_devsel) return;
 
     if (!hook_import("KERNEL32.dll", "LoadLibraryA", (void *)hook_LoadLibraryA,
-                     (void **)&g_ddp_loadlib))
-        logf_("[x] [ddprobe] KERNEL32!LoadLibraryA not in the import table");
+                     (void **)&g_dispsel_loadlib))
+        logf_("[x] [dispsel] KERNEL32!LoadLibraryA not in the import table");
     if (!hook_import("KERNEL32.dll", "GetProcAddress", (void *)hook_GetProcAddress,
-                     (void **)&g_ddp_getproc))
-        logf_("[x] [ddprobe] KERNEL32!GetProcAddress not in the import table");
+                     (void **)&g_dispsel_getproc))
+        logf_("[x] [dispsel] KERNEL32!GetProcAddress not in the import table");
     if (!hook_import("KERNEL32.dll", "FreeLibrary", (void *)hook_FreeLibrary,
-                     (void **)&g_ddp_freelib))
-        logf_("[x] [ddprobe] KERNEL32!FreeLibrary not in the import table");
-    if (g_ddp_loadlib && g_ddp_getproc)
-        logf_("[*] [ddprobe] armed -- logging how the game obtains DirectDraw."
+                     (void **)&g_dispsel_freelib))
+        logf_("[x] [dispsel] KERNEL32!FreeLibrary not in the import table");
+    if (g_dispsel_loadlib && g_dispsel_getproc)
+        logf_("[*] [dispsel] armed -- logging how the game obtains DirectDraw."
               " It changes nothing; every wrapper forwards.");
 }
 
@@ -3137,19 +3137,19 @@ static void choose_monitor(void)
      * later, at DirectDrawCreateEx, where loading ddraw.dll is safe. */
     if (g_devsel) {
         if (!g_mon_win32) {
-            logf_("[x] [devsel] the monitor list did not come from Windows, so these"
+            logf_("[x] [dispsel] the monitor list did not come from Windows, so these"
                   " names are not \\\\.\\DISPLAYn and DirectDraw cannot be asked for one."
                   " DeviceSelect is OFF for this run.");
             g_devsel = 0;
         } else if (chosen == prim) {
-            logf_("  [devsel] %s is already the primary -- the game renders there by"
+            logf_("  [dispsel] %s is already the primary -- the game renders there by"
                   " default and there is no device to substitute.", outs[prim].name);
             g_devsel = 0;
         } else {
             snprintf(g_devsel_want, sizeof g_devsel_want, "%s", outs[chosen].name);
             g_devsel_ox = outs[chosen].x;
             g_devsel_oy = outs[chosen].y;
-            logf_("[+] [devsel] target %s %lux%lu -- the game will be pointed at that"
+            logf_("[+] [dispsel] target %s %lux%lu -- the game will be pointed at that"
                   " DEVICE and the primary %s is NOT being changed",
                   outs[chosen].name, (unsigned long)outs[chosen].w,
                   (unsigned long)outs[chosen].h, outs[prim].name);
@@ -5045,7 +5045,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     /* For the same reason, and one of its own -- the game resolves
      * DirectDraw at 0x514e55, which is early. Installed only when
      * [Display] DeviceSelect or [FrameCount] Enable asks for it. */
-    maybe_install_ddprobe();
+    maybe_install_dispsel();
 
     /* ART BEFORE THE GAME'S ENTRY POINT, WHICH IS THE ONLY MOMENT EARLY ENOUGH.
      *
