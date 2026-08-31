@@ -33,6 +33,15 @@ if [ "$GAMEDIR" != "$HERE" ]; then
   echo
   echo "== Found Tropico at $GAMEDIR"
   echo "   (this was run from $HERE)"
+  # REPLACE the payload directory, never merge into it. `cp -r SRC DEST` copies
+  # SRC *inside* DEST when DEST already exists, so on a re-install the new payload
+  # lands at tropico-patch/tropico-patch/ and the exec below then re-runs against
+  # the PREVIOUS version's directory. That directory is also incomplete by then --
+  # this script and the launcher are copied out to the game folder on first install
+  # -- so the re-run dies sourcing tropico-common.sh with a raw "No such file or
+  # directory", and the DLL is never updated. Updating over an existing install is
+  # exactly what README tells people to do after Steam verifies files.
+  rm -rf "$GAMEDIR/tropico-patch"
   cp -r "$SRC" "$GAMEDIR/tropico-patch"
   for f in install.sh uninstall.sh play README.md; do
     [ -f "$HERE/$f" ] && cp "$HERE/$f" "$GAMEDIR/$f"
