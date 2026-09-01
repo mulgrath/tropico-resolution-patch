@@ -2085,13 +2085,34 @@ static void maybe_install_dispsel(void)
  *
  * Restoring is the hard half: a crash must not leave someone's desktop rearranged.
  * A Windows-side "restore on exit" cannot survive a crash by definition, so the
- * restore runs on the HOST: a detached shell watches a marker file that this process
- * rewrites every two seconds, and puts the primary back when the heartbeat stops for
- * ten -- whether that is a clean exit, a crash, or a kill. */
+ * restore runs on the HOST: a detached shell holds on this process and puts the
+ * primary back when it ends -- whether that is a clean exit, a crash, or a kill.
+ *
+ * "Holds on" used to mean the age of a marker file, and that was the bug. File age
+ * cannot tell a DEAD game from a BUSY one, so any ten-second stall -- an autosave, a
+ * starved thread, a directory that briefly refused a write -- read as death and the
+ * shell moved the primary out from under a game that was still running. What the
+ * player sees of that is DirectDraw #150 and a crash, mid-map, with nothing visible
+ * on the desktop, because changing which output is primary blanks nothing.
+ *
+ * So the shell holds on the PID instead, and a stall is no longer fatal. Getting the
+ * pid took measuring, because the two obvious routes are both wrong here: $PPID
+ * inside a unix_sh() script is 1, the shell having been reparented before it runs,
+ * and Z:\proc\self resolves to WINESERVER rather than to the game. What does work is
+ * asking the kernel who holds the marker OPEN -- an open Win32 handle is a real fd on
+ * this process -- so the marker survives as the thing that identifies us, and the
+ * heartbeat that rewrites it survives as instrumentation and as the fallback rule for
+ * when the scan finds nothing. */
 static char g_xr_prev[64];
 static DWORD g_launch_w, g_launch_h;   /* mode adopted from the launch monitor */
 static char g_xr_marker_win[MAX_PATH];
 static char g_xr_marker_unix[MAX_PATH];
+static char g_xr_mode_win[MAX_PATH];    /* which rule the watchdog actually took */
+static char g_xr_mode_unix[MAX_PATH];
+/* <0 not yet read, 0 watchdog fell back to file age, >0 the pid it holds on. Read
+ * once by apply_monitor(); the heartbeat only reports it, so the log cannot claim a
+ * consequence that the running watchdog would not produce. */
+static int  g_hb_pid_guard = -1;
 
 /* THE HEARTBEAT CONTRACT, in one place because both halves of it live in this
  * file: this process rewrites the marker every HB_INTERVAL_MS, and the host
@@ -2226,7 +2247,7 @@ static int unix_sh(const char *script, int wait_ms)
 {
     STARTUPINFOA si;
     PROCESS_INFORMATION pi;
-    char cmd[MAX_PATH * 2], win[MAX_PATH], udir[MAX_PATH], body[MAX_PATH * 4];
+    char cmd[MAX_PATH * 2], win[MAX_PATH], udir[MAX_PATH], body[MAX_PATH * 13];
     static LONG seq;
     LONG n = InterlockedIncrement(&seq);
     HANDLE h;
@@ -2304,10 +2325,10 @@ static DWORD WINAPI heartbeat_thread(LPVOID p)
     DWORD last = GetTickCount();
     DWORD worst = 0;
     int wrote_once = 0, fired = 0, failing = 0;
+    HANDLE h = INVALID_HANDLE_VALUE;
     (void)p;
     for (;;) {
         DWORD gap = GetTickCount() - last;
-        HANDLE h;
 
         /* The watchdog's last act before it exits is `rm -f` on this marker, and
          * nothing else in the project ever removes it. So finding it gone is not
@@ -2327,12 +2348,25 @@ static DWORD WINAPI heartbeat_thread(LPVOID p)
             fired = 1;
         }
 
-        h = CreateFileA(g_xr_marker_win, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        /* Opened ONCE and held for the life of the process, which is the whole
+         * reason the host can identify us: the handle is a real fd on this process
+         * in /proc, so the watchdog resolves our pid by asking who holds the marker
+         * open. Closing it between beats, as this used to, would leave that scan a
+         * race it loses most of the time. Reopened only if a write ever fails. */
+        if (h == INVALID_HANDLE_VALUE)
+            h = CreateFileA(g_xr_marker_win, GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             DWORD wrote;
-            WriteFile(h, "alive\n", 6, &wrote, NULL);
-            CloseHandle(h);
+            /* Rewind and overwrite rather than append: the content is never read,
+             * only the mtime, and a file that grows all session is a slow leak. */
+            SetFilePointer(h, 0, NULL, FILE_BEGIN);
+            if (!WriteFile(h, "alive\n", 6, &wrote, NULL) || !FlushFileBuffers(h)) {
+                CloseHandle(h);
+                h = INVALID_HANDLE_VALUE;
+            }
+        }
+        if (h != INVALID_HANDLE_VALUE) {
             if (failing) {
                 logf_("  [display] heartbeat wrote again after %d failed attempt(s)",
                       failing);
@@ -2345,11 +2379,24 @@ static DWORD WINAPI heartbeat_thread(LPVOID p)
              * seconds for the length of a session. */
             if (gap > worst) {
                 worst = gap;
-                if (gap >= HB_WARN_MS)
-                    logf_("[!] [display] heartbeat stalled %lu ms (interval %d ms). At"
-                          " %d ms the host watchdog restores the primary underneath the"
-                          " running game and the next blit fails with #150.",
-                          (unsigned long)gap, HB_INTERVAL_MS, HB_STALE_MS);
+                if (gap >= HB_WARN_MS) {
+                    /* What a stall COSTS depends on which rule the watchdog took, so
+                     * ask rather than assert. Under the pid rule a stall is a health
+                     * reading and nothing more; only the fallback still turns one
+                     * into a display change and a #150. */
+                    if (g_hb_pid_guard > 0)
+                        logf_("[!] [display] heartbeat stalled %lu ms (interval %d ms)."
+                              " The watchdog is holding on pid %d, so this costs"
+                              " nothing -- it is a health reading, not a pending fault.",
+                              (unsigned long)gap, HB_INTERVAL_MS, g_hb_pid_guard);
+                    else
+                        logf_("[!] [display] heartbeat stalled %lu ms (interval %d ms)."
+                              " The watchdog could not identify this process and is"
+                              " holding on file age instead, so at %d ms it restores the"
+                              " primary underneath the running game and the next blit"
+                              " fails with #150.",
+                              (unsigned long)gap, HB_INTERVAL_MS, HB_STALE_MS);
+                }
             }
             last = GetTickCount();
         } else {
@@ -2358,10 +2405,14 @@ static DWORD WINAPI heartbeat_thread(LPVOID p)
              * an unwritable directory costs a few lines rather than thousands. */
             failing++;
             if (failing <= 3 || (failing % 30) == 0)
-                logf_("[x] [display] heartbeat could NOT write %s (error %lu, attempt %d)."
-                      " %d consecutive failures hand the primary back mid-run.",
+                logf_("[x] [display] heartbeat could NOT write %s (error %lu, attempt"
+                      " %d).%s",
                       g_xr_marker_unix, (unsigned long)GetLastError(), failing,
-                      HB_STALE_MS / HB_INTERVAL_MS);
+                      g_hb_pid_guard > 0
+                        ? " The watchdog is holding on this process's pid, so the"
+                          " primary is not at risk from it."
+                        : " The watchdog is holding on file age, so four in a row"
+                          " hand the primary back mid-run.");
         }
         Sleep(HB_INTERVAL_MS);
     }
@@ -3311,7 +3362,7 @@ static void choose_monitor(void)
  */
 static void apply_monitor(void)
 {
-    char script[MAX_PATH * 4], udir[MAX_PATH];
+    char script[MAX_PATH * 12], udir[MAX_PATH];
     if (!g_mon_pending) {
         /* Nothing to change for this run -- but a previous one may still owe the
          * player their primary back. Hand it back when the game closes, not
@@ -3330,21 +3381,51 @@ static void apply_monitor(void)
     snprintf(g_xr_prev, sizeof g_xr_prev, "%s", g_mon_from);
     snprintf(g_xr_marker_win, sizeof g_xr_marker_win, "%s\\tropico-primary.lock", g_dir);
     snprintf(g_xr_marker_unix, sizeof g_xr_marker_unix, "%s/tropico-primary.lock", udir);
+    snprintf(g_xr_mode_win,  sizeof g_xr_mode_win,  "%s\\tropico-primary.mode", g_dir);
+    snprintf(g_xr_mode_unix, sizeof g_xr_mode_unix, "%s/tropico-primary.mode", udir);
+    /* The thread must be holding the marker open BEFORE the script scans for whoever
+     * holds it -- that scan is what turns the marker into a pid. It writes on entry,
+     * so this wait is for the open, not for a beat. */
     CloseHandle(CreateThread(NULL, 0, heartbeat_thread, NULL, 0, NULL));
     Sleep(150);
 
-    snprintf(script, sizeof script,
+    if ((size_t)snprintf(script, sizeof script,
              "/usr/bin/xrandr --output %s --primary\n"
+             /* WHO HOLDS THE MARKER OPEN. That is this game process, and the kernel
+              * is the only thing here that knows: $PPID in this script is 1, and
+              * Z:\\proc\\self is wineserver. Both measured, both would have made the
+              * watchdog fire seconds into every run rather than never. wineserver
+              * holds the same file and outlives the game, so it is skipped by name.
+              * One find over /proc, ~17 ms, once per launch. */
+             "P=\n"
+             "for f in $(find /proc/[0-9]*/fd -maxdepth 1 -lname '%s'"
+             " -printf '%%p\\n' 2>/dev/null); do\n"
+             "q=${f#/proc/}; q=${q%%%%/*}\n"
+             "case $(cat /proc/$q/comm 2>/dev/null) in wineserver*) continue;; esac\n"
+             "P=$q; break\n"
+             "done\n"
+             "[ -n \"$P\" ] && { kill -0 \"$P\" 2>/dev/null || P=; }\n"
+             "echo \"${P:-mtime}\" > '%s'\n"
+             /* A pid that cannot be signalled is not a liveness test, so an
+              * unresolved scan drops to the old file-age rule rather than to a
+              * watchdog that fires immediately or one that never fires at all. */
              "( while [ -f '%s' ]; do\n"
-             "N=$(date +%%s); M=$(stat -c %%Y '%s' 2>/dev/null || echo 0)\n"
-             "[ $((N-M)) -ge %d ] && break\n"
+             "if [ -n \"$P\" ]; then kill -0 \"$P\" 2>/dev/null || break\n"
+             "else N=$(date +%%s); M=$(stat -c %%Y '%s' 2>/dev/null || echo 0)\n"
+             "[ $((N-M)) -ge %d ] && break; fi\n"
              "sleep %d\n"
              "done\n"
              "/usr/bin/xrandr --output %s --primary\n"
-             "rm -f '%s' ) &\n",
-             g_mon_to, g_xr_marker_unix, g_xr_marker_unix,
-             HB_STALE_MS / 1000, HB_INTERVAL_MS / 1000,
-             g_xr_prev, g_xr_marker_unix);
+             "rm -f '%s' '%s' ) &\n",
+             g_mon_to, g_xr_marker_unix, g_xr_mode_unix, g_xr_marker_unix,
+             g_xr_marker_unix, HB_STALE_MS / 1000, HB_INTERVAL_MS / 1000,
+             g_xr_prev, g_xr_marker_unix, g_xr_mode_unix) >= sizeof script) {
+        /* A truncated script is a watchdog with no restore in it. Say so and arm
+         * nothing rather than leave a half-written one running. */
+        logf_("[x] [display] the watchdog script did not fit -- NOT changing the"
+              " primary, because nothing would put it back");
+        return;
+    }
     if (unix_sh(script, 3000)) {
         int k;
         for (k = 0; k < 60; k++) {
@@ -3352,13 +3433,42 @@ static void apply_monitor(void)
                 (DWORD)GetSystemMetrics(SM_CYSCREEN) == g_mon_to_h) break;
             Sleep(100);
         }
-        logf_("[+] [display] primary %s -> %s; Wine now measures %dx%d. A host"
-              " watchdog restores %s when this process stops, crash included --"
-              " it fires once the heartbeat is %d ms stale, and this process"
-              " refreshes it every %d ms",
+        /* Which rule the watchdog took, read back from the watchdog rather than
+         * assumed from this side. The two differ in what a stall costs, and every
+         * later line about the heartbeat is worded from this value. */
+        for (k = 0; k < 20 && g_hb_pid_guard < 0; k++) {
+            char buf[64];
+            DWORD got = 0;
+            HANDLE h = CreateFileA(g_xr_mode_win, GENERIC_READ,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                                   OPEN_EXISTING, 0, NULL);
+            if (h != INVALID_HANDLE_VALUE) {
+                if (ReadFile(h, buf, sizeof buf - 1, &got, NULL) && got) {
+                    buf[got] = 0;
+                    g_hb_pid_guard = (buf[0] >= '0' && buf[0] <= '9') ? atoi(buf) : 0;
+                }
+                CloseHandle(h);
+            }
+            if (g_hb_pid_guard < 0) Sleep(100);
+        }
+        logf_("[+] [display] primary %s -> %s; Wine now measures %dx%d",
               g_xr_prev, g_mon_to, GetSystemMetrics(SM_CXSCREEN),
-              GetSystemMetrics(SM_CYSCREEN), g_xr_prev,
-              HB_STALE_MS, HB_INTERVAL_MS);
+              GetSystemMetrics(SM_CYSCREEN));
+        if (g_hb_pid_guard > 0)
+            logf_("  [display] a host watchdog restores %s when pid %d ends -- clean"
+                  " exit, crash or kill alike. It holds on the process itself, so a"
+                  " stalled frame or a failed marker write cannot move the display"
+                  " out from under the running game.", g_xr_prev, g_hb_pid_guard);
+        else
+            logf_("[!] [display] a host watchdog restores %s when this process stops,"
+                  " but it %s and is holding on marker age instead: it fires after"
+                  " %d ms without a beat, and this process beats every %d ms. A stall"
+                  " longer than that moves the display out from under the running"
+                  " game, and the next blit fails with #150.",
+                  g_xr_prev,
+                  g_hb_pid_guard == 0 ? "could not work out this process's host pid"
+                                      : "never reported which rule it took",
+                  HB_STALE_MS, HB_INTERVAL_MS);
     }
 }
 
