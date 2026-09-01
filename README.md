@@ -6,9 +6,7 @@ or in a small box in the corner.
 
 This patch runs it at your screen's real resolution: the world, the interface, the
 menus and the intro movie. It works on **Windows** and on **Linux**, with the **GOG**
-or **Steam** edition of the game.
-
-It is free, unofficial, and made by a fan. You need your own copy of Tropico.
+or **Steam** edition of the game. You need your own copy of Tropico.
 
 ---
 
@@ -20,7 +18,7 @@ Download the latest release from the
 ### Windows
 
 1. Find your Tropico folder. On Steam: right-click the game → Manage → Browse
-   local files. On GOG it is usually `C:\GOG Games\Tropico`, and the game itself
+   local files. On GOG it is wherever you downloaded it to, such as `C:\GOG Games\Tropico`, and the game itself
    sits in an `app` subfolder inside it — either is fine.
 2. Extract the zip **into that folder**.
 3. Double-click **`install.bat`**.
@@ -68,13 +66,11 @@ installer again.
 **"Hardware 3D is not available on this computer"** is deliberate. That renderer is
 broken on nearly every modern setup, and the game remembers the choice, so picking it
 could leave you stuck. The software renderer is the one you are already playing on, and
-a modern processor runs it without effort.
+a modern processor runs it without effort. If there is enough demand, I may try to restore it.
 
-**"DirectDraw Error #150" appears rarely**, and the game offers to continue. It is
-`DDERR_INVALIDRECT`: the 2001 game's error handler recognises two DirectDraw errors
-and shows a dialog for everything else, so this one reaches you. What brings it on is
-not yet understood — if you see it, what you were doing at the time is the useful part
-of a report.
+**"DirectDraw Error #150" appears rarely**, and the game may crash. It is a very common
+bug with modern displays because of how Tropico was designed to launch. I have tried to
+account for the most common areas, but it is recommended to save often to prevent loss of progress.
 
 ## Uninstall
 
@@ -92,7 +88,7 @@ the running game in memory. It never modifies `Tropico.EXE` or the game archives
 - `proxy/` — the C source of everything that ships
 - `tools/` — the Linux launcher, and the research scripts
 - `dev/` — the reverse-engineering notes behind every fix, and `dev/TESTING.md`
-  for how to test this without fooling yourself
+  for how to test this along with some notes I've compiled from my own tests.
 
 The build is reproducible, so you can check the DLL in the release against one you
 build yourself and expect an exact match (needs `mingw-w64`):
