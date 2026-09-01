@@ -11,7 +11,10 @@ builds its payload from an explicit list that does not include this directory.
 - `specs/` — design documents.
 - `probes/` — standalone probe programs, built by hand when a question needs one.
 - `logs/` — captured traces that FINDINGS.md cites as evidence.
-- `tools/` — the refactor verification harness.
+- `tools/` — three checks, each run on its own: `code-equivalent.sh` (do two
+  builds differ only in data?), `ini-doc-check.py` (does the shipped ini
+  advertise a key the code ignores?), `sections.py` (resolve a section banner
+  to a line range).
 - `WINDOWS-TRIP.bat` — the manual Windows test pass.
 
 ## Recovering deleted instruments
