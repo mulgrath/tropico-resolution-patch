@@ -1853,6 +1853,109 @@ static void fc_tick(void)
     memset(g_fc_hist, 0, sizeof g_fc_hist);
 }
 
+/* ------------------------------------------------- the DirectDraw failure watch
+ *
+ * WHY THIS EXISTS. #150 is DDERR_INVALIDRECT, and the engine's reporter at 0x52d500
+ * handles only DDERR_SURFACEBUSY and DDERR_SURFACELOST -- everything else becomes a
+ * modal dialog carrying a bare number and no cause. Four separate theories about
+ * what precedes that number have now been measured and none survived, which is what
+ * happens when you keep guessing at the run-up instead of looking at the call. This
+ * looks at the call: every Blt, BltFast and Lock is forwarded untouched, and the
+ * ones that FAIL are written down with the rectangle and the geometry they failed
+ * against.
+ *
+ * ALWAYS ON, and not behind an ini key. It costs one predictable branch on a path
+ * that already crosses into ddraw, it writes nothing unless a call has already
+ * failed, and a fault that only shows up in ordinary play over hours is no use to
+ * anyone if catching it first requires knowing to switch something on.
+ *
+ * The virtual-screen metrics are in the line on purpose. Wine renormalises the
+ * primary to (0,0), so making DP-3 primary puts the other head at NEGATIVE
+ * coordinates (s74.1), and s59 already records this blit path rejecting rects that
+ * touch a screen edge. If that is where #150 comes from, it is visible as the rect
+ * and the virtual origin disagreeing -- and if the rect turns out to be perfectly
+ * ordinary, that theory is dead too and the log says so. */
+static int      g_ddw_n;                   /* failures reported so far */
+static void    *g_ddw_vt[8];               /* vtables already hooked */
+static int      g_ddw_vtn;
+#define DDW_MAX 24                         /* then only every 100th */
+
+static HRESULT (WINAPI *g_real_bltfast)(IDirectDrawSurface7 *, DWORD, DWORD,
+                                        IDirectDrawSurface7 *, RECT *, DWORD);
+static HRESULT (WINAPI *g_real_lock)(IDirectDrawSurface7 *, RECT *, DDSURFACEDESC2 *,
+                                     DWORD, HANDLE);
+
+/* The names that matter here. Anything else is printed as its number, which is
+ * still better than what the dialog gives. */
+static const char *dd_hr_name(HRESULT hr)
+{
+    switch ((unsigned long)hr) {
+    case 0x88760096UL: return "DDERR_INVALIDRECT (the #150 dialog)";
+    case 0x88760082UL: return "DDERR_INVALIDPARAMS";
+    case 0x887601aeUL: return "DDERR_SURFACEBUSY";
+    case 0x887601c2UL: return "DDERR_SURFACELOST";
+    case 0x8876000eUL: return "DDERR_GENERIC";
+    case 0x88760154UL: return "DDERR_NOCLIPLIST";
+    case 0x887600e1UL: return "DDERR_UNSUPPORTED";
+    case 0x887601b0UL: return "DDERR_WASSTILLDRAWING";
+    default:           return "unnamed";
+    }
+}
+
+/* Dimensions straight from the surface at the moment it failed, rather than from
+ * anything remembered earlier -- a stale record is how a log ends up describing a
+ * surface the call was not made against. */
+static void dd_dims(IDirectDrawSurface7 *s, char *out, size_t cap)
+{
+    DDSURFACEDESC2 sd;
+    if (!s) { snprintf(out, cap, "none"); return; }
+    memset(&sd, 0, sizeof sd); sd.dwSize = sizeof sd;
+    if (IDirectDrawSurface7_GetSurfaceDesc(s, &sd) == DD_OK)
+        snprintf(out, cap, "%lux%lu %lubpp", (unsigned long)sd.dwWidth,
+                 (unsigned long)sd.dwHeight,
+                 (unsigned long)sd.ddpfPixelFormat.dwRGBBitCount);
+    else
+        snprintf(out, cap, "dimensions unavailable");
+}
+
+static void dd_rect(const RECT *r, char *out, size_t cap)
+{
+    if (!r) snprintf(out, cap, "NULL (the whole surface)");
+    else    snprintf(out, cap, "(%ld,%ld)-(%ld,%ld) %ldx%ld", r->left, r->top,
+                     r->right, r->bottom, r->right - r->left, r->bottom - r->top);
+}
+
+/* One report per failed call. Rate-limited because logf_ reopens the file every
+ * time: a surface that fails every frame would otherwise make the log the slowest
+ * thing in the process, and the first few carry the whole diagnosis anyway. */
+static void dd_fail(const char *call, HRESULT hr, IDirectDrawSurface7 *self,
+                    const RECT *dst, IDirectDrawSurface7 *src, const RECT *srcr,
+                    DWORD flags)
+{
+    char sd[64], ss[64], rd[96], rs[96];
+    g_ddw_n++;
+    if (g_ddw_n > DDW_MAX && (g_ddw_n % 100) != 0) return;
+
+    dd_dims(self, sd, sizeof sd);
+    dd_dims((IDirectDrawSurface7 *)src, ss, sizeof ss);
+    dd_rect(dst, rd, sizeof rd);
+    dd_rect(srcr, rs, sizeof rs);
+
+    logf_("[x] [dd] %s FAILED hr=0x%08lx %s  (failure %d)", call,
+          (unsigned long)hr, dd_hr_name(hr), g_ddw_n);
+    logf_("        dest surface %p %s%s   dest rect %s", (void *)self, sd,
+          self == g_fc_primary ? " [PRIMARY]" : "", rd);
+    logf_("        src  surface %p %s   src  rect %s   flags 0x%08lx",
+          (void *)src, ss, rs, (unsigned long)flags);
+    logf_("        screen %dx%d   virtual origin %d,%d size %dx%d   monitors %d",
+          GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
+          GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+          GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN),
+          GetSystemMetrics(SM_CMONITORS));
+    if (g_ddw_n == DDW_MAX)
+        logf_("        (that is %d failures; only every 100th is reported now)", DDW_MAX);
+}
+
 /* Two jobs, and only one of them touches anything.
  *
  * The frame counter counts: the arguments are not read and not rewritten, because a counter
@@ -1888,7 +1991,78 @@ static HRESULT WINAPI hook_Blt(IDirectDrawSurface7 *self, RECT *dst, IDirectDraw
             dst = &r;
         }
     }
-    return g_real_blt(self, dst, src, srcr, flags, fx);
+    {
+        HRESULT hr = g_real_blt(self, dst, src, srcr, flags, fx);
+        if (FAILED(hr)) dd_fail("Blt", hr, self, dst, src, srcr, flags);
+        return hr;
+    }
+}
+
+/* BltFast takes a destination POINT rather than a rect, so the rect it actually
+ * failed against is reconstructed from the source extent -- otherwise the log would
+ * show a corner and leave the reader to do the arithmetic that matters. */
+static HRESULT WINAPI hook_BltFast(IDirectDrawSurface7 *self, DWORD x, DWORD y,
+                                   IDirectDrawSurface7 *src, RECT *srcr, DWORD trans)
+{
+    HRESULT hr = g_real_bltfast(self, x, y, src, srcr, trans);
+    if (FAILED(hr)) {
+        RECT d;
+        d.left = (LONG)x; d.top = (LONG)y;
+        d.right  = (LONG)x + (srcr ? srcr->right  - srcr->left : 0);
+        d.bottom = (LONG)y + (srcr ? srcr->bottom - srcr->top   : 0);
+        dd_fail("BltFast", hr, self, srcr ? &d : NULL, src, srcr, trans);
+    }
+    return hr;
+}
+
+/* Lock is in here because the frame loop is Lock(offscreen) -> render -> Unlock ->
+ * Blt(primary), so a rectangle the engine got wrong can be refused at either end,
+ * and only one of those two would have been visible otherwise. */
+static HRESULT WINAPI hook_Lock(IDirectDrawSurface7 *self, RECT *dst,
+                                DDSURFACEDESC2 *desc, DWORD flags, HANDLE ev)
+{
+    HRESULT hr = g_real_lock(self, dst, desc, flags, ev);
+    if (FAILED(hr)) dd_fail("Lock", hr, self, dst, NULL, NULL, flags);
+    return hr;
+}
+
+/* ONE vtable, hooked once. ddraw shares a single IDirectDrawSurface7 vtable across
+ * every surface, so this covers the offscreen surface as well as the primary. If a
+ * second, different vtable ever turned up, hooking it too would overwrite the three
+ * "real" pointers with that vtable's originals and every forward through the first
+ * one would then go to the wrong function -- so a second vtable is reported and
+ * left alone rather than half-handled. */
+static void ddw_hook_vtable(IDirectDrawSurface7 *s)
+{
+    void *vt;
+    if (!s || !s->lpVtbl) return;
+    vt = (void *)s->lpVtbl;
+    if (g_ddw_vtn) {
+        if (g_ddw_vt[0] == vt) return;
+        if (g_ddw_vtn == 1) {
+            g_ddw_vtn = 2;
+            logf_("[!] [dd] a second surface vtable (%p) exists; only the first is"
+                  " watched, so failures on surfaces using it are not reported", vt);
+        }
+        return;
+    }
+    g_ddw_vt[0] = vt;
+    g_ddw_vtn = 1;
+    if (hook_slot((void **)&s->lpVtbl->Blt, (void *)hook_Blt, (void **)&g_real_blt) &&
+        hook_slot((void **)&s->lpVtbl->BltFast, (void *)hook_BltFast,
+                  (void **)&g_real_bltfast) &&
+        hook_slot((void **)&s->lpVtbl->Lock, (void *)hook_Lock, (void **)&g_real_lock)) {
+        logf_("[*] [dd] watching Blt, BltFast and Lock for FAILURES only -- every call"
+              " is forwarded untouched, and nothing is written unless one returns an"
+              " error. This is what turns a bare #150 into the call and the rectangle"
+              " that produced it.");
+    } else {
+        logf_("[x] [dd] could not hook the surface vtable -- DirectDraw failures will"
+              " not be reported, and #150 stays a bare number");
+        g_fc = 0;
+        g_devsel_xlate = 0;
+        g_ddw_vtn = 0;
+    }
 }
 
 /* Which surface the per-frame Blt will be aimed at -- the one thing both consumers
@@ -1902,8 +2076,14 @@ static HRESULT WINAPI hook_CreateSurface(IDirectDraw7 *self, DDSURFACEDESC2 *des
     DDSURFACEDESC2 sd;
     HRESULT hr = g_real_cs(self, desc, out, unk);
 
-    if ((!g_fc && !g_devsel_xlate) || g_fc_primary || hr != DD_OK || !desc || !out || !*out)
-        return hr;
+    if (hr != DD_OK || !desc || !out || !*out) return hr;
+
+    /* Before the primary-surface test, not after it: the failure watch wants the
+     * offscreen surface the engine Locks every frame just as much as the primary,
+     * and the vtable that carries both is reachable from whichever comes first. */
+    ddw_hook_vtable(*out);
+
+    if (g_fc_primary) return hr;
     if (!(desc->dwFlags & DDSD_CAPS) || !(desc->ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE))
         return hr;
 
@@ -1917,7 +2097,7 @@ static HRESULT WINAPI hook_CreateSurface(IDirectDraw7 *self, DDSURFACEDESC2 *des
     /* &lpVtbl->Blt, not vt[5]: the member is checked by the compiler against
      * ddraw.h, an index is a number I could miscount, and a wrong one would corrupt
      * an unrelated method. */
-    if (hook_slot((void **)&(*out)->lpVtbl->Blt, (void *)hook_Blt, (void **)&g_real_blt)) {
+    {
         if (g_fc)
             logf_("[+] [fps] counting frames on the primary %lux%lu %lubpp (%p)."
                   " A report follows every %d s.",
@@ -1927,12 +2107,6 @@ static HRESULT WINAPI hook_CreateSurface(IDirectDraw7 *self, DDSURFACEDESC2 *des
             logf_("[+] [dispsel] Blt hooked on the primary surface %lux%lu (%p) --"
                   " destinations will be translated into it.",
                   (unsigned long)g_fc_w, (unsigned long)g_fc_h, (void *)*out);
-    } else {
-        logf_("[x] [fps/devsel] could not hook Blt. Frame counting is off, and if"
-              " DeviceSelect is on the game will blit outside its surface and show"
-              " DirectDraw error #150 -- set [Display] DeviceSelect=0.");
-        g_fc = 0;
-        g_devsel_xlate = 0;
     }
     return hr;
 }
@@ -1943,7 +2117,9 @@ static HRESULT WINAPI hook_CreateSurface(IDirectDraw7 *self, DDSURFACEDESC2 *des
  * The cooperative level and both mode calls stay the game's own. */
 static void dd_attach(IDirectDraw7 *dd)
 {
-    if ((!g_fc && !g_devsel_xlate) || !dd || g_real_cs) return;
+    /* No longer gated on FrameCount or DeviceSelect. The failure watch wants this
+     * on every run, and this is the only code that ever sees the IDirectDraw7. */
+    if (!dd || g_real_cs) return;
 
     /* By member, not by index -- see the note in hook_CreateSurface. */
     if (!hook_slot((void **)&dd->lpVtbl->CreateSurface, (void *)hook_CreateSurface,
@@ -2051,7 +2227,11 @@ static void maybe_install_dispsel(void)
     if (g_fc)
         logf_("[*] [fps] frame counting armed, reporting every %d s. It intercepts"
               " nothing the game relies on; Blt is forwarded untouched.", g_fc_interval);
-    if (!g_fc && !g_devsel) return;
+    /* Was `if (!g_fc && !g_devsel) return;`, and that return is why no DirectDraw
+     * call was observed on Linux at all: DeviceSelect is force-disabled under Wine
+     * a few lines above and FrameCount defaults off, so both were always 0 here and
+     * the interception that finds the IDirectDraw7 was never installed. The failure
+     * watch needs it installed on every run. */
 
     if (!hook_import("KERNEL32.dll", "LoadLibraryA", (void *)hook_LoadLibraryA,
                      (void **)&g_dispsel_loadlib))
