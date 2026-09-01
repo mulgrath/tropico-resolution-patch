@@ -625,9 +625,102 @@ during that ladder drops exclusive mode between a rectangle being computed and t
 uses it, which is precisely how `DDERR_INVALIDRECT` arises. It would then be a pre-existing
 2001-era exclusive-fullscreen race, unrelated to §16.
 
-If it ever needs fixing, the cheap route is to make `0x52d500` swallow `DDERR_INVALIDRECT`
-the way it already swallows `DDERR_SURFACEBUSY` and `DDERR_SURFACELOST` — the dialog is
-the defect here, not the lost blit.
+~~If it ever needs fixing, the cheap route is to make `0x52d500` swallow
+`DDERR_INVALIDRECT` the way it already swallows `DDERR_SURFACEBUSY` and
+`DDERR_SURFACELOST` — the dialog is the defect here, not the lost blit.~~
+**Withdrawn 2026-09-01. That advice is wrong and would have made things worse; §17.3 has
+the measurement.**
+
+### 17.1 The call and the rectangle, at last — MEASURED 2026-09-01
+
+Every hypothesis above and below concerns what *precedes* the error. None of them ever
+looked at the failing call, because nothing could: `dd_attach()` and
+`maybe_install_dispsel()` were both gated on `!g_fc && !g_devsel`, and under Wine
+`DeviceSelect` is force-disabled a few lines above that test while `FrameCount` defaults
+off. **Both were always zero on Linux, so no DirectDraw call was ever observed in any
+Linux run.** That single early return is why `#150` stayed a bare number for months.
+
+With `Blt`/`BltFast`/`Lock` watched for failures only, the first induced failure said:
+
+```
+[x] [dd] Blt FAILED hr=0x88760096 DDERR_INVALIDRECT (the #150 dialog)  (failure 1)
+        dest surface 00f8abb0 2560x1440 16bpp [PRIMARY]   dest rect (1920,-360)-(4480,1080) 2560x1440
+        src  surface 00f873a0 2560x1440 16bpp   src  rect (0,0)-(2560,1440) 2560x1440   flags 0x01000000
+        screen 1920x1080   virtual origin 0,-360 size 4480x1440   monitors 2
+```
+
+**It is a `Blt`, not a `Lock`,** and the destination is **the right size at the wrong
+origin**: 2560x1440, matching the surface exactly, but placed at `(1920,-360)`. The only
+rect that surface accepts is `(0,0)-(2560,1440)`. The source rect is perfectly valid.
+
+### 17.2 Why the origin moves
+
+The engine addresses its primary surface in **screen space**, which is identical to
+surface space for exactly as long as that surface's monitor sits at the virtual desktop's
+origin. Move the primary and Wine renormalises (§74.1): the new primary becomes `(0,0)`
+and the game's own monitor is pushed elsewhere — negative, here — while the engine goes
+on adding an origin that changed underneath it. `virtual origin 0,-360` in the log is that
+renormalisation, and `(1920,-360)` is where DP-3 landed.
+
+Reproduced deliberately: with the game rendering a map on DP-3, `xrandr --output HDMI-A-5
+--primary` produces the above and the `#150` dialog. **It requires the game to be actively
+blitting** — the same command against an idle game did nothing at all, which is why a
+first attempt appeared not to reproduce.
+
+### 17.3 Both cheap fixes are wrong — MEASURED 2026-09-01
+
+**Correcting the rectangle was tried and reverted** (`62a0432`, reverted by `318ae82`).
+The shift was derived from the live monitor layout, the corrected destination was accepted,
+the game stayed alive and kept rendering at 108% CPU — **to a black screen**.
+
+The reason kills the swallow too. Losing the primary detaches the game's
+exclusive-fullscreen surface from the framebuffer that is actually scanned out. The
+surface object still reports 2560x1440 and still accepts blits, so putting the rectangle
+back inside it only gets DirectDraw to agree to a write nobody will ever see.
+**`DDERR_INVALIDRECT` here is not a bad rectangle. It is DirectDraw correctly reporting
+that the application no longer owns the display**, and it is the only notice the process
+gets. Suppressing it — by swallowing at `0x52d500` or by rewriting the rect — converts a
+loud, diagnosable failure into a silent one.
+
+**The rule this earns: do not silence a signal you have not replaced.** A modal dialog
+naming the fault is strictly better for the player than a black screen. It ranks with
+§75.3 — detect and adapt, do not overwrite and hope — except that here "adapt" has to mean
+restoring the *display*, not the coordinates.
+
+That leaves exactly two honest responses to a stolen primary: **prevent it** (§17.4), or
+**undo it** by putting the primary back on the game's monitor and letting that one frame
+fail. The second is unbuilt; it would need a retry cap so it cannot fight whatever moved
+the primary.
+
+### 17.4 What was actually fixed, and what is still open
+
+The only thing in this project that ever moved the primary out from under a running game
+was **its own watchdog**, and it did so on a bad signal: it decided the game had died by
+asking how old the marker file was, which cannot distinguish a DEAD game from a BUSY one.
+The watchdog is armed only when `choose_monitor()` reaches `g_mon_pending`, needing *both*
+no `TROPICO_LAUNCHER` (Steam's Play button, not `tools/tropico*`) *and* `chosen != prim` —
+which is exactly the Steam, multi-monitor, non-primary-head envelope the owner reports.
+
+Fixed in `481ea02` and `4bc09b5`: the watchdog now holds on the game's **pid**, and the
+pid is the sole authority. Getting that pid needed measuring, because both obvious routes
+are wrong under Wine — `$PPID` in a `unix_sh()` script is 1 (the shell is reparented before
+it runs, and `kill -0 1` fails with EPERM, so that version would have restored the primary
+within two seconds of *every* launch), and `Z:\proc\self` resolves to **wineserver**. What
+works is asking the kernel who holds the marker *open*: an open Win32 handle is a real fd
+on the game process. Confirmed under Proton in a live session.
+
+**STILL OPEN: the owner's in-game `#150` is not explained.** It arrives during ordinary
+play, with no transition, no visible cause, and no monitor change. Four display-layer
+hypotheses have now been refuted or left unsupported by measurement — compositor reclaim
+(§74 layers agree), menu→game transition (owner: no transition), heartbeat starvation
+(40 instrumented minutes, **zero** stalls past even the 6 s warning), and a `CREATE_ALWAYS`
+window in the marker (3615 polls against ~4000 cycles, zero misses; Wine truncates in
+place). The superseded `SetDisplayMode`-ladder hypothesis above belongs on that list too.
+
+The instrumentation is what closes this next. A natural failure now logs its own rect: a
+`dest rect` matching a monitor's screen-space rect with a non-zero `virtual origin` means
+the same displaced-origin mechanism and something still moving the primary; any other
+shape means a different cause, with coordinates instead of theories.
 
 ## 18. Multi-monitor: the game runs on one monitor and measures another — VERIFIED
 
@@ -10783,3 +10876,57 @@ negative result about the thing it reimplements -- and **s118.14** -- a probe th
 models the caller's capability but not the caller's arguments proves less than it
 appears to. Both are the gap between "the API supports this" and "this program
 does this."
+
+## 119. "Couldn't find called event": a stock scenario bug, not ours — VERIFIED
+
+Reported during ordinary play on 2026-09-01, in the campaign scenario **All Mine**, on
+choosing to buy the American mining equipment:
+
+```
+Event Error: Error executing event 'mine_off'.
+Description 'Couldnt't find called event'   Do you wish to continue?
+```
+
+`mine_off` exists; it is the offer dialog itself. What it *calls* does not. From
+`maps/all Mine.mp2`:
+
+```
+mine_off
+  Choice1Text   "...Yes, let us purchase this new mining technology."
+  Choice1Effect CallEvent fe_buyit          <-- calls this
+...
+mine_buy                                     <-- but the event is named this
+  CheckFrequencyOnlyWhenCalled
+  GeneralEffect AddTo MiningRate 25
+  GeneralEffect AddTo MiningPollution 500
+  GeneralEffect AddTo MiningMaintenance 50
+  GeneralEffect AddTo Money -5000
+```
+
+`fe_buyit` occurs **exactly once** in the file — as the call — and nowhere else in the
+entire install. The outcome event was authored as `mine_buy`; the call kept a stale name
+from an earlier draft.
+
+**Consequence for the player: the choice is a no-op.** `mine_buy` is
+`CheckFrequencyOnlyWhenCalled`, so with the call broken it never fires — no $5000 charged,
+no +25% yield, no pollution, no maintenance increase. Accepting and refusing leave
+identical game state. There is nothing to undo.
+
+**Not the patch.** Nothing in `proxy/` or `tools/` references `.mp2` at all, and the file's
+mtime sits in the install cluster (2026-08-19 00:01:33), untouched since. The patch
+corrects the running game in memory and has never written game data.
+
+The same pattern — a `CallEvent` target with no definition — appears in two other stock
+scenarios:
+
+| scenario | undefined call target |
+|---|---|
+| `all Mine.mp2` | `fe_buyit` |
+| `EcoTrop.MP2` | `nodrill` |
+| `PegLeg.mp2` | `test2`, `testmes` |
+
+`test2` and `testmes` are leftover debug names. PopTop shipped all of these.
+
+**Deliberately not fixed.** This patch is about resolution and does not write game data;
+repairing scenario scripts is a different product with a different risk profile. Recorded
+here so it is not re-investigated as a patch regression.
