@@ -3409,9 +3409,15 @@ static void apply_monitor(void)
              /* A pid that cannot be signalled is not a liveness test, so an
               * unresolved scan drops to the old file-age rule rather than to a
               * watchdog that fires immediately or one that never fires at all. */
-             "( while [ -f '%s' ]; do\n"
+             /* The pid is the ONLY authority when we have one. This used to keep
+              * 1.3's `while [ -f marker ]` as the loop condition, so anything that
+              * removed the marker -- for any reason, with the game alive and well --
+              * exited the loop and moved the player's display. The marker stays the
+              * abort flag ONLY on the fallback path, where it is all there is. */
+             "( while :; do\n"
              "if [ -n \"$P\" ]; then kill -0 \"$P\" 2>/dev/null || break\n"
-             "else N=$(date +%%s); M=$(stat -c %%Y '%s' 2>/dev/null || echo 0)\n"
+             "else [ -f '%s' ] || break\n"
+             "N=$(date +%%s); M=$(stat -c %%Y '%s' 2>/dev/null || echo 0)\n"
              "[ $((N-M)) -ge %d ] && break; fi\n"
              "sleep %d\n"
              "done\n"
