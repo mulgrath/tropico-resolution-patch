@@ -2093,6 +2093,23 @@ static DWORD g_launch_w, g_launch_h;   /* mode adopted from the launch monitor *
 static char g_xr_marker_win[MAX_PATH];
 static char g_xr_marker_unix[MAX_PATH];
 
+/* THE HEARTBEAT CONTRACT, in one place because both halves of it live in this
+ * file: this process rewrites the marker every HB_INTERVAL_MS, and the host
+ * watchdog spawned by apply_monitor() hands the primary back once that file is
+ * HB_STALE_MS old. The shell loop is formatted from these same two numbers, so
+ * the deadline the log quotes cannot drift from the one actually enforced.
+ *
+ * The margin is four missed beats, and nothing used to report whether any were
+ * being missed. A failed write and a starved thread both looked exactly like a
+ * healthy run, while their consequence -- the watchdog reconfiguring the display
+ * underneath a game that has already measured it -- reaches the player only as
+ * DirectDraw #150, which names no cause. HB_WARN_MS is the point where half that
+ * margin is spent: late enough to stay quiet on a good run, early enough to be
+ * in the log before the fault lands. */
+#define HB_INTERVAL_MS  2000
+#define HB_STALE_MS    10000
+#define HB_WARN_MS      6000
+
 /* The game directory as the host sees it. Z: is the host root, so this is g_dir
  * without the drive and with the slashes turned round. */
 static int game_unix_dir(char *out, size_t cap)
@@ -2284,16 +2301,69 @@ static int xrandr_query(char *buf, DWORD cap)
 
 static DWORD WINAPI heartbeat_thread(LPVOID p)
 {
+    DWORD last = GetTickCount();
+    DWORD worst = 0;
+    int wrote_once = 0, fired = 0, failing = 0;
     (void)p;
     for (;;) {
-        HANDLE h = CreateFileA(g_xr_marker_win, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        DWORD gap = GetTickCount() - last;
+        HANDLE h;
+
+        /* The watchdog's last act before it exits is `rm -f` on this marker, and
+         * nothing else in the project ever removes it. So finding it gone is not
+         * ambiguous: the restore has already run, the primary has moved, and this
+         * process is now painting with rectangles measured against a screen it no
+         * longer owns -- which is precisely the state DirectDraw answers with
+         * DDERR_INVALIDRECT. Say that in words, once, instead of leaving a bare
+         * #150 for someone to decode. */
+        if (wrote_once && !fired &&
+            GetFileAttributesA(g_xr_marker_win) == INVALID_FILE_ATTRIBUTES) {
+            logf_("[x] [display] the host watchdog has FIRED MID-RUN: %s is gone, so the"
+                  " primary has been handed back to %s while the game is still running."
+                  " The geometry the game measured no longer matches its window, which is"
+                  " how DirectDraw #150 arrives. Longest heartbeat gap seen was %lu ms,"
+                  " against a %d ms deadline.",
+                  g_xr_marker_unix, g_xr_prev, (unsigned long)worst, HB_STALE_MS);
+            fired = 1;
+        }
+
+        h = CreateFileA(g_xr_marker_win, GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             DWORD wrote;
             WriteFile(h, "alive\n", 6, &wrote, NULL);
             CloseHandle(h);
+            if (failing) {
+                logf_("  [display] heartbeat wrote again after %d failed attempt(s)",
+                      failing);
+                failing = 0;
+            }
+            wrote_once = 1;
+            /* Report a gap only when it is both unusual and worse than anything
+             * already reported. A healthy run stays silent, a run that came close
+             * says how close it came, and neither produces a line every two
+             * seconds for the length of a session. */
+            if (gap > worst) {
+                worst = gap;
+                if (gap >= HB_WARN_MS)
+                    logf_("[!] [display] heartbeat stalled %lu ms (interval %d ms). At"
+                          " %d ms the host watchdog restores the primary underneath the"
+                          " running game and the next blit fails with #150.",
+                          (unsigned long)gap, HB_INTERVAL_MS, HB_STALE_MS);
+            }
+            last = GetTickCount();
+        } else {
+            /* To the watchdog a write that fails is indistinguishable from a dead
+             * game, and this branch used to do nothing whatsoever. Rate-limited so
+             * an unwritable directory costs a few lines rather than thousands. */
+            failing++;
+            if (failing <= 3 || (failing % 30) == 0)
+                logf_("[x] [display] heartbeat could NOT write %s (error %lu, attempt %d)."
+                      " %d consecutive failures hand the primary back mid-run.",
+                      g_xr_marker_unix, (unsigned long)GetLastError(), failing,
+                      HB_STALE_MS / HB_INTERVAL_MS);
         }
-        Sleep(2000);
+        Sleep(HB_INTERVAL_MS);
     }
     return 0;
 }
@@ -3267,12 +3337,13 @@ static void apply_monitor(void)
              "/usr/bin/xrandr --output %s --primary\n"
              "( while [ -f '%s' ]; do\n"
              "N=$(date +%%s); M=$(stat -c %%Y '%s' 2>/dev/null || echo 0)\n"
-             "[ $((N-M)) -ge 10 ] && break\n"
-             "sleep 2\n"
+             "[ $((N-M)) -ge %d ] && break\n"
+             "sleep %d\n"
              "done\n"
              "/usr/bin/xrandr --output %s --primary\n"
              "rm -f '%s' ) &\n",
              g_mon_to, g_xr_marker_unix, g_xr_marker_unix,
+             HB_STALE_MS / 1000, HB_INTERVAL_MS / 1000,
              g_xr_prev, g_xr_marker_unix);
     if (unix_sh(script, 3000)) {
         int k;
@@ -3282,9 +3353,12 @@ static void apply_monitor(void)
             Sleep(100);
         }
         logf_("[+] [display] primary %s -> %s; Wine now measures %dx%d. A host"
-              " watchdog restores %s when this process stops, crash included",
+              " watchdog restores %s when this process stops, crash included --"
+              " it fires once the heartbeat is %d ms stale, and this process"
+              " refreshes it every %d ms",
               g_xr_prev, g_mon_to, GetSystemMetrics(SM_CXSCREEN),
-              GetSystemMetrics(SM_CYSCREEN), g_xr_prev);
+              GetSystemMetrics(SM_CYSCREEN), g_xr_prev,
+              HB_STALE_MS, HB_INTERVAL_MS);
     }
 }
 
