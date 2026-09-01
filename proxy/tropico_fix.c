@@ -1956,120 +1956,6 @@ static void dd_fail(const char *call, HRESULT hr, IDirectDrawSurface7 *self,
         logf_("        (that is %d failures; only every 100th is reported now)", DDW_MAX);
 }
 
-/* ------------------------------------------- putting a displaced rect back
- *
- * MEASURED, on the induced failure that first proved the watch works:
- *
- *   Blt FAILED DDERR_INVALIDRECT
- *     dest surface 2560x1440   dest rect (1920,-360)-(4480,1080) 2560x1440
- *     src  rect (0,0)-(2560,1440)      virtual origin 0,-360
- *
- * The destination is the RIGHT SIZE AT THE WRONG ORIGIN. The engine addresses its
- * primary surface in SCREEN space, which is identical to surface space for exactly
- * as long as the surface's monitor sits at the virtual desktop's origin. Move the
- * primary and Wine renormalises: the new primary becomes (0,0) and the game's own
- * monitor is pushed elsewhere -- negative, here -- while the engine goes on adding
- * an origin that has silently changed underneath it. Every edge of the result is
- * outside a 2560x1440 surface, so DirectDraw refuses it, and 0x52d500 has no case
- * for DDERR_INVALIDRECT so the player gets a modal dialog and loses the session.
- *
- * s75.3: when a value is owned by a layer below you, DETECT AND ADAPT -- do not
- * overwrite and hope. So the shift is worked out from the live monitor arrangement
- * every time, never from the numbers one setup happened to produce: the failing
- * rect is matched against the actual monitors, and the one whose screen-space rect
- * IS that rect names the origin the engine added. Any layout, any head, any
- * resolution, and a rearrangement mid-session re-derives rather than going stale. */
-static LONG g_ddfix_dx, g_ddfix_dy;   /* the shift last found to work */
-static int  g_ddfix_have;
-static int  g_ddfix_n;                /* corrections made this run */
-
-typedef struct { RECT want; LONG dx, dy; int found; } ddfix_scan_t;
-
-static BOOL CALLBACK ddfix_mon(HMONITOR h, HDC dc, LPRECT r, LPARAM lp)
-{
-    ddfix_scan_t *s = (ddfix_scan_t *)lp;
-    (void)h; (void)dc;
-    if (r->left == s->want.left && r->top == s->want.top &&
-        r->right == s->want.right && r->bottom == s->want.bottom) {
-        s->dx = r->left; s->dy = r->top; s->found = 1;
-        return FALSE;
-    }
-    return TRUE;
-}
-
-/* A destination DirectDraw would accept: inside the surface, and not inside out. */
-static int ddfix_fits(const RECT *r, DWORD w, DWORD h)
-{
-    return r->left >= 0 && r->top >= 0 && r->right > r->left && r->bottom > r->top &&
-           (DWORD)r->right <= w && (DWORD)r->bottom <= h;
-}
-
-static int ddfix_offset(const RECT *dst, DWORD w, DWORD h, LONG *dx, LONG *dy)
-{
-    ddfix_scan_t s;
-    /* The rect is some monitor's screen-space rect, so that monitor's origin is
-     * exactly what was added. Matched whole rather than by size, so a layout with
-     * two identical panels cannot pick the wrong one. */
-    s.want = *dst; s.dx = 0; s.dy = 0; s.found = 0;
-    EnumDisplayMonitors(NULL, NULL, ddfix_mon, (LPARAM)&s);
-    if (s.found) { *dx = s.dx; *dy = s.dy; return 1; }
-    /* No monitor matches -- but a full-surface blit displaced by its own corner is
-     * still unambiguous, because the only rect of that size the surface accepts is
-     * the one at (0,0). */
-    if ((DWORD)(dst->right - dst->left) == w && (DWORD)(dst->bottom - dst->top) == h) {
-        *dx = dst->left; *dy = dst->top; return 1;
-    }
-    return 0;
-}
-
-/* Returns DD_OK only if a corrected destination actually blitted. Every other path
- * returns failure and leaves the caller to report the original error, so a rect
- * this does not understand is never quietly redrawn somewhere of its choosing. */
-static HRESULT ddfix_retry(IDirectDrawSurface7 *self, RECT *dst, IDirectDrawSurface7 *src,
-                           RECT *srcr, DWORD flags, DDBLTFX *fx)
-{
-    DDSURFACEDESC2 sd;
-    RECT r;
-    LONG dx, dy;
-    HRESULT hr;
-
-    if (!self || !dst) return E_FAIL;
-    memset(&sd, 0, sizeof sd); sd.dwSize = sizeof sd;
-    if (IDirectDrawSurface7_GetSurfaceDesc(self, &sd) != DD_OK) return E_FAIL;
-    /* Already a legal rect? Then the refusal was about something else and moving it
-     * would be inventing a fix for a fault that was not diagnosed. */
-    if (ddfix_fits(dst, sd.dwWidth, sd.dwHeight)) return E_FAIL;
-
-    /* The shift does not change while the arrangement does not, so the steady state
-     * is arithmetic rather than an EnumDisplayMonitors per frame. */
-    if (g_ddfix_have) {
-        r = *dst;
-        OffsetRect(&r, -g_ddfix_dx, -g_ddfix_dy);
-        if (ddfix_fits(&r, sd.dwWidth, sd.dwHeight)) {
-            hr = g_real_blt(self, &r, src, srcr, flags, fx);
-            if (SUCCEEDED(hr)) { g_ddfix_n++; return hr; }
-        }
-        g_ddfix_have = 0;      /* stopped working: derive it again */
-    }
-
-    if (!ddfix_offset(dst, sd.dwWidth, sd.dwHeight, &dx, &dy)) return E_FAIL;
-    r = *dst;
-    OffsetRect(&r, -dx, -dy);
-    if (!ddfix_fits(&r, sd.dwWidth, sd.dwHeight)) return E_FAIL;
-    hr = g_real_blt(self, &r, src, srcr, flags, fx);
-    if (FAILED(hr)) return hr;
-
-    g_ddfix_dx = dx; g_ddfix_dy = dy; g_ddfix_have = 1; g_ddfix_n++;
-    logf_("[+] [dd] a refused destination was put back inside the surface: shift"
-          " %ld,%ld worked out from the live monitor layout, (%ld,%ld)-(%ld,%ld) ->"
-          " (%ld,%ld)-(%ld,%ld) on a %lux%lu surface. The frame landed; the game"
-          " keeps its session instead of a #150 dialog.",
-          dx, dy, dst->left, dst->top, dst->right, dst->bottom,
-          r.left, r.top, r.right, r.bottom,
-          (unsigned long)sd.dwWidth, (unsigned long)sd.dwHeight);
-    return hr;
-}
-
 /* Two jobs, and only one of them touches anything.
  *
  * The frame counter counts: the arguments are not read and not rewritten, because a counter
@@ -2107,16 +1993,7 @@ static HRESULT WINAPI hook_Blt(IDirectDrawSurface7 *self, RECT *dst, IDirectDraw
     }
     {
         HRESULT hr = g_real_blt(self, dst, src, srcr, flags, fx);
-        if (FAILED(hr)) {
-            /* Only this one error, and only after it has already been refused. A
-             * blit that succeeded is never touched, and every other failure is
-             * reported exactly as before rather than guessed at. */
-            if (hr == DDERR_INVALIDRECT) {
-                HRESULT again = ddfix_retry(self, dst, src, srcr, flags, fx);
-                if (SUCCEEDED(again)) return again;
-            }
-            dd_fail("Blt", hr, self, dst, src, srcr, flags);
-        }
+        if (FAILED(hr)) dd_fail("Blt", hr, self, dst, src, srcr, flags);
         return hr;
     }
 }
