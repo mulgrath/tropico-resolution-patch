@@ -70,6 +70,12 @@ broken on nearly every modern setup, and the game remembers the choice, so picki
 could leave you stuck. The software renderer is the one you are already playing on, and
 a modern processor runs it without effort.
 
+**"DirectDraw Error #150" appears rarely**, and the game offers to continue. It is
+`DDERR_INVALIDRECT`: the 2001 game's error handler recognises two DirectDraw errors
+and shows a dialog for everything else, so this one reaches you. What brings it on is
+not yet understood — if you see it, what you were doing at the time is the useful part
+of a report.
+
 ## Uninstall
 
 Double-click **`uninstall.bat`** (Windows) or run **`./uninstall.sh`** (Linux). It puts
