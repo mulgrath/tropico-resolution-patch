@@ -717,6 +717,12 @@ hypotheses have now been refuted or left unsupported by measurement — composit
 window in the marker (3615 polls against ~4000 cycles, zero misses; Wine truncates in
 place). The superseded `SetDisplayMode`-ladder hypothesis above belongs on that list too.
 
+**The watch has run on Windows** (owner, 2026-09-02, the 1.4 DLL `761e4756…` under Steam,
+launched from the non-primary 1920x1080 head with the 2560x1440 primary untouched). The
+log shows the watch installed after DeviceSelect's second `DirectDrawCreateEx`, no `[dd]`
+failure line in the session, and the game reached a map and played normally. That is the
+one change since 1.3 the Windows path had not seen, and it is now seen.
+
 The instrumentation is what closes this next. A natural failure now logs its own rect: a
 `dest rect` matching a monitor's screen-space rect with a non-zero `virtual origin` means
 the same displaced-origin mechanism and something still moving the primary; any other
@@ -10916,16 +10922,11 @@ identical game state. There is nothing to undo.
 mtime sits in the install cluster (2026-08-19 00:01:33), untouched since. The patch
 corrects the running game in memory and has never written game data.
 
-The same pattern — a `CallEvent` target with no definition — appears in two other stock
-scenarios:
-
-| scenario | undefined call target |
-|---|---|
-| `all Mine.mp2` | `fe_buyit` |
-| `EcoTrop.MP2` | `nodrill` |
-| `PegLeg.mp2` | `test2`, `testmes` |
-
-`test2` and `testmes` are leftover debug names. PopTop shipped all of these.
+A scan of every stock scenario for `CallEvent` targets with no definition found nothing
+else of the same kind. `EcoTrop.MP2` calls `nodrill` and defines `Nodrill`, a case
+difference the owner expects the engine to ignore, and `PegLeg.mp2` calls two leftover
+debug names, `test2` and `testmes`. Neither has been seen to fail in play, so neither is
+recorded as a defect. PopTop shipped the All Mine one.
 
 **Deliberately not fixed.** This patch is about resolution and does not write game data;
 repairing scenario scripts is a different product with a different risk profile. Recorded
