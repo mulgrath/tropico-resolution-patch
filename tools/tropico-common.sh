@@ -132,23 +132,31 @@ tropico_validate_mode() {
 # marker disagrees with the mode, so leaving it alone means the art is rebuilt exactly
 # when it needs to be and not on every launch.
 tropico_set_ini_mode() {
-  _gd="$1"; _w="$2"; _h="$3"
+  _gd="$1"; _w="$2"; _h="$3"; _who="${4:-launcher}"
   _ini="$_gd/tropico-fix.ini"
   [ -f "$_ini" ] || return 1
   _tmp="$(mktemp)"
-  # Drop any existing Width=/Height= -- commented out or not -- and write a fresh
-  # pair directly under [Resolution].
+  # Drop any existing Width=/Height= -- commented out or not -- and any ownership
+  # marker, and write a fresh set directly under [Resolution].
+  #
+  # THE MARKER IS HOW THE LAUNCHER TELLS ITS OWN WRITES FROM THE PLAYER'S. It
+  # carries the mode it wrote, so a player who changes the numbers underneath it has
+  # made the pair disagree, and tropico_ini_explicit_mode reads that as a setting of
+  # their own. A fourth argument of "explicit" writes no marker: the value is then
+  # the player's, whoever typed it (tropico-setmode.sh).
   #
   # The previous version matched /^Width=/ only, which was fine while the template
   # shipped the keys uncommented and became a silent no-op the moment it did not:
   # it rewrote nothing, changed nothing, and STILL RETURNED SUCCESS. That is the
   # step-6 bug exactly -- a 1080p game inside a 1440p desktop, with nothing in any
   # log to say the mode had never been written.
-  awk -v w="$_w" -v h="$_h" '
+  awk -v w="$_w" -v h="$_h" -v mark="$([ "$_who" = explicit ] || echo 1)" '
     /^[[:space:]]*[;#]?[[:space:]]*Width=/  { next }
     /^[[:space:]]*[;#]?[[:space:]]*Height=/ { next }
+    /^[[:space:]]*;[[:space:]]*launcher-set[[:space:]]/ { next }
     { print }
-    /^\[Resolution\]/ { print "Width=" w; print "Height=" h }' "$_ini" > "$_tmp"
+    /^\[Resolution\]/ { if (mark) print "; launcher-set " w "x" h " -- change the numbers below to choose your own";
+                        print "Width=" w; print "Height=" h }' "$_ini" > "$_tmp"
   # PROVE IT, in the bytes. This function failing quietly is invisible until the
   # game is already on screen at the wrong size, so do not trust the rewrite --
   # check it. A missing [Resolution] section lands here, and should.
@@ -157,6 +165,37 @@ tropico_set_ini_mode() {
   fi
   cat "$_tmp" > "$_ini"
   rm -f "$_tmp"
+}
+
+# The mode the PLAYER put in tropico-fix.ini, as WxH, or nothing. An explicit
+# setting beats the monitor's own mode, so the launcher has to know which of the two
+# the ini holds before it decides anything -- and it has to know without a game log,
+# because this runs before the game.
+#
+# Owned by the launcher: an uncommented pair that matches the "; launcher-set WxH"
+# marker above it. The player's: any uncommented pair that does not.
+#
+# LEGACY, ONE RULE: an ini from before the marker existed (1.4 and earlier) holds an
+# unmarked pair the launcher wrote on the last run. Treating that as the player's
+# would freeze the mode on the first monitor change after an upgrade, which is the
+# stale-ini bug this write exists to prevent. So an unmarked pair that equals a
+# connected monitor's mode is taken as the launcher's and re-marked on the next
+# write; anything else is the player's. The one case the rule misreads -- a player
+# who typed exactly their monitor's mode -- is the one case where being wrong
+# changes nothing.
+tropico_ini_explicit_mode() {
+  _ini="$1/tropico-fix.ini"
+  [ -f "$_ini" ] || return 1
+  _w="$(sed -n 's/^[[:space:]]*Width=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$_ini" | head -1)"
+  _h="$(sed -n 's/^[[:space:]]*Height=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$_ini" | head -1)"
+  [ -n "$_w" ] && [ -n "$_h" ] || return 1
+  _m="$(sed -n 's/^[[:space:]]*;[[:space:]]*launcher-set[[:space:]]*\([0-9][0-9]*x[0-9][0-9]*\).*/\1/p' "$_ini" | head -1)"
+  if [ -n "$_m" ]; then
+    [ "$_m" = "${_w}x${_h}" ] && return 1
+  elif tropico_connected_modes 2>/dev/null | grep -qx "${_w}x${_h}"; then
+    return 1
+  fi
+  echo "${_w}x${_h}"
 }
 
 

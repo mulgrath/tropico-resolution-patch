@@ -10958,3 +10958,60 @@ recorded as a defect. PopTop shipped the All Mine one.
 **Deliberately not fixed.** This patch is about resolution and does not write game data;
 repairing scenario scripts is a different product with a different risk profile. Recorded
 here so it is not re-investigated as a patch regression.
+
+## 120. An explicit `[Resolution]` beats an automatic mode, and the log names the loser
+
+**From user feedback, 2026-09-05.** The owner's rule: the two settings a player can
+reach, `[Resolution]` and `[Display] IgnoreScaling`, have to take effect or say why
+they did not. Silence that reads as a result is the failure.
+
+`IgnoreScaling` held up on inspection: it runs first in DllMain and nothing later
+touches awareness. `[Resolution]` did not, in two places.
+
+### 120.1 Windows with two monitors: never read
+
+`decide_mode()` took the launch monitor's mode first, the ini second. `DeviceSelect`
+and `FollowLaunchMonitor` are both on by default, so on any Windows desktop with two
+monitors the monitor's own mode was adopted and the ini was never consulted; the log
+said "running at DISPLAY2's own mode" and nothing else. On one monitor
+`choose_monitor()` exits early with no adopted mode, so the same ini worked there and
+stopped working the day a second monitor was plugged in.
+
+Order is now ini, launch monitor, picker. When the ini wins over an adopted mode the
+log says so; when the ini is refused, the refusal is already logged where it happens
+(`ini_fit_check()`, `ini_override()`), and `decide_mode()` adds what ran instead.
+Measured under Wine on this two-monitor desktop with `probes/loadproxy.c`: an explicit
+1440x900 wins over the 1920x1080 launch monitor, and an explicit 2560x1440 is refused
+with the reason and the fallback named.
+
+### 120.2 Linux: overwritten by the launcher
+
+`tools/tropico` rewrote `Width`/`Height` on every run with the monitor's mode, so the
+virtual desktop and the proxy would agree (the step-6 stale-ini bug). A pair the player
+typed was gone before the game started, and the ini's comment presented it as a setting.
+
+The launcher now marks its own writes -- `; launcher-set WxH` above the pair -- and
+`tropico_ini_explicit_mode` reads an unmarked pair, or a marked pair whose numbers no
+longer match the marker, as the player's. The launcher then sizes the virtual desktop to
+that mode when the monitor can hold it, and leaves the ini untouched when it cannot,
+with a line saying which. An ini from 1.4 or earlier holds an unmarked pair the old
+launcher wrote; that legacy case is taken as the launcher's when it equals a connected
+monitor's mode and as the player's otherwise. The one misread that rule allows -- a
+player who typed exactly their monitor's mode -- changes nothing.
+
+### 120.3 The wrong cause on a scaled desktop
+
+`ini_fit_check()` blamed every refusal on "started on one monitor and opened on
+another". On a scaled Windows desktop the real cause is scaling, and the advice sent
+the player to a monitor they do not have. The refusal now compares the adapter's real
+mode (`EnumDisplaySettings`, never virtualized) with the desktop the game is measured
+in: if the real mode would hold the configured one, the cause is scaling and the log
+names `IgnoreScaling=1`; otherwise it is placement, as before. Reasoned from the
+virtualization facts in §92, not yet seen on a scaled Windows desktop.
+
+### 120.4 What the game itself writes
+
+None of this touches what the game stores. `TROPICO.CFG` holds a slot *index*
+(§5, TESTING traps 2 and 4); the patch decides what slot 4 *is*. A player's
+`[Resolution]` changes the latter and the game's own settings the former, so the two
+cannot fight over the same value.

@@ -445,6 +445,8 @@ static const DWORD TABLE_SIG[10] = {640,480, 800,600, 1024,768, 1280,1024, 1600,
 #define WORLD_STOCK_W 1600
 
 typedef struct { DWORD w, h; } mode_t;
+static DWORD g_launch_w, g_launch_h;   /* mode adopted from the launch monitor */
+static char  g_launch_name[64];        /* that monitor's name, for the log     */
 static int launch_override(mode_t *m);   /* defined with the monitor code */
 static int running_under_wine(void);    /* ditto */
 static void launch_mode_check(int dw, int dh); /* ditto */
@@ -773,14 +775,23 @@ static int pick_mode(mode_t *out)
     return pick_mode_pass(out, !g_artgen_enabled);
 }
 
-/* Optional override so a user can force a mode without a rebuild. */
-static int ini_override(mode_t *m)
+/* What [Resolution] names, unjudged. Zero when it names nothing. */
+static int ini_named(UINT *w, UINT *h)
 {
     char path[MAX_PATH];
     snprintf(path, sizeof path, "%s\\tropico-fix.ini", g_dir);
-    UINT w = GetPrivateProfileIntA("Resolution", "Width",  0, path);
-    UINT h = GetPrivateProfileIntA("Resolution", "Height", 0, path);
-    if (!w || !h) return 0;
+    *w = GetPrivateProfileIntA("Resolution", "Width",  0, path);
+    *h = GetPrivateProfileIntA("Resolution", "Height", 0, path);
+    return *w && *h;
+}
+
+/* The player's own mode. Every refusal below, and the fit refusal in
+ * ini_fit_check(), is logged where it happens; decide_mode() only has to say what
+ * ran instead. */
+static int ini_override(mode_t *m)
+{
+    UINT w, h;
+    if (!ini_named(&w, &h)) return 0;
     if (g_ini_mode_unusable) return 0;   /* does not fit this screen -- see above */
     if (w % 4) { logf_("  ini: width %u is not a multiple of 4 -- ignoring (would shear)", w); return 0; }
     if (collides_with_stock(w)) { logf_("  ini: width %u collides with a stock slot -- ignoring (would be unreachable)", w); return 0; }
@@ -833,8 +844,26 @@ static void ini_fit_check(void)
     logf_("[x] CONFIGURED MODE DOES NOT FIT. tropico-fix.ini asks for %dx%d but the"
           " screen this is running on is %dx%d. The game would render nothing at"
           " all -- you would hear the intro over a black screen.", iw, ih, dw, dh);
-    logf_("    Cause: the game was started for one monitor and opened on another."
-          " Launch it from the monitor you want to play on.");
+    /* TWO CAUSES, TOLD APART BY THE ADAPTER. EnumDisplaySettings is not
+     * DPI-virtualized, so when the monitor's own mode would hold the configured one
+     * and differs from the desktop the game is measured in, the desktop is scaled,
+     * and the advice "launch from the other monitor" is wrong: there is no other
+     * monitor, and the key that fixes it is IgnoreScaling. */
+    {
+        DEVMODEA real; memset(&real, 0, sizeof real); real.dmSize = sizeof real;
+        int scaled = EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &real)
+                  && (int)real.dmPelsWidth >= iw && (int)real.dmPelsHeight >= ih
+                  && ((int)real.dmPelsWidth != dw || (int)real.dmPelsHeight != dh);
+        if (scaled)
+            logf_("    Cause: display scaling. The monitor's own mode is %lux%lu, which"
+                  " would hold %dx%d, but scaling makes the desktop %dx%d and the game is"
+                  " measured in that. Set [Display] IgnoreScaling=1 in tropico-fix.ini"
+                  " to play at the monitor's own size.",
+                  real.dmPelsWidth, real.dmPelsHeight, iw, ih, dw, dh);
+        else
+            logf_("    Cause: the game was started for one monitor and opened on another."
+                  " Launch it from the monitor you want to play on.");
+    }
     logf_("    Ignoring the configured mode and picking one that fits.");
     g_ini_mode_unusable = 1;
 }
@@ -858,11 +887,40 @@ static void ini_fit_check(void)
 static mode_t g_decided;
 static int    g_mode_decided;
 
+/* AN EXPLICIT SETTING BEATS AN AUTOMATIC ONE (2026-09-05). The launch monitor's
+ * mode used to be taken first, so on any Windows desktop with two monitors --
+ * DeviceSelect and FollowLaunchMonitor are both on by default -- a [Resolution] the
+ * player had typed was never read, and the log said "running at DISPLAY2's own mode"
+ * as if nothing had been asked. On one monitor the same ini worked, because the
+ * monitor step exits early there; the setting stopped working the day a second
+ * monitor was plugged in, with nothing to say so.
+ *
+ * Order now: the ini, then the launch monitor, then the picker -- and whichever
+ * automatic answer loses to the ini, or stands in for a refused one, is named. */
 static int decide_mode(mode_t *out)
 {
+    mode_t lm;
+    UINT iw, ih;
+    int have_launch, ini_set;
     if (g_mode_decided) { *out = g_decided; return 1; }
-    if (!launch_override(&g_decided) && !ini_override(&g_decided) && !pick_mode(&g_decided))
-        return 0;
+    have_launch = launch_override(&lm);
+    ini_set = ini_named(&iw, &ih);
+    if (ini_override(&g_decided)) {
+        if (have_launch && (lm.w != g_decided.w || lm.h != g_decided.h))
+            logf_("[+] [Resolution] %lux%lu from tropico-fix.ini wins over %s's own mode"
+                  " %lux%lu -- an explicit setting beats an automatic one",
+                  g_decided.w, g_decided.h, g_launch_name, lm.w, lm.h);
+    } else if (have_launch) {
+        if (ini_set)
+            logf_("[!] [Resolution] %ux%u was refused (the reason is above); running at"
+                  " %s's own mode %lux%lu instead", iw, ih, g_launch_name, lm.w, lm.h);
+        g_decided = lm;
+    } else {
+        if (!pick_mode(&g_decided)) return 0;
+        if (ini_set)
+            logf_("[!] [Resolution] %ux%u was refused (the reason is above); the picker"
+                  " chose %lux%lu instead", iw, ih, g_decided.w, g_decided.h);
+    }
     g_mode_decided = 1;
     *out = g_decided;
     return 1;
@@ -2341,7 +2399,6 @@ static void maybe_install_dispsel(void)
  * heartbeat that rewrites it survives as instrumentation and as the fallback rule for
  * when the scan finds nothing. */
 static char g_xr_prev[64];
-static DWORD g_launch_w, g_launch_h;   /* mode adopted from the launch monitor */
 static char g_xr_marker_win[MAX_PATH];
 static char g_xr_marker_unix[MAX_PATH];
 static char g_xr_mode_win[MAX_PATH];    /* which rule the watchdog actually took */
@@ -3513,6 +3570,7 @@ static void choose_monitor(void)
     if (GetPrivateProfileIntA("Display", "FollowLaunchMonitor", 1, ip)) {
         g_launch_w = outs[chosen].w;
         g_launch_h = outs[chosen].h;
+        snprintf(g_launch_name, sizeof g_launch_name, "%s", outs[chosen].name);
         logf_("[+] [display] running at %s's own mode %lux%lu", outs[chosen].name,
               (unsigned long)g_launch_w, (unsigned long)g_launch_h);
     }
@@ -5639,7 +5697,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
         g_artgen_enabled = GetPrivateProfileIntA("Art", "Generate", 1, ip);
         if (g_mon_pending) {
-            if (launch_override(&am)) ensure_art_for_mode(am.w, am.h);
+            /* The ini first, for the same reason decide_mode() reads it first: it is
+             * the mode the run will most likely end at. It cannot be fit-checked yet
+             * -- the screen is about to change -- and if it turns out not to fit, the
+             * patch pass regenerates for whatever stands in, as it always did. */
+            if (ini_override(&am) || launch_override(&am)) ensure_art_for_mode(am.w, am.h);
         } else {
             ini_fit_check();
             if (decide_mode(&am)) ensure_art_for_mode(am.w, am.h);

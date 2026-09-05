@@ -20,11 +20,15 @@ summary is repeated here.
 
 When the patch has decided which monitor to run on (see `DeviceSelect` and
 `SetPrimary` in the shipped ini), this key decides whether it also *adopts
-that monitor's own mode* rather than the ini's `[Resolution]` values or the
-primary's mode. On by default: it is the behaviour "run at the resolution of
-the screen you launched from," which is the whole point of the monitor
-selection above it. Set to `0` to keep the mode fixed while still picking
-the monitor.
+that monitor's own mode* rather than the primary's mode. On by default: it is
+the behaviour "run at the resolution of the screen you launched from," which
+is the whole point of the monitor selection above it. Set to `0` to keep the
+mode fixed while still picking the monitor.
+
+An explicit `[Resolution]` beats the adopted mode either way (since
+2026-09-05; before that the adopted mode was read first and a typed
+resolution was silently lost on any two-monitor Windows desktop). The log
+names whichever lost.
 
 ### `PinToPrimary` (default `1`)
 
