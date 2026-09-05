@@ -11044,3 +11044,11 @@ is the identity test: an empty old file reproduces the template byte for byte.
 
 Measured under Wine: the merge routine on a 1.4 ini with edited, added and unknown
 keys, and install.bat end to end against a fake game folder holding that ini.
+
+**Measured on a real install, 2026-09-05:** the Linux Steam folder, holding the 1.3
+package files, the 1.4 proxy and a default-valued ini, upgraded with the 1.5rc1 tarball
+and `./install.sh`. The original Bink and the executable were untouched, the merged ini
+was byte-identical to the 1.5 template (nothing customised to carry), and the next run
+through Steam rebuilt the art once, applied 18 patches with 0 failures, and restored the
+primary monitor on exit. The `[dpi]` and `[Resolution]` lines were correctly absent: the
+key was not set and the ini named no mode.
