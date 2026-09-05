@@ -56,6 +56,11 @@ On Windows, the game opens on whichever monitor you started it from too, at that
 monitor's own resolution — nothing to set, and by default your desktop's main display
 is never touched.
 
+**Windows display scaling** is respected. If Windows scales your desktop, say 200% on
+a 4K monitor, the game runs at the size Windows reports, 1920x1080 in that case, and
+the monitor shows it sharp at an exact 2x. To play at the monitor's full resolution
+regardless, set `IgnoreScaling=1` under `[Display]` in `tropico-fix.ini`.
+
 **Changing your resolution later** needs nothing from you. The patch checks the display
 every time the game starts.
 

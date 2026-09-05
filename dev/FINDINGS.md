@@ -6952,6 +6952,33 @@ that monitor's own logical size. Per-monitor awareness is the only thing that ge
 case right, and it is incompatible with the rule above. Rare, Windows-only, and named
 here so it is not rediscovered as a mystery.
 
+### 92.1 The rule gains an opt-out: `[Display] IgnoreScaling` (2026-09-05)
+
+The first user feedback on the released patch asked for exactly the thing the rule
+denies: a 4K panel at 200% that should play at 3840x2160, not at the 1920x1080 the
+desktop reports. The rule stays the default. What changed is that a player can now say
+otherwise, and the way to let them is the reverted `2b0248f` put back under a key.
+
+Why a key and not a relaxed check: writing 3840x2160 into `[Resolution]` is refused by
+`ini_fit_check()` against the logical `SM_CXSCREEN`, and even with that check gone the
+exe's own gate at `0x514d9d` would skip slot 4 against the logical `GetDeviceCaps`.
+Two checks read the same number, only one is ours, and the only thing that reaches
+both is making the process see physical pixels. `apply_ignore_scaling()` runs from
+`DllMain` before `choose_monitor()`, which is the first reader; awareness declared after
+a metric is read does not correct it retroactively.
+
+The runtime-divergence objection from the revert is answered by not calling anything
+under Wine or Proton: the key logs that it has nothing to do there and returns, since
+Linux already plays at the panel's real mode. `probes/loadproxy.c` loads the built DLL
+under Wine and confirms the wiring from the log alone: with the key set the `[dpi]` line
+appears, without it nothing about scaling is logged.
+
+**Not yet measured on Windows, and it gates calling this done:** the intro and menu run
+before exclusive fullscreen, and DPI awareness changes how a non-fullscreen window is
+presented on a scaled display. The 2026-08-23 commit named that as its outstanding test
+and was reverted before it ran. A native Windows pass at 200% on a 4K panel, with the
+key set, is the test: intro, menu, map load, and the art set generated for 3840x2160.
+
 ## 93. The C codec is 36x the Python and byte-exact — and the 30 s was never allocation churn
 
 The runtime-art-generation design rests on one estimate: that generating the UI art set

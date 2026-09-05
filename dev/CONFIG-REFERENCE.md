@@ -1,8 +1,8 @@
 # Config reference: keys not in the shipped ini
 
-`known-good/tropico-fix.ini` documents 13 keys (the ones a player might
-plausibly want to touch: resolution, which monitor, whether to force
-fullscreen, hardware 3D, art generation, the intro movie, and the top-level
+`known-good/tropico-fix.ini` documents 14 keys (the ones a player might
+plausibly want to touch: resolution, which monitor, whether to ignore display
+scaling, whether to force fullscreen, hardware 3D, art generation, the intro movie, and the top-level
 `Enable` switch for the world/text/vtext fixes). Every other key the code
 reads is documented here instead — support knobs, tuning dials, and one
 family of fixes that only *look* like probe leftovers.
