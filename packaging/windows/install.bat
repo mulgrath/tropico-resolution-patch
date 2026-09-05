@@ -156,16 +156,35 @@ if not "%ISZ%"=="%PSZ%" goto :err_verify
 echo   - installed binkw32.dll and verified it
 
 REM ---------------------------------------------------------------- the ini
-REM  Never overwritten. It holds the player's preferences, and an upgrade that
-REM  silently reset them would be a worse bug than anything it fixed.
-if exist "tropico-fix.ini" goto :ini_kept
+REM  Never reset. It holds the player's preferences, and an upgrade that silently
+REM  reset them would be a worse bug than anything it fixed. But never left
+REM  behind either: an upgrade that kept the old file verbatim hid every setting
+REM  the new version added, because the file that documents them was the one
+REM  the installer refused to touch. So an existing ini is carried INTO the new
+REM  template -- every uncommented setting kept, section by section, every new
+REM  key and comment arriving -- by upgrade-ini.bat. If that fails for any
+REM  reason the old file stays exactly as it was, and the message says so.
+if exist "tropico-fix.ini" goto :ini_upgrade
 copy /y "%SRC%\tropico-fix.ini" "tropico-fix.ini" >nul
 if errorlevel 1 goto :err_copy
 echo   - wrote tropico-fix.ini
 goto :ini_done
 
+:ini_upgrade
+if not exist "%SRC%\upgrade-ini.bat" goto :ini_kept
+if exist "tropico-fix.ini.new" del /q "tropico-fix.ini.new" >nul 2>&1
+call "%SRC%\upgrade-ini.bat" "tropico-fix.ini" "%SRC%\tropico-fix.ini" "tropico-fix.ini.new"
+if errorlevel 1 goto :ini_kept
+if not exist "tropico-fix.ini.new" goto :ini_kept
+move /y "tropico-fix.ini.new" "tropico-fix.ini" >nul
+if errorlevel 1 goto :ini_kept
+echo   - updated tropico-fix.ini; your settings were carried over, new options added
+goto :ini_done
+
 :ini_kept
-echo   - tropico-fix.ini already exists; your settings are kept
+if exist "tropico-fix.ini.new" del /q "tropico-fix.ini.new" >nul 2>&1
+echo   - tropico-fix.ini already exists; your settings are kept ^(the new
+echo     options could not be merged in -- see tropico-patch\tropico-fix.ini^)
 
 :ini_done
 

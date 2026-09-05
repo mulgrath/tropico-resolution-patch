@@ -199,6 +199,66 @@ tropico_ini_explicit_mode() {
 }
 
 
+# Carry a player's settings into a new ini template. Prints the merged file.
+#
+#   tropico_merge_ini OLD TEMPLATE > NEW
+#
+# AN UPGRADE MUST NOT RESET SETTINGS, AND MUST NOT HIDE NEW ONES EITHER. Keeping the
+# old file verbatim did the first and failed the second: a player who installed 1.4
+# never saw the keys 1.5 added, because the file that documents them was the one the
+# installer refused to touch. So the template is the shape and the old file supplies
+# the values: every uncommented Key=Value in the old file replaces the matching line
+# in the template, section by section (Enable means different things under
+# [WorldFix] and [Text]), and everything else in the template -- the comments, the
+# new keys -- comes through as written.
+#
+# Keys the template does not know (the support knobs in dev/CONFIG-REFERENCE.md) are
+# kept, INSIDE their section: Windows reads only the first section of a given name,
+# so a second [Display] at the end of the file would be ignored and the setting lost
+# without a word. Whole sections the template lacks are appended. The launcher's
+# ownership marker is a comment and is not carried; the legacy rule in
+# tropico_ini_explicit_mode covers the pair it used to label.
+#
+# CR is stripped on the way in: a file edited on Windows is CRLF.
+tropico_merge_ini() {
+  awk '
+    function secname(l) { sub(/^\[/, "", l); sub(/\].*/, "", l); return l }
+    function flush(sec,   k, v, hdr, line) {
+      if (!(sec in secs)) return
+      for (line = 1; line <= n[sec]; line++) {
+        k = ord[sec, line]
+        if ((sec SUBSEP k) in used) continue
+        if (!hdr) { print "; kept from your previous tropico-fix.ini"; hdr = 1 }
+        print k "=" old[sec SUBSEP k]
+        used[sec SUBSEP k] = 1
+      }
+    }
+    FILENAME == ARGV[1] {
+      # Not FNR == NR: an EMPTY old file has no records, so that test never turns
+      # false and the template is read as the old file. Measured, by the identity
+      # check (empty old file in, template out unchanged).
+      sub(/\r$/, "")
+      if ($0 ~ /^\[/) { s = secname($0); if (!(s in secs)) { secs[s] = 1; sord[++ns] = s }; next }
+      if (s == "" || $0 !~ /^[A-Za-z0-9_]+=/) next
+      k = $0; sub(/=.*/, "", k); v = $0; sub(/^[^=]*=/, "", v)
+      if (!((s SUBSEP k) in old)) { old[s SUBSEP k] = v; ord[s, ++n[s]] = k }
+      next
+    }
+    { sub(/\r$/, "") }
+    /^\[/ { flush(cur); cur = secname($0); seen[cur] = 1; print; next }
+    /^;?[A-Za-z0-9_]+=/ {
+      k = $0; sub(/^;/, "", k); sub(/=.*/, "", k)
+      if ((cur SUBSEP k) in old) { print k "=" old[cur SUBSEP k]; used[cur SUBSEP k] = 1; next }
+    }
+    { print }
+    END {
+      flush(cur)
+      for (i = 1; i <= ns; i++) if (!(sord[i] in seen)) { print ""; print "[" sord[i] "]"; flush(sord[i]) }
+    }
+  ' "$1" "$2"
+}
+
+
 # Connected outputs, one "NAME WxH primary|-" per line.
 tropico_outputs() {
   xrandr --query 2>/dev/null | awk '

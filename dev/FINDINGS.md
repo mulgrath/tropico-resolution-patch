@@ -11015,3 +11015,32 @@ None of this touches what the game stores. `TROPICO.CFG` holds a slot *index*
 (§5, TESTING traps 2 and 4); the patch decides what slot 4 *is*. A player's
 `[Resolution]` changes the latter and the game's own settings the former, so the two
 cannot fight over the same value.
+
+## 121. An upgrade carries the player's ini into the new template
+
+Both installers used to keep an existing `tropico-fix.ini` verbatim. That protected the
+player's settings and hid every key a new version added, because the file that
+documents the keys was the one the installer refused to touch. A 1.4 player upgrading
+to 1.5 would never have seen `IgnoreScaling` without reading the release notes.
+
+The template is now the shape and the old file supplies the values: every uncommented
+`Key=Value` in the old file replaces the matching line in the template, section by
+section (`Enable` under `[WorldFix]` and `[Text]` are different keys), and the
+template's comments and new keys come through as written. Keys the template does not
+know -- the support knobs in CONFIG-REFERENCE -- are kept inside their section, because
+Windows reads only the first section of a given name and a second `[Display]` at the
+end of the file would be ignored. Whole sections the template lacks are appended. If
+the merge fails for any reason the old file is left exactly as it was and the installer
+says so.
+
+Linux: `tropico_merge_ini` in `tropico-common.sh`, awk. Windows: `upgrade-ini.bat`,
+plain batch for the reason install.bat is. Two traps found by test:
+`FNR == NR` reads an empty old file as no file at all and consumes the template
+instead (fixed with `FILENAME == ARGV[1]`); and Wine's `findstr` does not implement
+`/n`, the usual way to stop `for /f` skipping `;` lines, so the batch reads with
+`eol=` set to a space and puts the blank lines `for /f` cannot keep back by rule --
+one before every header, one before a comment that follows a key. The proof for both
+is the identity test: an empty old file reproduces the template byte for byte.
+
+Measured under Wine: the merge routine on a 1.4 ini with edited, added and unknown
+keys, and install.bat end to end against a fake game folder holding that ini.
