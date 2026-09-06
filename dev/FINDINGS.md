@@ -11052,3 +11052,55 @@ was byte-identical to the 1.5 template (nothing customised to carry), and the ne
 through Steam rebuilt the art once, applied 18 patches with 0 failures, and restored the
 primary monitor on exit. The `[dpi]` and `[Resolution]` lines were correctly absent: the
 key was not set and the ini named no mode.
+
+## 122. One monitor adopts its own mode, the way the launch path does
+
+**From the Windows scaling test, 2026-09-05.** Five native runs on the two-monitor
+Windows install, with the primary at 125% for one of them, showed no effect from
+scaling with or without `IgnoreScaling`. The log says why: the launch-monitor path
+takes the mode from `EnumDisplaySettings`, which Windows never virtualizes, and the
+DllMain art pre-pass caches that answer through `decide_mode()` before
+`launch_mode_check()` runs. So at 125% the run logged `ADOPTED MODE DOES NOT FIT`
+against a 2048x1152 logical desktop and then wrote slot 4 as 2560x1440 anyway, and
+the game played at 2560x1440. The exe's own gate did not stop it. The §92 rule -- the
+mode follows the logical desktop -- was enforced only by the picker, and the picker
+runs only when no monitor is adopted.
+
+That is the single-monitor case, and it explains the report behind §92.1 without
+needing 200%: `choose_monitor()` returned early with one monitor, the picker filtered
+the adapter's real mode list against `SM_CXSCREEN`, and a 4K panel at 150% has a
+logical desktop of exactly 2560x1440. The same panel beside a second monitor took the
+launch path and played at 3840x2160. Two paths, opposite answers to scaling.
+
+### The change
+
+One monitor now adopts its own mode from `choose_monitor()`, under the same
+`FollowLaunchMonitor` key the launch path honours, and returns: it is the primary, so
+there is no device to substitute and no primary to move. The picker still runs with
+the key at `0`, and an explicit `[Resolution]` still wins over the adopted mode (§120).
+Making the launch path logical instead was rejected: DeviceSelect's Blt translation
+and the mixed-DPI gap in §92 both rest on physical numbers, and that path is the one
+that works today.
+
+Measured under Wine with `probes/loadproxy.c` from a non-`Z:` drive inside a
+1600x900 virtual desktop, so the host xrandr channel is skipped and Win32 reports one
+monitor: before, `one monitor ... nothing to choose` and two picker candidates;
+after, `running at \\.\DISPLAY1's own mode 1600x900` and the art pre-pass named
+it. The two-monitor run from `Z:` on this desktop is unchanged.
+
+### What this leaves
+
+* `launch_mode_check()` still blames "started on one monitor and opened on another"
+  when the real cause is scaling, and on one monitor that sentence names a monitor
+  the player does not have. It clears an adopted mode that `decide_mode()` has
+  already cached, so the message is wrong and the clearing is inert. Not changed
+  here; it wants the §120.3 treatment.
+* `IgnoreScaling` now matters only to an explicit `[Resolution]` wider than the
+  logical desktop. On the Steam install `SetProcessDpiAwarenessContext` failed with
+  error 5 (awareness already set before DllMain, likely by the overlay), and the
+  `SetProcessDPIAware` fallback reports success even when it changed nothing, so the
+  key is still unmeasured on Windows.
+* Not yet seen on a scaled single-monitor Windows desktop. The 125% two-monitor run
+  is the evidence that the physical mode plays; the single-monitor path now reuses
+  it, but has not itself been run.
+

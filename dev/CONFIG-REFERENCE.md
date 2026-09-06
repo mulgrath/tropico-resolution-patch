@@ -25,6 +25,11 @@ the behaviour "run at the resolution of the screen you launched from," which
 is the whole point of the monitor selection above it. Set to `0` to keep the
 mode fixed while still picking the monitor.
 
+With a single monitor the same thing happens: its own mode (as the adapter
+reports it, unaffected by Windows display scaling) is adopted. With the key at
+`0` the picker chooses instead, filtering against the desktop size Windows
+reports, which on a scaled desktop is smaller than the panel.
+
 An explicit `[Resolution]` beats the adopted mode either way (since
 2026-09-05; before that the adopted mode was read first and a typed
 resolution was silently lost on any two-monitor Windows desktop). The log

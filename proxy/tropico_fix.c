@@ -480,6 +480,13 @@ static void launch_mode_check(int dw, int dh); /* ditto */
  * panel yields a genuine 1080p signal the display upscales at an exact 2x, rather
  * than a composited stretch.
  *
+ * SUPERSEDED IN PRACTICE (2026-09-05, FINDINGS 122). The rule above was only ever
+ * enforced by the picker, and the picker runs only when no monitor is adopted. The
+ * launch-monitor path reads EnumDisplaySettings, which scaling does not touch, and
+ * one monitor now takes that path too. So the mode is the panel's own by default on
+ * every path; the logical desktop still gates an explicit [Resolution] in
+ * ini_fit_check(), and that is what the key below lifts.
+ *
  * KNOWN GAP: a mixed-DPI multi-monitor Windows setup (4K laptop at 200% beside a
  * 1080p external at 100%) applies the SYSTEM dpi uniformly, so the numbers for the
  * monitor that is not at system DPI are neither physical nor that monitor's own
@@ -588,9 +595,10 @@ static void log_environment(void)
                   " the line above by the display scaling, which is expected)",
                   real.dmPelsWidth, real.dmPelsHeight);
             if (mw && real.dmPelsWidth && (DWORD)mw != real.dmPelsWidth)
-                logf_("  display scaling is about %d%%; the patch follows the logical size,"
-                      " which is the resolution the user asked for ([Display] IgnoreScaling=1"
-                      " in tropico-fix.ini plays at the panel's own size instead)",
+                logf_("  display scaling is about %d%%; the mode still comes from the"
+                      " monitor's own settings, which scaling does not change. Only a"
+                      " [Resolution] wider than the scaled desktop is refused by it"
+                      " ([Display] IgnoreScaling=1 in tropico-fix.ini lifts that)",
                       (int)((real.dmPelsWidth * 100 + mw / 2) / mw));
         }
     }
@@ -3492,9 +3500,26 @@ static void choose_monitor(void)
     for (i = 0; i < n; i++) if (outs[i].primary) prim = i;
     if (prim < 0) { logf_("  [display] xrandr reports no primary output -- leaving it alone"); return; }
 
+    /* ONE MONITOR IS THE LAUNCH MONITOR. This used to return with nothing adopted,
+     * leaving the mode to the picker, which filters against the LOGICAL desktop --
+     * so a 4K panel at 150% ran at 2560x1440 while the same panel beside a second
+     * monitor took the launch path below and ran at its own 3840x2160 (FINDINGS
+     * 92, 122). The two paths now answer alike: the monitor's own mode, read from
+     * EnumDisplaySettings, which scaling does not touch. Nothing else here applies
+     * to one monitor: it is the primary, so there is no device to substitute and no
+     * primary to move. */
     if (n == 1) {
-        logf_("  [display] one monitor (%s, %lux%lu) -- nothing to choose",
-              outs[0].name, (unsigned long)outs[0].w, (unsigned long)outs[0].h);
+        if (GetPrivateProfileIntA("Display", "FollowLaunchMonitor", 1, ip)) {
+            g_launch_w = outs[0].w;
+            g_launch_h = outs[0].h;
+            snprintf(g_launch_name, sizeof g_launch_name, "%s", outs[0].name);
+            logf_("[+] [display] one monitor -- running at %s's own mode %lux%lu",
+                  outs[0].name, (unsigned long)g_launch_w, (unsigned long)g_launch_h);
+        } else {
+            logf_("  [display] one monitor (%s, %lux%lu); FollowLaunchMonitor=0, so its"
+                  " mode is not adopted -- the picker chooses", outs[0].name,
+                  (unsigned long)outs[0].w, (unsigned long)outs[0].h);
+        }
         return;
     }
 
