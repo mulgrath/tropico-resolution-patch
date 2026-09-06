@@ -453,100 +453,27 @@ static void launch_mode_check(int dw, int dh); /* ditto */
 
 /* ------------------------------------------------------- display scaling (DPI)
  *
- * THE PATCH IS DPI-UNAWARE BY DEFAULT. The awareness call below runs only when
- * `[Display] IgnoreScaling=1` asks for it; with the key absent there is no call at
- * all, and this comment exists so that absence reads as a decision rather than an
- * oversight, because it looks exactly like the omission it used to be.
+ * THE PATCH IS DPI-UNAWARE, AND MAKES NO AWARENESS CALL. `Tropico.EXE` carries no
+ * DPI manifest, so on Windows the desktop size it is told is the scaled one; the
+ * game plays at whatever size the display reports, on every path (the launch
+ * monitor's mode from EnumDisplaySettings when one is adopted, the picker's bound
+ * from SM_CXSCREEN otherwise), and nothing here tries to second-guess scaling.
  *
- * `Tropico.EXE` carries no DPI manifest, so on Windows every geometry it is told is
- * the LOGICAL (scaled) desktop size rather than the panel's physical one: a 3840x2160
- * panel at 200% reports 1920x1080. An earlier revision treated that as a bug and
- * declared per-monitor awareness to get the physical number back. That was reverted.
+ * HISTORY, so the absence reads as a decision. A per-monitor awareness call was
+ * added (2b0248f), reverted (FINDINGS 92), brought back under `[Display]
+ * IgnoreScaling` (92.1), joined by a scaled-units conversion of the adopted mode
+ * (FINDINGS 124), and all of it removed on 2026-09-06 (FINDINGS 125) after the
+ * Windows runs: the awareness call was never measured to change the mode, no
+ * scaling setting produced a working mode by itself, and the one thing that did
+ * work was a typed [Resolution] the monitor lists -- which ini_fit_check() now
+ * judges by the adapter's mode list and keeps. That is the whole mechanism: want
+ * a size, type it.
  *
- * WHY. The scaling setting is the resolution the user ASKED FOR, and honouring it is
- * the whole point. 200% on a 4K panel means "give me a 1920x1080 desktop", so the game
- * runs at 1920x1080. 50% on a 1080p panel means "give me 3840x2160", and the game runs
- * at 3840x2160 -- softer, and still what was asked for. One rule, both directions,
- * and it is the same rule on Wine, on Proton and on Windows.
- *
- * The defect that prompted the awareness call was real but was a DISAGREEMENT, not a
- * wrong number: the installer measured the PHYSICAL panel and staged art for
- * 3840x2160 while the proxy measured the LOGICAL desktop and saw 1920x1080, so the
- * configured mode was rejected, no staged set matched, and the run fell through to the
- * stock art caps at ~1400x1050. Resolved by making the installer measure logically
- * too, so both ends agree.
- *
- * DirectDraw mode setting is not DPI-virtualized, so asking for 1920x1080 on a 4K
- * panel yields a genuine 1080p signal the display upscales at an exact 2x, rather
- * than a composited stretch.
- *
- * SUPERSEDED IN PRACTICE (2026-09-05, FINDINGS 122). The rule above was only ever
- * enforced by the picker, and the picker runs only when no monitor is adopted. The
- * launch-monitor path reads EnumDisplaySettings, which scaling does not touch, and
- * one monitor now takes that path too. So the mode is the panel's own by default on
- * every path; the logical desktop still gates an explicit [Resolution] in
- * ini_fit_check(), and that is what the key below lifts.
- *
- * KNOWN GAP: a mixed-DPI multi-monitor Windows setup (4K laptop at 200% beside a
- * 1080p external at 100%) applies the SYSTEM dpi uniformly, so the numbers for the
- * monitor that is not at system DPI are neither physical nor that monitor's own
- * logical size. Per-monitor awareness is the only thing that gets that case right,
- * and it is incompatible with the rule above. Recorded, not solved by default;
- * `IgnoreScaling=1` is the way out of it.
- *
- * THE OPT-OUT (2026-09-05, from user feedback). A 4K panel at 200% is, under the
- * rule above, a request for 1920x1080 -- and a player who wants the game at the
- * panel's own 3840x2160 anyway has no way to say so: writing it into [Resolution]
- * is refused by ini_fit_check() against the logical SM_CXSCREEN, and the exe's own
- * gate at 0x514d9d would skip slot 4 against the logical GetDeviceCaps even if we
- * let it through. Two checks, one wrong number, and only one of them is ours. So
- * relaxing our check is not a fix; the mechanism that fits is to make the whole
- * process see physical pixels, which is the reverted 2b0248f under a key: one call
- * from DllMain, before anything measures anything, and every site in the chain --
- * ours, the exe's, the art generator's -- agrees without any other code changing.
- *
- * Windows only, deliberately. Linux already plays at the panel's real mode
- * (tools/tropico measures with xrandr after the primary switch, and Wine
- * virtualizes nothing -- FINDINGS 92), so there the key has nothing to do. It is
- * skipped under Wine rather than allowed to run, because the modern call fails
- * with 87 on system wine 9.0 and succeeds under Proton, and two Linux runtimes
- * taking different paths through a no-op is how unreproducible reports get made.
+ * KNOWN GAP, recorded: a mixed-DPI multi-monitor Windows setup applies the SYSTEM
+ * dpi uniformly to an unaware process, so a monitor not at system DPI reports a
+ * size that is neither physical nor its own logical one. Typing the resolution
+ * covers it.
  */
-static void apply_ignore_scaling(void)
-{
-    char ip[MAX_PATH];
-    snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-    if (!GetPrivateProfileIntA("Display", "IgnoreScaling", 0, ip)) return;
-
-    if (running_under_wine()) {
-        logf_("[*] [dpi] IgnoreScaling=1 does nothing under Wine or Proton -- Linux"
-              " already plays at the panel's real mode");
-        return;
-    }
-
-    HMODULE u32 = GetModuleHandleA("user32.dll");
-    typedef BOOL (WINAPI *SPDAC_t)(HANDLE);
-    SPDAC_t spdac = u32 ? (SPDAC_t)(void *)GetProcAddress(u32, "SetProcessDpiAwarenessContext") : NULL;
-
-    /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4. Per-monitor rather
-     * than system-aware because the game can be started on one monitor and opened on
-     * another, and the real numbers are wanted for whichever it lands on. */
-    if (spdac && spdac((HANDLE)-4)) {
-        logf_("[+] [dpi] IgnoreScaling=1: SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)"
-              " -- the game is measured in the panel's own pixels, not the scaled desktop");
-        return;
-    }
-    if (spdac)
-        logf_("[*] [dpi] SetProcessDpiAwarenessContext failed (%lu); falling back", GetLastError());
-    else
-        logf_("[*] [dpi] SetProcessDpiAwarenessContext not exported (pre-1703 Windows); falling back");
-    if (SetProcessDPIAware())
-        logf_("[+] [dpi] IgnoreScaling=1: SetProcessDPIAware -- the game is measured in the"
-              " panel's own pixels, not the scaled desktop");
-    else
-        logf_("[x] [dpi] IgnoreScaling=1 but no awareness call succeeded -- the scaled"
-              " desktop size is what the game will be given");
-}
 
 /* ------------------------------------------------------------- diagnostics
  *
@@ -595,10 +522,9 @@ static void log_environment(void)
                   " the line above by the display scaling, which is expected)",
                   real.dmPelsWidth, real.dmPelsHeight);
             if (mw && real.dmPelsWidth && (DWORD)mw != real.dmPelsWidth)
-                logf_("  display scaling is about %d%%; the mode still comes from the"
-                      " monitor's own settings, which scaling does not change. Only a"
-                      " [Resolution] wider than the scaled desktop is refused by it"
-                      " ([Display] IgnoreScaling=1 in tropico-fix.ini lifts that)",
+                logf_("  display scaling is about %d%%; to play at a particular size, type it"
+                      " under [Resolution] in tropico-fix.ini -- a size the monitor lists"
+                      " is always kept",
                       (int)((real.dmPelsWidth * 100 + mw / 2) / mw));
         }
     }
@@ -839,7 +765,51 @@ static void ini_fit_check(void)
     snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
     iw = GetPrivateProfileIntA("Resolution", "Width",  0, ip);
     ih = GetPrivateProfileIntA("Resolution", "Height", 0, ip);
-    if (!(iw && ih && dw && dh && (iw > dw || ih > dh))) return;
+    if (!(iw && ih && dw && dh)) return;
+
+    /* A TYPED MODE IS JUDGED AGAINST THE ADAPTER'S MODE LIST, NOT THE DESKTOP.
+     * On Windows the desktop the game is measured in is the SCALED one, and a 4K
+     * panel at 150% reports 2560x1440 -- so a typed 3840x2160, which the panel
+     * plays perfectly well (DirectDraw mode setting is never DPI-virtualized), was
+     * refused here as "does not fit". That was the report behind FINDINGS 124: a
+     * valid resolution that simply did not apply. The mode list is not virtualized,
+     * so it says exactly what the panel can do, without any awareness call.
+     *
+     * Under Wine the list is whatever the X screen or virtual desktop allows, and
+     * the two numbers agree, so the desktop comparison below is kept there as the
+     * exact check it always was. */
+    if (!running_under_wine()) {
+        DEVMODEA dm; DWORD i, mw = 0, mh = 0;
+        /* The monitor the game will open on when one has been chosen (win32_outputs
+         * names them as \\.\DISPLAYn, which EnumDisplaySettings takes directly);
+         * the primary otherwise. */
+        const char *dev = g_launch_name[0] ? g_launch_name : NULL;
+        for (i = 0; ; i++) {
+            memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+            if (!EnumDisplaySettingsA(dev, i, &dm)) break;
+            if ((int)dm.dmPelsWidth == iw && (int)dm.dmPelsHeight == ih) {
+                if (iw > dw || ih > dh)
+                    logf_("[+] [Resolution] %dx%d is larger than the desktop Windows reports"
+                          " (%dx%d) but the monitor lists it as a mode -- accepted as typed",
+                          iw, ih, dw, dh);
+                return;
+            }
+            if (dm.dmPelsWidth > mw) mw = dm.dmPelsWidth;
+            if (dm.dmPelsHeight > mh) mh = dm.dmPelsHeight;
+        }
+        if (i > 0) {
+            logf_("[x] CONFIGURED MODE IS NOT ONE THIS MONITOR HAS. tropico-fix.ini asks for"
+                  " %dx%d, and the monitor lists nothing of that size (its largest is"
+                  " %lux%lu). Asking for it anyway would render nothing at all -- you"
+                  " would hear the intro over a black screen.", iw, ih,
+                  (unsigned long)mw, (unsigned long)mh);
+            logf_("    Ignoring the configured mode and picking one that fits.");
+            g_ini_mode_unusable = 1;
+            return;
+        }
+        /* No mode list at all: fall through to the desktop comparison. */
+    }
+    if (!(iw > dw || ih > dh)) return;
 
     /* THE MODE MUST FIT THE SCREEN IT WILL RUN ON. When it does not, the game asks
      * for a mode larger than its desktop and renders NOTHING -- the intro audio
@@ -856,17 +826,15 @@ static void ini_fit_check(void)
      * DPI-virtualized, so when the monitor's own mode would hold the configured one
      * and differs from the desktop the game is measured in, the desktop is scaled,
      * and the advice "launch from the other monitor" is wrong: there is no other
-     * monitor, and the key that fixes it is IgnoreScaling. */
+     * monitor. (Wine only: on Windows the mode list above has already answered.) */
     {
         DEVMODEA real; memset(&real, 0, sizeof real); real.dmSize = sizeof real;
         int scaled = EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &real)
                   && (int)real.dmPelsWidth >= iw && (int)real.dmPelsHeight >= ih
                   && ((int)real.dmPelsWidth != dw || (int)real.dmPelsHeight != dh);
         if (scaled)
-            logf_("    Cause: display scaling. The monitor's own mode is %lux%lu, which"
-                  " would hold %dx%d, but scaling makes the desktop %dx%d and the game is"
-                  " measured in that. Set [Display] IgnoreScaling=1 in tropico-fix.ini"
-                  " to play at the monitor's own size.",
+            logf_("    Cause: the adapter's mode is %lux%lu, which would hold %dx%d, but"
+                  " the desktop the game gets is %dx%d.",
                   real.dmPelsWidth, real.dmPelsHeight, iw, ih, dw, dh);
         else
             logf_("    Cause: the game was started for one monitor and opened on another."
@@ -3504,10 +3472,10 @@ static void choose_monitor(void)
      * leaving the mode to the picker, which filters against the LOGICAL desktop --
      * so a 4K panel at 150% ran at 2560x1440 while the same panel beside a second
      * monitor took the launch path below and ran at its own 3840x2160 (FINDINGS
-     * 92, 122). The two paths now answer alike: the monitor's own mode, read from
-     * EnumDisplaySettings, which scaling does not touch. Nothing else here applies
-     * to one monitor: it is the primary, so there is no device to substitute and no
-     * primary to move. */
+     * 92, 122). The two paths now answer alike: the monitor's own mode as the
+     * adapter reports it (FINDINGS 125). Nothing else here applies to one monitor:
+     * it is the primary, so there is no device to substitute and no primary to
+     * move. */
     if (n == 1) {
         if (GetPrivateProfileIntA("Display", "FollowLaunchMonitor", 1, ip)) {
             g_launch_w = outs[0].w;
@@ -5666,12 +5634,6 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         logf_("[*] TROPICO_FIX_DISABLE=1 -- forwarding Bink only, applying NOTHING (control run)");
         return TRUE;
     }
-
-    /* BEFORE ANY MEASUREMENT. Awareness declared after a metric has been read does
-     * not correct it retroactively, and choose_monitor() below is the first reader.
-     * After the control-run return above: a control run applies nothing, and
-     * process-wide DPI awareness is something. */
-    apply_ignore_scaling();
 
     /* For the same reason, and one of its own -- the game resolves
      * DirectDraw at 0x514e55, which is early. Installed only when

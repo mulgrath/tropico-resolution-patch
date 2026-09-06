@@ -25,64 +25,19 @@ the behaviour "run at the resolution of the screen you launched from," which
 is the whole point of the monitor selection above it. Set to `0` to keep the
 mode fixed while still picking the monitor.
 
-With a single monitor the same thing happens: its own mode (as the adapter
-reports it, unaffected by Windows display scaling) is adopted. With the key at
-`0` the picker chooses instead, filtering against the desktop size Windows
-reports, which on a scaled desktop is smaller than the panel.
+With a single monitor the same thing happens: its mode is adopted. With the key at
+`0` the picker chooses instead.
+
+On Windows with display scaling, the default mode is whatever size the display
+reports to a DPI-unaware process; nothing in the patch adjusts for scaling
+(FINDINGS 125). A player who wants a particular size types it under
+`[Resolution]`, which is judged against the monitor's mode list, never the
+desktop size, so it applies with scaling on.
 
 An explicit `[Resolution]` beats the adopted mode either way (since
 2026-09-05; before that the adopted mode was read first and a typed
 resolution was silently lost on any two-monitor Windows desktop). The log
 names whichever lost.
-
-### `PinToPrimary` (default `1`)
-
-Watches for the game window after creation and keeps it on the monitor Wine
-measures. On by default because the failure it prevents — `DDERR_INVALIDRECT`
-— is a DirectDraw error code with no obvious cause from the outside
-(FINDINGS 74). Turning it off should only matter if the watcher itself is
-ever suspected of causing a problem, which has not happened.
-
-### The `SetPrimary` trade-off (moved here from the shipped ini)
-
-This is the reasoning that used to sit under `[Display] SetPrimary=1` in
-`known-good/tropico-fix.ini`. It is preserved here in full because `DeviceSelect`
-(documented in the shipped ini) is the better answer for the same problem —
-this section explains why `SetPrimary` still exists and what it costs the
-one time it is the only option.
-
-`SetPrimary=1` plays on the monitor you launch from, instead of on your
-primary one. It is off by default on Windows; on by default under Wine. It
-does nothing on a single monitor, and nothing when `tools/tropico` launched
-the game — that already chose.
-
-Tropico's fullscreen always goes to whichever monitor is primary, so reaching
-another one means making it primary for the length of the game and handing
-it back afterwards. That is a change to **your computer** rather than to the
-game, and the two platforms can undo it to very different standards.
-
-On Linux the restore runs *outside* the game: a watchdog on a heartbeat, or
-the launcher's own exit trap. Neither cares how the game ended — a crash and
-a clean quit look the same to them — and the primary is runtime state your
-desktop re-sets at login anyway, so even losing the watchdog heals itself.
-That is why it stays on by default there (FINDINGS 90, 99).
-
-On Windows there is nothing outside the process to restore it — this package
-ships no helper program — and the change is written into the saved display
-configuration, so it **survives a reboot**. A crash, or ending the game from
-Task Manager, can leave the primary monitor moved with nothing left running
-to connect it to. `tropico-primary.state` next to `Tropico.EXE` is the
-backstop and puts it back at the next launch; Windows' own Display settings
-undo it at any time.
-
-Turn it on only if that trade is acceptable. Otherwise the game opens on the
-primary monitor, at that monitor's resolution, which is what `DeviceSelect`
-is for (FINDINGS 113.8).
-
-`SetPrimary` gates the whole choice of monitor: with it off, `Monitor` and
-`FollowLaunchMonitor` do nothing — they say *which* monitor; `SetPrimary` is
-what allows a monitor other than the primary to be reached at all when
-`DeviceSelect` is not being used.
 
 ## `[Menu]`
 

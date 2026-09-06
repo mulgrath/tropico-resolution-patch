@@ -11168,3 +11168,105 @@ by the same glob, untested. Japanese and Chinese are charset 3 and route through
 the double-byte renderer; out of scope. The one shape that would still break is a
 pack that ships its fonts as loose files in `data\`, which the generator overwrites
 by name; none is known to exist.
+
+## 124. Scaling, settled: the scaled desktop by default, the panel with the key, and a typed mode is judged by the mode list
+
+**The report.** A player with a 4K panel at 150% on Windows got 2560x1440, wanted
+3840x2160, and typing it under `[Resolution]` did nothing. The owner's rule, restated
+2026-09-06: by default the game plays at the scaled desktop size on every platform;
+`IgnoreScaling=1` plays at the panel's own resolution; and a typed resolution the
+monitor supports must apply.
+
+**What §122 had done** (commit 971e174, the same day this was written) was the
+reverse: every path adopted the panel's own mode by default, and the key only lifted
+the refusal of a typed mode. It is superseded here, and the memory note that
+recorded it is rewritten.
+
+**Why the typed mode was refused.** `ini_fit_check()` compared 3840x2160 with the
+scaled `SM_CXSCREEN` desktop, 2560x1440, and discarded it. The check guards a real
+failure -- a mode larger than the screen the game gets renders nothing -- measured
+under a Wine virtual desktop, where the screen truly is the smaller number. On native
+Windows the panel is 3840x2160 and DirectDraw mode setting is never DPI-virtualized,
+so the refusal was a false positive.
+
+### The change
+
+* `ini_fit_check()` on Windows judges a typed mode against the adapter's mode list
+  from `EnumDisplaySettings(NULL, i)`, which a DPI-unaware process still reads
+  unvirtualized (§122's 125% run measured it). Listed: accepted, and the log says so
+  when it exceeds the scaled desktop. Not listed: refused, naming the largest mode.
+  Under Wine the old desktop comparison stays, as the exact check it always was.
+* `to_play_units()` converts an adopted monitor's mode into the units the game will
+  be given -- divided by the primary's scale factor, width kept a multiple of 4 --
+  unless the key is set. Both adoption sites in `choose_monitor()` use it, so one
+  and two monitors answer alike, in the scaled direction this time.
+* A scaled size is adopted only when the adapter LISTS it as a mode. The game sets
+  its mode through DirectDraw, which takes only listed modes, and a scaled size
+  usually is not one: 2560x1440 at 125% is 2048x1152, at 150% it is 1707x960
+  (Windows rounds the logical width to 1707; `to_play_units()` trims it to 1704).
+  When the size is not listed, `mode_listed()` says so in the log and the launch
+  mode is dropped, so the picker chooses the largest listed mode that fits the
+  scaled desktop -- 1920x1080 and 1600x900 respectively on a typical adapter. A
+  4K panel at 150% is the clean case: 2560x1440 is listed and adopted as is.
+* `play_screen()` is the bound the picker, `launch_mode_check()` and the
+  smaller-than-screen note all use: the scaled desktop, or the panel with the key.
+* `apply_ignore_scaling()` still tries the awareness call first; its failure now
+  only changes a log line, since the helpers read the adapter directly.
+
+### Why #150 is not invited
+
+A typed mode the monitor lists is a mode the panel plays. #150 comes from a window
+landing on a monitor Wine did not measure or at negative coordinates, in the
+compositing path, which this does not touch. A too-large mode fails as a black
+screen, and the mode-list check still prevents it.
+
+### Measured, and not
+
+Under Wine the two sizes are one number, so nothing here can be exercised on Linux
+beyond wiring: `probes/loadproxy.c` shows the log lines, and the rig at 2560x1440
+still refuses a typed 3840x2160 and keeps a typed 2560x1440. The owner's Linux
+observation -- a 1080p panel at 50% under COSMIC/Xwayland plays at 3840x2160 -- is
+the rule working in the opposite direction, since Xwayland presents the scaled
+size to Wine. `xrandr --scale` is refused under Xwayland (BadValue on the CRTC
+transform), so the launcher cannot unscale an output; `cosmic-randr` could, on
+COSMIC only, and is not done.
+
+**Gate, per the undertested-issues rule:** a native Windows run on the dual-boot
+with the 1440p monitor at 125% or 150%: default plays the scaled size, the key
+plays 2560x1440, and a typed 2560x1440 is kept. Not run yet.
+
+## 125. The Windows scaling runs: nothing but a typed resolution did anything, so that is the mechanism
+
+**Owner's Windows pass on the 1.5rc2 package, 2026-09-06**, on the dual-boot with the
+1440p monitor (no 4K panel to hand, so the report's exact case is untestable here).
+
+* No scaling setting changed the mode the game ran at. With the desktop at 125% or
+  150%, the runs did not produce a working size that differed from 100%; the owner
+  could not get scaling to change the resolution at all.
+* `IgnoreScaling=1` "didn't seem to do much of anything".
+* A typed `[Resolution]` worked. 2560x1440 applied, and even 3840x2160 typed on the
+  1440p monitor was listed in the F2 menu and "mostly worked" in game -- so the
+  adapter lists a 4K mode for that panel (GPU-side scaling), and the mode-list
+  check of §124 accepted it, as designed.
+
+The reading of the report behind §124 is therefore: a 4K panel at 150% reports a
+1920x1080 desktop, which happens to be a listed mode, so the game ran at it; typing
+3840x2160 was refused by the old desktop comparison; the mode-list check fixes
+exactly that, and nothing else in §124 was shown to matter.
+
+### Decision (owner)
+
+* `[Resolution]` is authoritative: a typed size the monitor lists always applies,
+  on Windows (mode list) and Linux (the launcher writes it, and the desktop
+  comparison under Wine stays as the black-screen guard).
+* `IgnoreScaling` is removed -- the key, the awareness call, the scaled-units
+  conversion and the listed-mode adoption logic of §124. Asking the player to set a
+  key on top of "type the resolution you want" was confusing, and the key was never
+  measured to do anything. The README says: want a size, type it.
+* The default path is left as §122 built it: an adopted launch monitor plays at the
+  mode the adapter reports, the picker bounds against `SM_CXSCREEN` otherwise. What
+  Windows reports under scaling is Windows' business; the log still prints both
+  numbers and the scaling percentage so a report can be read.
+
+§124's design is superseded by this the same day; its mode-list check is the part
+that survives. The memory note on the scaling rule is rewritten to match.
