@@ -132,23 +132,31 @@ tropico_validate_mode() {
 # marker disagrees with the mode, so leaving it alone means the art is rebuilt exactly
 # when it needs to be and not on every launch.
 tropico_set_ini_mode() {
-  _gd="$1"; _w="$2"; _h="$3"
+  _gd="$1"; _w="$2"; _h="$3"; _who="${4:-launcher}"
   _ini="$_gd/tropico-fix.ini"
   [ -f "$_ini" ] || return 1
   _tmp="$(mktemp)"
-  # Drop any existing Width=/Height= -- commented out or not -- and write a fresh
-  # pair directly under [Resolution].
+  # Drop any existing Width=/Height= -- commented out or not -- and any ownership
+  # marker, and write a fresh set directly under [Resolution].
+  #
+  # THE MARKER IS HOW THE LAUNCHER TELLS ITS OWN WRITES FROM THE PLAYER'S. It
+  # carries the mode it wrote, so a player who changes the numbers underneath it has
+  # made the pair disagree, and tropico_ini_explicit_mode reads that as a setting of
+  # their own. A fourth argument of "explicit" writes no marker: the value is then
+  # the player's, whoever typed it (tropico-setmode.sh).
   #
   # The previous version matched /^Width=/ only, which was fine while the template
   # shipped the keys uncommented and became a silent no-op the moment it did not:
   # it rewrote nothing, changed nothing, and STILL RETURNED SUCCESS. That is the
   # step-6 bug exactly -- a 1080p game inside a 1440p desktop, with nothing in any
   # log to say the mode had never been written.
-  awk -v w="$_w" -v h="$_h" '
+  awk -v w="$_w" -v h="$_h" -v mark="$([ "$_who" = explicit ] || echo 1)" '
     /^[[:space:]]*[;#]?[[:space:]]*Width=/  { next }
     /^[[:space:]]*[;#]?[[:space:]]*Height=/ { next }
+    /^[[:space:]]*;[[:space:]]*launcher-set[[:space:]]/ { next }
     { print }
-    /^\[Resolution\]/ { print "Width=" w; print "Height=" h }' "$_ini" > "$_tmp"
+    /^\[Resolution\]/ { if (mark) print "; launcher-set " w "x" h " -- change the numbers below to choose your own";
+                        print "Width=" w; print "Height=" h }' "$_ini" > "$_tmp"
   # PROVE IT, in the bytes. This function failing quietly is invisible until the
   # game is already on screen at the wrong size, so do not trust the rewrite --
   # check it. A missing [Resolution] section lands here, and should.
@@ -157,6 +165,97 @@ tropico_set_ini_mode() {
   fi
   cat "$_tmp" > "$_ini"
   rm -f "$_tmp"
+}
+
+# The mode the PLAYER put in tropico-fix.ini, as WxH, or nothing. An explicit
+# setting beats the monitor's own mode, so the launcher has to know which of the two
+# the ini holds before it decides anything -- and it has to know without a game log,
+# because this runs before the game.
+#
+# Owned by the launcher: an uncommented pair that matches the "; launcher-set WxH"
+# marker above it. The player's: any uncommented pair that does not.
+#
+# LEGACY, ONE RULE: an ini from before the marker existed (1.4 and earlier) holds an
+# unmarked pair the launcher wrote on the last run. Treating that as the player's
+# would freeze the mode on the first monitor change after an upgrade, which is the
+# stale-ini bug this write exists to prevent. So an unmarked pair that equals a
+# connected monitor's mode is taken as the launcher's and re-marked on the next
+# write; anything else is the player's. The one case the rule misreads -- a player
+# who typed exactly their monitor's mode -- is the one case where being wrong
+# changes nothing.
+tropico_ini_explicit_mode() {
+  _ini="$1/tropico-fix.ini"
+  [ -f "$_ini" ] || return 1
+  _w="$(sed -n 's/^[[:space:]]*Width=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$_ini" | head -1)"
+  _h="$(sed -n 's/^[[:space:]]*Height=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$_ini" | head -1)"
+  [ -n "$_w" ] && [ -n "$_h" ] || return 1
+  _m="$(sed -n 's/^[[:space:]]*;[[:space:]]*launcher-set[[:space:]]*\([0-9][0-9]*x[0-9][0-9]*\).*/\1/p' "$_ini" | head -1)"
+  if [ -n "$_m" ]; then
+    [ "$_m" = "${_w}x${_h}" ] && return 1
+  elif tropico_connected_modes 2>/dev/null | grep -qx "${_w}x${_h}"; then
+    return 1
+  fi
+  echo "${_w}x${_h}"
+}
+
+
+# Carry a player's settings into a new ini template. Prints the merged file.
+#
+#   tropico_merge_ini OLD TEMPLATE > NEW
+#
+# AN UPGRADE MUST NOT RESET SETTINGS, AND MUST NOT HIDE NEW ONES EITHER. Keeping the
+# old file verbatim did the first and failed the second: a player who installed 1.4
+# never saw the keys 1.5 added, because the file that documents them was the one the
+# installer refused to touch. So the template is the shape and the old file supplies
+# the values: every uncommented Key=Value in the old file replaces the matching line
+# in the template, section by section (Enable means different things under
+# [WorldFix] and [Text]), and everything else in the template -- the comments, the
+# new keys -- comes through as written.
+#
+# Keys the template does not know (the support knobs in dev/CONFIG-REFERENCE.md) are
+# kept, INSIDE their section: Windows reads only the first section of a given name,
+# so a second [Display] at the end of the file would be ignored and the setting lost
+# without a word. Whole sections the template lacks are appended. The launcher's
+# ownership marker is a comment and is not carried; the legacy rule in
+# tropico_ini_explicit_mode covers the pair it used to label.
+#
+# CR is stripped on the way in: a file edited on Windows is CRLF.
+tropico_merge_ini() {
+  awk '
+    function secname(l) { sub(/^\[/, "", l); sub(/\].*/, "", l); return l }
+    function flush(sec,   k, v, hdr, line) {
+      if (!(sec in secs)) return
+      for (line = 1; line <= n[sec]; line++) {
+        k = ord[sec, line]
+        if ((sec SUBSEP k) in used) continue
+        if (!hdr) { print "; kept from your previous tropico-fix.ini"; hdr = 1 }
+        print k "=" old[sec SUBSEP k]
+        used[sec SUBSEP k] = 1
+      }
+    }
+    FILENAME == ARGV[1] {
+      # Not FNR == NR: an EMPTY old file has no records, so that test never turns
+      # false and the template is read as the old file. Measured, by the identity
+      # check (empty old file in, template out unchanged).
+      sub(/\r$/, "")
+      if ($0 ~ /^\[/) { s = secname($0); if (!(s in secs)) { secs[s] = 1; sord[++ns] = s }; next }
+      if (s == "" || $0 !~ /^[A-Za-z0-9_]+=/) next
+      k = $0; sub(/=.*/, "", k); v = $0; sub(/^[^=]*=/, "", v)
+      if (!((s SUBSEP k) in old)) { old[s SUBSEP k] = v; ord[s, ++n[s]] = k }
+      next
+    }
+    { sub(/\r$/, "") }
+    /^\[/ { flush(cur); cur = secname($0); seen[cur] = 1; print; next }
+    /^;?[A-Za-z0-9_]+=/ {
+      k = $0; sub(/^;/, "", k); sub(/=.*/, "", k)
+      if ((cur SUBSEP k) in old) { print k "=" old[cur SUBSEP k]; used[cur SUBSEP k] = 1; next }
+    }
+    { print }
+    END {
+      flush(cur)
+      for (i = 1; i <= ns; i++) if (!(sord[i] in seen)) { print ""; print "[" sord[i] "]"; flush(sord[i]) }
+    }
+  ' "$1" "$2"
 }
 
 

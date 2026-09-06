@@ -215,8 +215,30 @@ fi
 # size inside a virtual desktop sized for the new one -- fullscreen at 1440p with a
 # 1080p game in the middle of it. Step 6 deleted the tropico-setmode.sh call that used
 # to do this as a side effect of staging art, and took this with it by accident.
-tropico_set_ini_mode "$GAMEDIR" "${WANT%x*}" "${WANT#*x}" \
-  || fail "Could not write tropico-fix.ini in $GAMEDIR. Is the patch installed there?"
+#
+# UNLESS THE PLAYER ALREADY NAMED ONE. An explicit setting beats the monitor's own
+# mode, here as in the proxy, so a pair the player typed is honoured when the monitor
+# can hold it and left exactly as written when it cannot -- the proxy refuses it with
+# the reason in its log, and overwriting it would turn "your setting was refused" into
+# "your setting vanished".
+EXPLICIT="$(tropico_ini_explicit_mode "$GAMEDIR" || true)"
+if [ -n "$EXPLICIT" ]; then
+  _ew="${EXPLICIT%x*}"; _eh="${EXPLICIT#*x}"
+  if ! tropico_validate_mode "$_ew" "$_eh" 2>/dev/null; then
+    say "== tropico-fix.ini asks for $EXPLICIT, which this patch cannot use:"
+    say "   $(tropico_validate_mode "$_ew" "$_eh" 2>&1 >/dev/null || true)"
+    say "   running at $MONITOR's own $WANT; the ini is left as you wrote it"
+  elif [ "$_ew" -gt "${WANT%x*}" ] || [ "$_eh" -gt "${WANT#*x}" ]; then
+    say "== tropico-fix.ini asks for $EXPLICIT, but $MONITOR is only $WANT"
+    say "   running at $WANT; the ini is left as you wrote it"
+  else
+    say "== running at $EXPLICIT, your setting in tropico-fix.ini ($MONITOR itself is $WANT)"
+    WANT="$EXPLICIT"
+  fi
+else
+  tropico_set_ini_mode "$GAMEDIR" "${WANT%x*}" "${WANT#*x}" \
+    || fail "Could not write tropico-fix.ini in $GAMEDIR. Is the patch installed there?"
+fi
 
 # THE ART IS NO LONGER THIS SCRIPT'S JOB. It used to run tropico-setmode.sh here,
 # which generated the set in Python (~13 s) into artsets\<WxH>\ and then copied it

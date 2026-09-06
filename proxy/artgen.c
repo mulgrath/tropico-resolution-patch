@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <dirent.h>
 
 /* -------------------------------------------------------------------- buffers */
 
@@ -624,20 +625,64 @@ static int py_round(double v) { return (int)nearbyint(v); }
  * index/harvest wrappers, the CONTAINER WRITER, and the set driver.
  */
 
-static const char *ARCHIVES[4] = { "px.PK2", "px2.PK2", "px3.PK2", "px4.PK2" };
-
 unsigned ag_name_hash_public(const char *n) { return ag_name_hash(n); }
 
 const ag_entry *ag_lookup(const ag_index *ix, const char *name)
 { return map_get(ix, ag_name_hash(name)); }
 
+/* The exe's own enumeration, reproduced. FUN_004eee00 walks data\*.pk2 with
+ * FindFirstFile, picking on each pass the smallest name greater than the last one
+ * opened -- a selection sort by strcmp, independent of the order the filesystem
+ * hands names back. So the load order is px.PK2, px2.PK2, px3.PK2, px3_cyrl.PK2,
+ * px4.PK2 ('.' sorts before '2' and '_'), on Windows and under Wine alike, and the
+ * later archive wins a hash collision. */
+static int has_pk2_ext(const char *n)
+{
+    size_t L = strlen(n);
+    if (L < 5) return 0;
+    const char *e = n + L - 4;
+    return e[0] == '.' && (e[1] == 'p' || e[1] == 'P') && (e[2] == 'k' || e[2] == 'K')
+           && e[3] == '2';
+}
+
+static int cmp_names(const void *a, const void *b)
+{ return strcmp((const char *)a, (const char *)b); }
+
+/* Every *.pk2 in datadir, sorted the game's way. Returns the count. */
+static int list_archives(const char *datadir, char names[][64], unsigned *sizes)
+{
+    DIR *d = opendir(datadir);
+    if (!d) return 0;
+    int n = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL && n < AG_MAX_ARCHIVES) {
+        if (!has_pk2_ext(de->d_name) || strlen(de->d_name) >= 64) continue;
+        snprintf(names[n], 64, "%s", de->d_name);
+        n++;
+    }
+    closedir(d);
+    qsort(names, (size_t)n, 64, cmp_names);
+    for (int i = 0; i < n; i++) {
+        char path[2048];
+        snprintf(path, sizeof path, "%s/%s", datadir, names[i]);
+        FILE *f = fopen(path, "rb");
+        sizes[i] = 0;
+        if (f) {
+            if (fseek(f, 0, SEEK_END) == 0) { long L = ftell(f); if (L > 0) sizes[i] = (unsigned)L; }
+            fclose(f);
+        }
+    }
+    return n;
+}
+
 int ag_index_load(ag_index *ix, const char *datadir)
 {
     memset(ix, 0, sizeof *ix);
     snprintf(ix->dir, sizeof ix->dir, "%s", datadir);
+    ix->narch = list_archives(datadir, ix->names, ix->sizes);
     int narch = 0;
-    for (int a = 0; a < 4; a++) {
-        snprintf(ix->paths[a], sizeof ix->paths[a], "%s/%s", datadir, ARCHIVES[a]);
+    for (int a = 0; a < ix->narch; a++) {
+        snprintf(ix->paths[a], sizeof ix->paths[a], "%s/%s", datadir, ix->names[a]);
         FILE *f = fopen(ix->paths[a], "rb");
         ix->present[a] = f != NULL;
         if (f) { fclose(f); narch++; }
@@ -645,13 +690,15 @@ int ag_index_load(ag_index *ix, const char *datadir)
     if (!narch) return -1;
 
     size_t cap = 0;
-    for (int a = 0; a < 4; a++) {
+    for (int a = 0; a < ix->narch; a++) {
         if (!ix->present[a]) continue;
         FILE *f = fopen(ix->paths[a], "rb");
         unsigned char head[8];
         if (fread(head, 1, 8, f) != 8) { fclose(f); return -1; }
-        /* magic 1000, and the count that sizes the 13-byte entry table */
-        if (rd32(head, 0) != 1000) { fclose(f); return -1; }
+        /* magic 1000, and the count that sizes the 13-byte entry table. A file that
+         * is not an archive at all is skipped, not fatal: the game's own loader
+         * would reject it too, and one stray .pk2 must not turn the art off. */
+        if (rd32(head, 0) != 1000) { fclose(f); ix->present[a] = 0; continue; }
         unsigned count = rd32(head, 4);
         unsigned char *raw = (unsigned char *)malloc((size_t)13 * count + 1);
         if (!raw || fread(raw, 1, (size_t)13 * count, f) != (size_t)13 * count)
@@ -701,7 +748,7 @@ int ag_harvest(const ag_index *ix, const char *exepath, ag_names *out)
     free(exe);
     names_finish(out);
 
-    for (int a = 0; a < 4; a++) {
+    for (int a = 0; a < ix->narch; a++) {
         if (!ix->present[a]) continue;
         size_t blen; unsigned char *blob = ag_slurp(ix->paths[a], &blen);
         if (!blob) return -1;
@@ -913,17 +960,36 @@ static int ag_read_marker(const char *gamedir, char *out, size_t n)
     size_t got = fread(out, 1, n - 1, f);
     fclose(f);
     out[got] = 0;
-    while (got && (out[got-1] == '\n' || out[got-1] == '\r' || out[got-1] == ' '))
-        out[--got] = 0;
+    /* CRLF-tolerant: a marker edited on Windows must still compare equal. */
+    size_t w = 0;
+    for (size_t i = 0; i < got; i++) if (out[i] != '\r') out[w++] = out[i];
+    out[w] = 0;
+    while (w && (out[w-1] == '\n' || out[w-1] == ' ')) out[--w] = 0;
     return 1;
+}
+
+/* THE ARCHIVES ARE PART OF THE KEY. A language pack drops a new archive into data\
+ * and the fonts the game would use change under a set that was generated before
+ * it arrived; removing the pack changes them back. Keying on the mode alone left the
+ * stale set in place both ways. So the marker names every archive with its size, in
+ * the order the game loads them, and any difference regenerates. */
+int ag_marker_text(const char *datadir, int to_w, int to_h, char *out, size_t n)
+{
+    char names[AG_MAX_ARCHIVES][64]; unsigned sizes[AG_MAX_ARCHIVES];
+    int na = list_archives(datadir, names, sizes);
+    size_t L = (size_t)snprintf(out, n, "%dx%d", to_w, to_h);
+    for (int a = 0; a < na && L < n; a++)
+        L += (size_t)snprintf(out + L, n - L, "\n%s %u", names[a], sizes[a]);
+    return na;
 }
 
 int ag_set_is_current(const char *gamedir, int to_w, int to_h, double font_scale)
 {
     (void)font_scale;                       /* derived from the mode -- see above */
-    char have[64], want[64];
+    char have[4096], want[4096], datadir[2048];
     if (!ag_read_marker(gamedir, have, sizeof have)) return 0;
-    snprintf(want, sizeof want, "%dx%d", to_w, to_h);
+    snprintf(datadir, sizeof datadir, "%s/data", gamedir);
+    ag_marker_text(datadir, to_w, to_h, want, sizeof want);
     return strcmp(have, want) == 0;
 }
 
@@ -953,9 +1019,17 @@ int ag_generate_set(const char *gamedir, int to_w, int to_h, double font_scale,
     ag_assets as;
     ag_resolve(&ix, &names, 1, &as);
 
-    unsigned char *blob[4] = {0}; size_t blen[4] = {0};
-    for (int a = 0; a < 4; a++)
-        if (ix.present[a]) blob[a] = ag_slurp(ix.paths[a], &blen[a]);
+    unsigned char *blob[AG_MAX_ARCHIVES] = {0}; size_t blen[AG_MAX_ARCHIVES] = {0};
+    for (int a = 0; a < ix.narch; a++) {
+        if (!ix.present[a]) continue;
+        blob[a] = ag_slurp(ix.paths[a], &blen[a]);
+        if (log) {
+            /* Named in the log because this is the line that says whether a
+             * language pack's archive was seen at all. */
+            snprintf(msg, sizeof msg, "    archive %d: %s (%u bytes)", a, ix.names[a], ix.sizes[a]);
+            log(msg);
+        }
+    }
 
     /* Write the manifest as we go. Uninstall removes generated art BY MANIFEST and
      * never by glob -- a glob over *.i16 would also sweep up anything the game ships
@@ -1039,8 +1113,8 @@ int ag_generate_set(const char *gamedir, int to_w, int to_h, double font_scale,
         }
     }
 
-    for (int a = 0; a < 4; a++) free(blob[a]);
-    ag_assets_free(&as); ag_names_free(&names); ag_index_free(&ix);
+    for (int a = 0; a < ix.narch; a++) free(blob[a]);
+    ag_assets_free(&as); ag_names_free(&names);
 
     /* The marker LAST, and only on success. An interrupted run then leaves a marker
      * that does not match, so the next launch regenerates rather than trusting a
@@ -1050,11 +1124,18 @@ int ag_generate_set(const char *gamedir, int to_w, int to_h, double font_scale,
         if (log) { snprintf(msg, sizeof msg,
             "[x] artgen: %zu written, %zu failed -- marker NOT written, so the next"
             " launch will try again", ok, failed); log(msg); }
+        ag_index_free(&ix);
         return -1;
     }
     snprintf(path, sizeof path, "%s/data/ARTSET-MODE.txt", gamedir);
     FILE *mk = fopen(path, "wb");
-    if (mk) { fprintf(mk, "%dx%d\n", to_w, to_h); fclose(mk); }
+    if (mk) {
+        char marker[4096];
+        ag_marker_text(ix.dir, to_w, to_h, marker, sizeof marker);
+        fprintf(mk, "%s\n", marker);
+        fclose(mk);
+    }
+    ag_index_free(&ix);
 
     if (log) {
         snprintf(msg, sizeof msg, "[+] artgen: generated %zu assets for %dx%d"

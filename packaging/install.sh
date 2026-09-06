@@ -108,10 +108,21 @@ cmp -s "$SRC/binkw32.dll" "$GAMEDIR/binkw32.dll" \
   || { echo "!! binkw32.dll did not copy correctly. Is the game running?" >&2; exit 1; }
 echo "   - installed binkw32.dll and verified it"
 
-# Never overwritten: it holds your settings, and an upgrade that silently reset them
-# would be a worse bug than any it fixed.
+# Never reset: it holds your settings, and an upgrade that silently reset them would
+# be a worse bug than any it fixed. But never left behind either: keeping the old file
+# verbatim hid every setting a new version added. So an existing ini is carried INTO
+# the new template by tropico_merge_ini -- settings kept, new keys and comments
+# arriving -- and if that fails for any reason the old file stays exactly as it was.
 if [ -f "$GAMEDIR/tropico-fix.ini" ]; then
-  echo "   - tropico-fix.ini already exists; your settings are kept"
+  if tropico_merge_ini "$GAMEDIR/tropico-fix.ini" "$SRC/tropico-fix.ini" > "$GAMEDIR/tropico-fix.ini.new" \
+     && [ -s "$GAMEDIR/tropico-fix.ini.new" ]; then
+    mv -f "$GAMEDIR/tropico-fix.ini.new" "$GAMEDIR/tropico-fix.ini"
+    echo "   - updated tropico-fix.ini; your settings were carried over, new options added"
+  else
+    rm -f "$GAMEDIR/tropico-fix.ini.new"
+    echo "   - tropico-fix.ini already exists; your settings are kept (the new options"
+    echo "     could not be merged in -- see tropico-patch/tropico-fix.ini)"
+  fi
 else
   cp "$SRC/tropico-fix.ini" "$GAMEDIR/tropico-fix.ini"
   echo "   - wrote tropico-fix.ini"

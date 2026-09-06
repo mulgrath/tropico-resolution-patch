@@ -39,7 +39,7 @@ if [ "${1:-}" = "--list" ]; then
   else
     echo "   configured: (no tropico-fix.ini -- the patch is not installed here)"
   fi
-  M="$(cat "$GAMEDIR/data/ARTSET-MODE.txt" 2>/dev/null || true)"
+  M="$(head -n1 "$GAMEDIR/data/ARTSET-MODE.txt" 2>/dev/null || true)"
   if [ -f "$GAMEDIR/data/ARTSET-MANIFEST.txt" ]; then
     N="$(wc -l < "$GAMEDIR/data/ARTSET-MANIFEST.txt")"
   else
@@ -58,7 +58,7 @@ W="${1:-}"; H="${2:-}"
 tropico_validate_mode "$W" "$H" || exit 1
 [ -f "$INI" ] || { echo "!! no tropico-fix.ini in $GAMEDIR -- run the installer first." >&2; exit 1; }
 
-tropico_set_ini_mode "$GAMEDIR" "$W" "$H"
+tropico_set_ini_mode "$GAMEDIR" "$W" "$H" explicit
 
 # Ask for a rebuild. Cheap to be unconditional: if the art already matches, the proxy
 # spends about a second putting back what was there, and if it does not, this is the

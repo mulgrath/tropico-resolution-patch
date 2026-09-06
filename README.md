@@ -56,6 +56,18 @@ On Windows, the game opens on whichever monitor you started it from too, at that
 monitor's own resolution — nothing to set, and by default your desktop's main display
 is never touched.
 
+**Windows display scaling** is respected. On one monitor the game plays at the size
+Windows says your desktop is, such as 2560x1440 on a 4K monitor at 150%. To play at the
+monitor's full resolution instead, type it under `[Resolution]` in `tropico-fix.ini`. A
+size your monitor lists as one of its modes is always kept, scaling or not.
+
+**Translation packs** work alongside the patch, in either order. A pack such as the
+Russian one adds its own fonts as an archive in the game's `data` folder; the patch
+builds its artwork from whichever archives are present, so the translated text is drawn
+at your resolution. Install the pack before or after the patch, exactly as its own
+instructions say. Adding or removing a pack later is picked up the next time the game
+starts, with a second's rebuild. Uninstalling the patch leaves the pack in place.
+
 **Changing your resolution later** needs nothing from you. The patch checks the display
 every time the game starts.
 

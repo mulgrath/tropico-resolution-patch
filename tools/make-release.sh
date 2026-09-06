@@ -188,6 +188,14 @@ for w in install.bat uninstall.bat READ-ME-FIRST.txt; do
   cp "$ROOT/packaging/windows/$w" "$OUT/$NAME-windows/$w"
 done
 
+# The ini upgrader sits with the payload, not at the top: install.bat calls it by
+# path and nothing else should. Same two checks as the entry points above.
+if ! git ls-files --error-unmatch "packaging/windows/upgrade-ini.bat" >/dev/null 2>&1; then
+  echo "!! REFUSING to build: packaging/windows/upgrade-ini.bat is not committed" >&2
+  exit 1
+fi
+cp "$ROOT/packaging/windows/upgrade-ini.bat" "$OUT/$NAME-windows/tropico-patch/upgrade-ini.bat"
+
 cp "$ROOT/known-good/binkw32.dll"       "$OUT/$NAME-windows/tropico-patch/binkw32.dll"
 cp "$ROOT/known-good/tropico-fix.ini"   "$OUT/$NAME-windows/tropico-patch/tropico-fix.ini"
 cp "$ROOT/LICENSE"                      "$OUT/$NAME-windows/tropico-patch/LICENSE"
@@ -203,7 +211,7 @@ done
 # way: Notepad renders a LF-only file as one long line, and cmd has been known to
 # mis-parse a label that does not end CRLF. Checked rather than converted here --
 # if the committed file is wrong, the fix belongs in the file, not in the build.
-for w in install.bat uninstall.bat READ-ME-FIRST.txt; do
+for w in install.bat uninstall.bat READ-ME-FIRST.txt tropico-patch/upgrade-ini.bat; do
   if grep -qU $'\r$' "$OUT/$NAME-windows/$w"; then :; else
     echo "!! REFUSING to build: packaging/windows/$w is not CRLF" >&2
     exit 1

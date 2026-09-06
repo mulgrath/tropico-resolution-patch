@@ -6952,6 +6952,33 @@ that monitor's own logical size. Per-monitor awareness is the only thing that ge
 case right, and it is incompatible with the rule above. Rare, Windows-only, and named
 here so it is not rediscovered as a mystery.
 
+### 92.1 The rule gains an opt-out: `[Display] IgnoreScaling` (2026-09-05)
+
+The first user feedback on the released patch asked for exactly the thing the rule
+denies: a 4K panel at 200% that should play at 3840x2160, not at the 1920x1080 the
+desktop reports. The rule stays the default. What changed is that a player can now say
+otherwise, and the way to let them is the reverted `2b0248f` put back under a key.
+
+Why a key and not a relaxed check: writing 3840x2160 into `[Resolution]` is refused by
+`ini_fit_check()` against the logical `SM_CXSCREEN`, and even with that check gone the
+exe's own gate at `0x514d9d` would skip slot 4 against the logical `GetDeviceCaps`.
+Two checks read the same number, only one is ours, and the only thing that reaches
+both is making the process see physical pixels. `apply_ignore_scaling()` runs from
+`DllMain` before `choose_monitor()`, which is the first reader; awareness declared after
+a metric is read does not correct it retroactively.
+
+The runtime-divergence objection from the revert is answered by not calling anything
+under Wine or Proton: the key logs that it has nothing to do there and returns, since
+Linux already plays at the panel's real mode. `probes/loadproxy.c` loads the built DLL
+under Wine and confirms the wiring from the log alone: with the key set the `[dpi]` line
+appears, without it nothing about scaling is logged.
+
+**Not yet measured on Windows, and it gates calling this done:** the intro and menu run
+before exclusive fullscreen, and DPI awareness changes how a non-fullscreen window is
+presented on a scaled display. The 2026-08-23 commit named that as its outstanding test
+and was reverted before it ran. A native Windows pass at 200% on a 4K panel, with the
+key set, is the test: intro, menu, map load, and the art set generated for 3840x2160.
+
 ## 93. The C codec is 36x the Python and byte-exact — and the 30 s was never allocation churn
 
 The runtime-art-generation design rests on one estimate: that generating the UI art set
@@ -10931,3 +10958,340 @@ recorded as a defect. PopTop shipped the All Mine one.
 **Deliberately not fixed.** This patch is about resolution and does not write game data;
 repairing scenario scripts is a different product with a different risk profile. Recorded
 here so it is not re-investigated as a patch regression.
+
+## 120. An explicit `[Resolution]` beats an automatic mode, and the log names the loser
+
+**From user feedback, 2026-09-05.** The owner's rule: the two settings a player can
+reach, `[Resolution]` and `[Display] IgnoreScaling`, have to take effect or say why
+they did not. Silence that reads as a result is the failure.
+
+`IgnoreScaling` held up on inspection: it runs first in DllMain and nothing later
+touches awareness. `[Resolution]` did not, in two places.
+
+### 120.1 Windows with two monitors: never read
+
+`decide_mode()` took the launch monitor's mode first, the ini second. `DeviceSelect`
+and `FollowLaunchMonitor` are both on by default, so on any Windows desktop with two
+monitors the monitor's own mode was adopted and the ini was never consulted; the log
+said "running at DISPLAY2's own mode" and nothing else. On one monitor
+`choose_monitor()` exits early with no adopted mode, so the same ini worked there and
+stopped working the day a second monitor was plugged in.
+
+Order is now ini, launch monitor, picker. When the ini wins over an adopted mode the
+log says so; when the ini is refused, the refusal is already logged where it happens
+(`ini_fit_check()`, `ini_override()`), and `decide_mode()` adds what ran instead.
+Measured under Wine on this two-monitor desktop with `probes/loadproxy.c`: an explicit
+1440x900 wins over the 1920x1080 launch monitor, and an explicit 2560x1440 is refused
+with the reason and the fallback named.
+
+### 120.2 Linux: overwritten by the launcher
+
+`tools/tropico` rewrote `Width`/`Height` on every run with the monitor's mode, so the
+virtual desktop and the proxy would agree (the step-6 stale-ini bug). A pair the player
+typed was gone before the game started, and the ini's comment presented it as a setting.
+
+The launcher now marks its own writes -- `; launcher-set WxH` above the pair -- and
+`tropico_ini_explicit_mode` reads an unmarked pair, or a marked pair whose numbers no
+longer match the marker, as the player's. The launcher then sizes the virtual desktop to
+that mode when the monitor can hold it, and leaves the ini untouched when it cannot,
+with a line saying which. An ini from 1.4 or earlier holds an unmarked pair the old
+launcher wrote; that legacy case is taken as the launcher's when it equals a connected
+monitor's mode and as the player's otherwise. The one misread that rule allows -- a
+player who typed exactly their monitor's mode -- changes nothing.
+
+### 120.3 The wrong cause on a scaled desktop
+
+`ini_fit_check()` blamed every refusal on "started on one monitor and opened on
+another". On a scaled Windows desktop the real cause is scaling, and the advice sent
+the player to a monitor they do not have. The refusal now compares the adapter's real
+mode (`EnumDisplaySettings`, never virtualized) with the desktop the game is measured
+in: if the real mode would hold the configured one, the cause is scaling and the log
+names `IgnoreScaling=1`; otherwise it is placement, as before. Reasoned from the
+virtualization facts in §92, not yet seen on a scaled Windows desktop.
+
+### 120.4 What the game itself writes
+
+None of this touches what the game stores. `TROPICO.CFG` holds a slot *index*
+(§5, TESTING traps 2 and 4); the patch decides what slot 4 *is*. A player's
+`[Resolution]` changes the latter and the game's own settings the former, so the two
+cannot fight over the same value.
+
+## 121. An upgrade carries the player's ini into the new template
+
+Both installers used to keep an existing `tropico-fix.ini` verbatim. That protected the
+player's settings and hid every key a new version added, because the file that
+documents the keys was the one the installer refused to touch. A 1.4 player upgrading
+to 1.5 would never have seen `IgnoreScaling` without reading the release notes.
+
+The template is now the shape and the old file supplies the values: every uncommented
+`Key=Value` in the old file replaces the matching line in the template, section by
+section (`Enable` under `[WorldFix]` and `[Text]` are different keys), and the
+template's comments and new keys come through as written. Keys the template does not
+know -- the support knobs in CONFIG-REFERENCE -- are kept inside their section, because
+Windows reads only the first section of a given name and a second `[Display]` at the
+end of the file would be ignored. Whole sections the template lacks are appended. If
+the merge fails for any reason the old file is left exactly as it was and the installer
+says so.
+
+Linux: `tropico_merge_ini` in `tropico-common.sh`, awk. Windows: `upgrade-ini.bat`,
+plain batch for the reason install.bat is. Two traps found by test:
+`FNR == NR` reads an empty old file as no file at all and consumes the template
+instead (fixed with `FILENAME == ARGV[1]`); and Wine's `findstr` does not implement
+`/n`, the usual way to stop `for /f` skipping `;` lines, so the batch reads with
+`eol=` set to a space and puts the blank lines `for /f` cannot keep back by rule --
+one before every header, one before a comment that follows a key. The proof for both
+is the identity test: an empty old file reproduces the template byte for byte.
+
+Measured under Wine: the merge routine on a 1.4 ini with edited, added and unknown
+keys, and install.bat end to end against a fake game folder holding that ini.
+
+**Measured on a real install, 2026-09-05:** the Linux Steam folder, holding the 1.3
+package files, the 1.4 proxy and a default-valued ini, upgraded with the 1.5rc1 tarball
+and `./install.sh`. The original Bink and the executable were untouched, the merged ini
+was byte-identical to the 1.5 template (nothing customised to carry), and the next run
+through Steam rebuilt the art once, applied 18 patches with 0 failures, and restored the
+primary monitor on exit. The `[dpi]` and `[Resolution]` lines were correctly absent: the
+key was not set and the ini named no mode.
+
+## 122. One monitor adopts its own mode, the way the launch path does
+
+**From the Windows scaling test, 2026-09-05.** Five native runs on the two-monitor
+Windows install, with the primary at 125% for one of them, showed no effect from
+scaling with or without `IgnoreScaling`. The log says why: the launch-monitor path
+takes the mode from `EnumDisplaySettings`, which Windows never virtualizes, and the
+DllMain art pre-pass caches that answer through `decide_mode()` before
+`launch_mode_check()` runs. So at 125% the run logged `ADOPTED MODE DOES NOT FIT`
+against a 2048x1152 logical desktop and then wrote slot 4 as 2560x1440 anyway, and
+the game played at 2560x1440. The exe's own gate did not stop it. The §92 rule -- the
+mode follows the logical desktop -- was enforced only by the picker, and the picker
+runs only when no monitor is adopted.
+
+That is the single-monitor case, and it explains the report behind §92.1 without
+needing 200%: `choose_monitor()` returned early with one monitor, the picker filtered
+the adapter's real mode list against `SM_CXSCREEN`, and a 4K panel at 150% has a
+logical desktop of exactly 2560x1440. The same panel beside a second monitor took the
+launch path and played at 3840x2160. Two paths, opposite answers to scaling.
+
+### The change
+
+One monitor now adopts its own mode from `choose_monitor()`, under the same
+`FollowLaunchMonitor` key the launch path honours, and returns: it is the primary, so
+there is no device to substitute and no primary to move. The picker still runs with
+the key at `0`, and an explicit `[Resolution]` still wins over the adopted mode (§120).
+Making the launch path logical instead was rejected: DeviceSelect's Blt translation
+and the mixed-DPI gap in §92 both rest on physical numbers, and that path is the one
+that works today.
+
+Measured under Wine with `probes/loadproxy.c` from a non-`Z:` drive inside a
+1600x900 virtual desktop, so the host xrandr channel is skipped and Win32 reports one
+monitor: before, `one monitor ... nothing to choose` and two picker candidates;
+after, `running at \\.\DISPLAY1's own mode 1600x900` and the art pre-pass named
+it. The two-monitor run from `Z:` on this desktop is unchanged.
+
+### What this leaves
+
+* `launch_mode_check()` still blames "started on one monitor and opened on another"
+  when the real cause is scaling, and on one monitor that sentence names a monitor
+  the player does not have. It clears an adopted mode that `decide_mode()` has
+  already cached, so the message is wrong and the clearing is inert. Not changed
+  here; it wants the §120.3 treatment.
+* `IgnoreScaling` now matters only to an explicit `[Resolution]` wider than the
+  logical desktop. On the Steam install `SetProcessDpiAwarenessContext` failed with
+  error 5 (awareness already set before DllMain, likely by the overlay), and the
+  `SetProcessDPIAware` fallback reports success even when it changed nothing, so the
+  key is still unmeasured on Windows.
+* Not yet seen on a scaled single-monitor Windows desktop. The 125% two-monitor run
+  is the evidence that the physical mode plays; the single-monitor path now reuses
+  it, but has not itself been run.
+
+## 123. Language packs: the Russian archive was shadowed by our own loose fonts
+
+**Report, 2026-09-06.** The Russian translation "does not work with the higher
+resolution". The pack (text archive: `data/px3_cyrl.PK2`, `data2/Tropico.lng`,
+`px_cred.lng`, `TROPICO.CFG`, `Xdat39.xdt`, the HTML manual, maps; a second archive
+of bonus maps) ships no loose art, no exe and no replaced stock archive. Its one
+archive holds the 17 stock font families at all five slots under the stock names,
+224 glyphs each as stock, with the upper indices repainted as Cyrillic; four
+further entries are not image assets.
+
+### How the exe takes it
+
+`FUN_004f1710` picks the language name from the Windows LANGID (`0x419` ->
+"russian") unless `data2\overridelanguage` exists, and loads
+`data2\<name>\tropico.lng` with `data2\tropico.lng` as the fallback -- the pack
+simply replaces the fallback. Then `0x4f1e9c`: if `data\px3_cene.PK2` exists the
+charset flag `0x613868` is 1, if `data\px3_cyrl.PK2` exists it is 2, and if `.lng`
+string `0xa8d` is two bytes or longer it is 3. Every other reader of that flag
+(`0x4519fa`.. `0x4563f9`, `0x42a39d`, `0x448e01`, `0x45d7d2`) compares against 3:
+the double-byte paths. Values 1 and 2 change nothing else.
+
+So the Cyrillic fonts arrive purely by name collision. `FUN_004eee00` enumerates
+`.\data\*.pk2` with FindFirstFile and on each pass opens the smallest name greater
+than the last one opened -- a selection sort by `strcmp`, independent of directory
+order -- so the load order is `px.PK2, px2.PK2, px3.PK2, px3_cyrl.PK2, px4.PK2`, and
+a later archive wins a hash collision. That is also how px2..px4 patch px.PK2.
+
+### Why it broke under the patch
+
+The generator indexed the four stock names only, rescaled the Latin atlases out of
+`px.PK2` and wrote them loose; loose files beat every archive (§63.1), so the
+Cyrillic set was never seen and Russian bytes rendered through Latin glyph indices.
+And the marker keyed on the mode alone, so installing the pack after the art was
+generated never regenerated, and removing it never regenerated back.
+
+### The change
+
+`ag_index_load()` lists every `*.pk2` in `data\`, sorts by `strcmp` and loads in
+that order into the existing last-writer-wins map, so the source for each name is
+the one the game would use. Fonts are detected by opcode, so the Cyrillic atlases
+take the font path unchanged. The `.WIN` name harvest walks the same list -- the
+first cut kept `a < 4` there and silently dropped the two names that live in
+`px4.PK2`'s records once the pack pushed it to index 4. `ARTSET-MODE.txt` keeps
+"WxH" on its first line (what the proxy cross-check, `tropico-setmode.sh` and the
+rig read) and then names each archive with its size; any difference regenerates.
+The log names every archive indexed.
+
+Measured: `dev/probes/artgen_langpack.sh` -- stock-only vs stock+pack at
+2560x1440 differ in exactly the 17 fonts, nothing else, and the pack's `comi07.i16`
+equals the Python oracle's rescale of the pack's own container; stock-only output
+byte-identical to the previous build across all 267 assets. In game on the GOG copy
+under the rig at 2560x1440 with the pack installed: the log lists five archives,
+regenerates on the marker change, and the owner confirmed Russian text scaled
+correctly in every area.
+
+### Other packs
+
+Latin-script translations (French, German, Spanish, Italian, Portuguese) ship only
+`.lng` text and use the stock atlases, so they never touched the generator. A
+Central European pack would use `px3_cene.PK2` by the same mechanism and is covered
+by the same glob, untested. Japanese and Chinese are charset 3 and route through
+the double-byte renderer; out of scope. The one shape that would still break is a
+pack that ships its fonts as loose files in `data\`, which the generator overwrites
+by name; none is known to exist.
+
+## 124. Scaling, settled: the scaled desktop by default, the panel with the key, and a typed mode is judged by the mode list
+
+**The report.** A player with a 4K panel at 150% on Windows got 2560x1440, wanted
+3840x2160, and typing it under `[Resolution]` did nothing. The owner's rule, restated
+2026-09-06: by default the game plays at the scaled desktop size on every platform;
+`IgnoreScaling=1` plays at the panel's own resolution; and a typed resolution the
+monitor supports must apply.
+
+**What §122 had done** (commit 971e174, the same day this was written) was the
+reverse: every path adopted the panel's own mode by default, and the key only lifted
+the refusal of a typed mode. It is superseded here, and the memory note that
+recorded it is rewritten.
+
+**Why the typed mode was refused.** `ini_fit_check()` compared 3840x2160 with the
+scaled `SM_CXSCREEN` desktop, 2560x1440, and discarded it. The check guards a real
+failure -- a mode larger than the screen the game gets renders nothing -- measured
+under a Wine virtual desktop, where the screen truly is the smaller number. On native
+Windows the panel is 3840x2160 and DirectDraw mode setting is never DPI-virtualized,
+so the refusal was a false positive.
+
+### The change
+
+* `ini_fit_check()` on Windows judges a typed mode against the adapter's mode list
+  from `EnumDisplaySettings(NULL, i)`, which a DPI-unaware process still reads
+  unvirtualized (§122's 125% run measured it). Listed: accepted, and the log says so
+  when it exceeds the scaled desktop. Not listed: refused, naming the largest mode.
+  Under Wine the old desktop comparison stays, as the exact check it always was.
+* `to_play_units()` converts an adopted monitor's mode into the units the game will
+  be given -- divided by the primary's scale factor, width kept a multiple of 4 --
+  unless the key is set. Both adoption sites in `choose_monitor()` use it, so one
+  and two monitors answer alike, in the scaled direction this time.
+* A scaled size is adopted only when the adapter LISTS it as a mode. The game sets
+  its mode through DirectDraw, which takes only listed modes, and a scaled size
+  usually is not one: 2560x1440 at 125% is 2048x1152, at 150% it is 1707x960
+  (Windows rounds the logical width to 1707; `to_play_units()` trims it to 1704).
+  When the size is not listed, `mode_listed()` says so in the log and the launch
+  mode is dropped, so the picker chooses the largest listed mode that fits the
+  scaled desktop -- 1920x1080 and 1600x900 respectively on a typical adapter. A
+  4K panel at 150% is the clean case: 2560x1440 is listed and adopted as is.
+* `play_screen()` is the bound the picker, `launch_mode_check()` and the
+  smaller-than-screen note all use: the scaled desktop, or the panel with the key.
+* `apply_ignore_scaling()` still tries the awareness call first; its failure now
+  only changes a log line, since the helpers read the adapter directly.
+
+### Why #150 is not invited
+
+A typed mode the monitor lists is a mode the panel plays. #150 comes from a window
+landing on a monitor Wine did not measure or at negative coordinates, in the
+compositing path, which this does not touch. A too-large mode fails as a black
+screen, and the mode-list check still prevents it.
+
+### Measured, and not
+
+Under Wine the two sizes are one number, so nothing here can be exercised on Linux
+beyond wiring: `probes/loadproxy.c` shows the log lines, and the rig at 2560x1440
+still refuses a typed 3840x2160 and keeps a typed 2560x1440. The owner's Linux
+observation -- a 1080p panel at 50% under COSMIC/Xwayland plays at 3840x2160 -- is
+the rule working in the opposite direction, since Xwayland presents the scaled
+size to Wine. `xrandr --scale` is refused under Xwayland (BadValue on the CRTC
+transform), so the launcher cannot unscale an output; `cosmic-randr` could, on
+COSMIC only, and is not done.
+
+**Gate, per the undertested-issues rule:** a native Windows run on the dual-boot
+with the 1440p monitor at 125% or 150%: default plays the scaled size, the key
+plays 2560x1440, and a typed 2560x1440 is kept. Not run yet.
+
+## 125. The Windows scaling runs: nothing but a typed resolution did anything, so that is the mechanism
+
+**Owner's Windows pass on the 1.5rc2 package, 2026-09-06**, on the dual-boot with the
+1440p monitor (no 4K panel to hand, so the report's exact case is untestable here).
+
+* No scaling setting changed the mode the game ran at. With the desktop at 125% or
+  150%, the runs did not produce a working size that differed from 100%; the owner
+  could not get scaling to change the resolution at all.
+* `IgnoreScaling=1` "didn't seem to do much of anything".
+* A typed `[Resolution]` worked. 2560x1440 applied, and even 3840x2160 typed on the
+  1440p monitor was listed in the F2 menu and "mostly worked" in game -- so the
+  adapter lists a 4K mode for that panel (GPU-side scaling), and the mode-list
+  check of §124 accepted it, as designed.
+
+The reading of the report behind §124 is therefore: a 4K panel at 150% reports a
+1920x1080 desktop, which happens to be a listed mode, so the game ran at it; typing
+3840x2160 was refused by the old desktop comparison; the mode-list check fixes
+exactly that, and nothing else in §124 was shown to matter.
+
+### Decision (owner)
+
+* `[Resolution]` is authoritative: a typed size the monitor lists always applies,
+  on Windows (mode list) and Linux (the launcher writes it, and the desktop
+  comparison under Wine stays as the black-screen guard).
+* `IgnoreScaling` is removed -- the key, the awareness call, the scaled-units
+  conversion and the listed-mode adoption logic of §124. Asking the player to set a
+  key on top of "type the resolution you want" was confusing, and the key was never
+  measured to do anything. The README says: want a size, type it.
+* The default path is left as §122 built it: an adopted launch monitor plays at the
+  mode the adapter reports, the picker bounds against `SM_CXSCREEN` otherwise. What
+  Windows reports under scaling is Windows' business; the log still prints both
+  numbers and the scaling percentage so a report can be read.
+
+§124's design is superseded by this the same day; its mode-list check is the part
+that survives. The memory note on the scaling rule is rewritten to match.
+
+## 126. One monitor plays at the scaled desktop, as 1.4 did — §122's adoption reverted before release
+
+**Owner's rule, 2026-09-06, before the 1.5 draft went out.** A 4K panel at 150% on
+one monitor SHOULD play at 2560x1440 by default: that respects the player's own
+Windows choice first, and every 1.4 player on a scaled desktop already gets it.
+Typing 3840x2160 under `[Resolution]` is how they choose otherwise, and §125's
+mode-list check keeps it.
+
+§122 had made the single-monitor path adopt the panel's own mode from
+`EnumDisplaySettings`, to match the two-monitor launch path. It shipped in no
+release; reverted here to 1.4's shape -- `choose_monitor()` returns with nothing
+adopted on one monitor and the picker chooses inside `SM_CXSCREEN`. The
+two-monitor launch path is untouched: it adopts the launch monitor's mode as it
+did in 1.4, which never read the scaled size.
+
+Verified on Linux with `probes/loadproxy.c` on the nested rig display at
+2560x1440, its one output marked primary (Xephyr's is not by default, and without
+a primary `choose_monitor()` returns before the branch): the log says `one monitor
+(default, 2560x1440) -- the mode is chosen within the desktop as Windows reports
+it`, nothing is adopted, and the picker lands on 2560x1440. A game run on the same
+rig with no `[Resolution]` typed took the same picker path to slot 4 = 2560x1440. The Windows numbers are §92's: `SM_CXSCREEN`
+is the scaled size in a DPI-unaware process. On the owner's Steam install the
+overlay pre-sets DPI awareness so both numbers are the panel's (§125); a GOG
+install has no overlay and reports the scaled size.

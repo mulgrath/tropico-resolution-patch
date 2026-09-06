@@ -47,7 +47,8 @@ that way — starting Tropico again puts it back.
 ```
 
 Puts back the original files and removes everything it added. Your saves, settings and
-game archives are never modified at any point.
+game archives are never modified at any point, and a translation pack you installed
+stays installed.
 
 ---
 
@@ -63,6 +64,12 @@ Steam's graphics layer and crashes outright on Windows — and because the game 
 the choice, picking it could leave you unable to load a map *or* get back to the settings
 screen. The software renderer is what you are already playing on, and a modern processor
 runs it without effort.
+
+**Translation packs** (the Russian one, for instance) work with the patch, in either
+order. Follow the pack's own instructions: it adds its fonts as an archive in `data/`,
+and the patch builds its artwork from whichever archives are present, so the translated
+text is drawn at your resolution. Adding or removing a pack later is picked up the next
+time the game starts. `./uninstall.sh` leaves the pack alone.
 
 **Changing resolution later:** you usually do not have to. The patch reads the display
 every time it starts and builds artwork to match, so plugging in a different monitor or

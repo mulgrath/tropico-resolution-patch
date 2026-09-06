@@ -60,7 +60,7 @@ for n in $(seq 9 20); do
 done
 [ -n "$DISP" ] || { echo "!! no free X display number in :9..:20" >&2; exit 1; }
 
-PREV_MODE="$(cat "$GAMEDIR/data/ARTSET-MODE.txt" 2>/dev/null || true)"
+PREV_MODE="$(head -n1 "$GAMEDIR/data/ARTSET-MODE.txt" 2>/dev/null || true)"
 XPID=""; VMPID=""; VMLOG=""
 cleanup() {
   echo
@@ -102,7 +102,7 @@ echo "   $DISP reports: $(DISPLAY=$DISP xdpyinfo | awk '/dimensions:/{print $2; 
 # is the situation the staged-art fallback exists for. Useless for a normal
 # layout run -- the art would not match the screen, which is the whole point.
 if [ -n "${TROPICO_KEEP_MODE:-}" ]; then
-  echo "== KEEPING the configured mode: ini=$(awk -F= '/^Width=/{w=$2} /^Height=/{h=$2} END{print w"x"h}' "$GAMEDIR/tropico-fix.ini" 2>/dev/null)  art=$(cat "$GAMEDIR/data/ARTSET-MODE.txt" 2>/dev/null)"
+  echo "== KEEPING the configured mode: ini=$(awk -F= '/^Width=/{w=$2} /^Height=/{h=$2} END{print w"x"h}' "$GAMEDIR/tropico-fix.ini" 2>/dev/null)  art=$(head -n1 "$GAMEDIR/data/ARTSET-MODE.txt" 2>/dev/null)"
   echo "   (running them against a ${W}x${H} screen on purpose)"
   PREV_MODE=""      # nothing was changed here, so nothing is restored here
 else

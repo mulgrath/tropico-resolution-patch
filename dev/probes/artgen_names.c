@@ -63,7 +63,7 @@ int main(int argc, char **argv)
     ag_resolve(&ix, &names, with_menu, &as);
     for (size_t i = 0; i < as.n; i++)
         printf("%s\t%s\t%u\t%u\n", as.name[i],
-               ARCHIVES[as.src[i]->archive], as.src[i]->offset, as.src[i]->size);
+               ix.names[as.src[i]->archive], as.src[i]->offset, as.src[i]->size);
 
     ag_assets_free(&as);
     ag_names_free(&names);

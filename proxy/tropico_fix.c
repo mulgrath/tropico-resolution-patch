@@ -445,42 +445,37 @@ static const DWORD TABLE_SIG[10] = {640,480, 800,600, 1024,768, 1280,1024, 1600,
 #define WORLD_STOCK_W 1600
 
 typedef struct { DWORD w, h; } mode_t;
+static DWORD g_launch_w, g_launch_h;   /* mode adopted from the launch monitor */
+static char  g_launch_name[64];        /* that monitor's name, for the log     */
 static int launch_override(mode_t *m);   /* defined with the monitor code */
+static int running_under_wine(void);    /* ditto */
 static void launch_mode_check(int dw, int dh); /* ditto */
 
 /* ------------------------------------------------------- display scaling (DPI)
  *
- * THE PATCH IS DELIBERATELY DPI-UNAWARE. There is no SetProcessDPIAware call here
- * and there must not be one; this comment exists so the absence reads as a decision
- * rather than an oversight, because it looks exactly like the omission it used to be.
+ * THE PATCH IS DPI-UNAWARE, AND MAKES NO AWARENESS CALL. `Tropico.EXE` carries no
+ * DPI manifest, so on Windows the desktop size it is told is the scaled one, and
+ * that is what a single monitor plays at: the picker is bounded by SM_CXSCREEN, so
+ * a 4K panel at 150% plays 2560x1440 -- the size the player asked Windows for
+ * (FINDINGS 92, kept by owner's decision in FINDINGS 126). The two-monitor launch
+ * path adopts the launch monitor's mode from EnumDisplaySettings, as it always
+ * has. Nothing here tries to second-guess scaling; a player who wants a different
+ * size types it.
  *
- * `Tropico.EXE` carries no DPI manifest, so on Windows every geometry it is told is
- * the LOGICAL (scaled) desktop size rather than the panel's physical one: a 3840x2160
- * panel at 200% reports 1920x1080. An earlier revision treated that as a bug and
- * declared per-monitor awareness to get the physical number back. That was reverted.
+ * HISTORY, so the absence reads as a decision. A per-monitor awareness call was
+ * added (2b0248f), reverted (FINDINGS 92), brought back under `[Display]
+ * IgnoreScaling` (92.1), joined by a scaled-units conversion of the adopted mode
+ * (FINDINGS 124), and all of it removed on 2026-09-06 (FINDINGS 125) after the
+ * Windows runs: the awareness call was never measured to change the mode, no
+ * scaling setting produced a working mode by itself, and the one thing that did
+ * work was a typed [Resolution] the monitor lists -- which ini_fit_check() now
+ * judges by the adapter's mode list and keeps. That is the whole mechanism: want
+ * a size, type it.
  *
- * WHY. The scaling setting is the resolution the user ASKED FOR, and honouring it is
- * the whole point. 200% on a 4K panel means "give me a 1920x1080 desktop", so the game
- * runs at 1920x1080. 50% on a 1080p panel means "give me 3840x2160", and the game runs
- * at 3840x2160 -- softer, and still what was asked for. One rule, both directions,
- * and it is the same rule on Wine, on Proton and on Windows.
- *
- * The defect that prompted the awareness call was real but was a DISAGREEMENT, not a
- * wrong number: the installer measured the PHYSICAL panel and staged art for
- * 3840x2160 while the proxy measured the LOGICAL desktop and saw 1920x1080, so the
- * configured mode was rejected, no staged set matched, and the run fell through to the
- * stock art caps at ~1400x1050. Resolved by making the installer measure logically
- * too, so both ends agree.
- *
- * DirectDraw mode setting is not DPI-virtualized, so asking for 1920x1080 on a 4K
- * panel yields a genuine 1080p signal the display upscales at an exact 2x, rather
- * than a composited stretch.
- *
- * KNOWN GAP: a mixed-DPI multi-monitor Windows setup (4K laptop at 200% beside a
- * 1080p external at 100%) applies the SYSTEM dpi uniformly, so the numbers for the
- * monitor that is not at system DPI are neither physical nor that monitor's own
- * logical size. Per-monitor awareness is the only thing that gets that case right,
- * and it is incompatible with the rule above. Recorded, not solved.
+ * KNOWN GAP, recorded: a mixed-DPI multi-monitor Windows setup applies the SYSTEM
+ * dpi uniformly to an unaware process, so a monitor not at system DPI reports a
+ * size that is neither physical nor its own logical one. Typing the resolution
+ * covers it.
  */
 
 /* ------------------------------------------------------------- diagnostics
@@ -530,8 +525,9 @@ static void log_environment(void)
                   " the line above by the display scaling, which is expected)",
                   real.dmPelsWidth, real.dmPelsHeight);
             if (mw && real.dmPelsWidth && (DWORD)mw != real.dmPelsWidth)
-                logf_("  display scaling is about %d%%; the patch follows the logical size,"
-                      " which is the resolution the user asked for",
+                logf_("  display scaling is about %d%%; to play at a particular size, type it"
+                      " under [Resolution] in tropico-fix.ini -- a size the monitor lists"
+                      " is always kept",
                       (int)((real.dmPelsWidth * 100 + mw / 2) / mw));
         }
     }
@@ -716,14 +712,23 @@ static int pick_mode(mode_t *out)
     return pick_mode_pass(out, !g_artgen_enabled);
 }
 
-/* Optional override so a user can force a mode without a rebuild. */
-static int ini_override(mode_t *m)
+/* What [Resolution] names, unjudged. Zero when it names nothing. */
+static int ini_named(UINT *w, UINT *h)
 {
     char path[MAX_PATH];
     snprintf(path, sizeof path, "%s\\tropico-fix.ini", g_dir);
-    UINT w = GetPrivateProfileIntA("Resolution", "Width",  0, path);
-    UINT h = GetPrivateProfileIntA("Resolution", "Height", 0, path);
-    if (!w || !h) return 0;
+    *w = GetPrivateProfileIntA("Resolution", "Width",  0, path);
+    *h = GetPrivateProfileIntA("Resolution", "Height", 0, path);
+    return *w && *h;
+}
+
+/* The player's own mode. Every refusal below, and the fit refusal in
+ * ini_fit_check(), is logged where it happens; decide_mode() only has to say what
+ * ran instead. */
+static int ini_override(mode_t *m)
+{
+    UINT w, h;
+    if (!ini_named(&w, &h)) return 0;
     if (g_ini_mode_unusable) return 0;   /* does not fit this screen -- see above */
     if (w % 4) { logf_("  ini: width %u is not a multiple of 4 -- ignoring (would shear)", w); return 0; }
     if (collides_with_stock(w)) { logf_("  ini: width %u collides with a stock slot -- ignoring (would be unreachable)", w); return 0; }
@@ -763,7 +768,51 @@ static void ini_fit_check(void)
     snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
     iw = GetPrivateProfileIntA("Resolution", "Width",  0, ip);
     ih = GetPrivateProfileIntA("Resolution", "Height", 0, ip);
-    if (!(iw && ih && dw && dh && (iw > dw || ih > dh))) return;
+    if (!(iw && ih && dw && dh)) return;
+
+    /* A TYPED MODE IS JUDGED AGAINST THE ADAPTER'S MODE LIST, NOT THE DESKTOP.
+     * On Windows the desktop the game is measured in is the SCALED one, and a 4K
+     * panel at 150% reports 2560x1440 -- so a typed 3840x2160, which the panel
+     * plays perfectly well (DirectDraw mode setting is never DPI-virtualized), was
+     * refused here as "does not fit". That was the report behind FINDINGS 124: a
+     * valid resolution that simply did not apply. The mode list is not virtualized,
+     * so it says exactly what the panel can do, without any awareness call.
+     *
+     * Under Wine the list is whatever the X screen or virtual desktop allows, and
+     * the two numbers agree, so the desktop comparison below is kept there as the
+     * exact check it always was. */
+    if (!running_under_wine()) {
+        DEVMODEA dm; DWORD i, mw = 0, mh = 0;
+        /* The monitor the game will open on when one has been chosen (win32_outputs
+         * names them as \\.\DISPLAYn, which EnumDisplaySettings takes directly);
+         * the primary otherwise. */
+        const char *dev = g_launch_name[0] ? g_launch_name : NULL;
+        for (i = 0; ; i++) {
+            memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+            if (!EnumDisplaySettingsA(dev, i, &dm)) break;
+            if ((int)dm.dmPelsWidth == iw && (int)dm.dmPelsHeight == ih) {
+                if (iw > dw || ih > dh)
+                    logf_("[+] [Resolution] %dx%d is larger than the desktop Windows reports"
+                          " (%dx%d) but the monitor lists it as a mode -- accepted as typed",
+                          iw, ih, dw, dh);
+                return;
+            }
+            if (dm.dmPelsWidth > mw) mw = dm.dmPelsWidth;
+            if (dm.dmPelsHeight > mh) mh = dm.dmPelsHeight;
+        }
+        if (i > 0) {
+            logf_("[x] CONFIGURED MODE IS NOT ONE THIS MONITOR HAS. tropico-fix.ini asks for"
+                  " %dx%d, and the monitor lists nothing of that size (its largest is"
+                  " %lux%lu). Asking for it anyway would render nothing at all -- you"
+                  " would hear the intro over a black screen.", iw, ih,
+                  (unsigned long)mw, (unsigned long)mh);
+            logf_("    Ignoring the configured mode and picking one that fits.");
+            g_ini_mode_unusable = 1;
+            return;
+        }
+        /* No mode list at all: fall through to the desktop comparison. */
+    }
+    if (!(iw > dw || ih > dh)) return;
 
     /* THE MODE MUST FIT THE SCREEN IT WILL RUN ON. When it does not, the game asks
      * for a mode larger than its desktop and renders NOTHING -- the intro audio
@@ -776,8 +825,24 @@ static void ini_fit_check(void)
     logf_("[x] CONFIGURED MODE DOES NOT FIT. tropico-fix.ini asks for %dx%d but the"
           " screen this is running on is %dx%d. The game would render nothing at"
           " all -- you would hear the intro over a black screen.", iw, ih, dw, dh);
-    logf_("    Cause: the game was started for one monitor and opened on another."
-          " Launch it from the monitor you want to play on.");
+    /* TWO CAUSES, TOLD APART BY THE ADAPTER. EnumDisplaySettings is not
+     * DPI-virtualized, so when the monitor's own mode would hold the configured one
+     * and differs from the desktop the game is measured in, the desktop is scaled,
+     * and the advice "launch from the other monitor" is wrong: there is no other
+     * monitor. (Wine only: on Windows the mode list above has already answered.) */
+    {
+        DEVMODEA real; memset(&real, 0, sizeof real); real.dmSize = sizeof real;
+        int scaled = EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &real)
+                  && (int)real.dmPelsWidth >= iw && (int)real.dmPelsHeight >= ih
+                  && ((int)real.dmPelsWidth != dw || (int)real.dmPelsHeight != dh);
+        if (scaled)
+            logf_("    Cause: the adapter's mode is %lux%lu, which would hold %dx%d, but"
+                  " the desktop the game gets is %dx%d.",
+                  real.dmPelsWidth, real.dmPelsHeight, iw, ih, dw, dh);
+        else
+            logf_("    Cause: the game was started for one monitor and opened on another."
+                  " Launch it from the monitor you want to play on.");
+    }
     logf_("    Ignoring the configured mode and picking one that fits.");
     g_ini_mode_unusable = 1;
 }
@@ -801,11 +866,40 @@ static void ini_fit_check(void)
 static mode_t g_decided;
 static int    g_mode_decided;
 
+/* AN EXPLICIT SETTING BEATS AN AUTOMATIC ONE (2026-09-05). The launch monitor's
+ * mode used to be taken first, so on any Windows desktop with two monitors --
+ * DeviceSelect and FollowLaunchMonitor are both on by default -- a [Resolution] the
+ * player had typed was never read, and the log said "running at DISPLAY2's own mode"
+ * as if nothing had been asked. On one monitor the same ini worked, because the
+ * monitor step exits early there; the setting stopped working the day a second
+ * monitor was plugged in, with nothing to say so.
+ *
+ * Order now: the ini, then the launch monitor, then the picker -- and whichever
+ * automatic answer loses to the ini, or stands in for a refused one, is named. */
 static int decide_mode(mode_t *out)
 {
+    mode_t lm;
+    UINT iw, ih;
+    int have_launch, ini_set;
     if (g_mode_decided) { *out = g_decided; return 1; }
-    if (!launch_override(&g_decided) && !ini_override(&g_decided) && !pick_mode(&g_decided))
-        return 0;
+    have_launch = launch_override(&lm);
+    ini_set = ini_named(&iw, &ih);
+    if (ini_override(&g_decided)) {
+        if (have_launch && (lm.w != g_decided.w || lm.h != g_decided.h))
+            logf_("[+] [Resolution] %lux%lu from tropico-fix.ini wins over %s's own mode"
+                  " %lux%lu -- an explicit setting beats an automatic one",
+                  g_decided.w, g_decided.h, g_launch_name, lm.w, lm.h);
+    } else if (have_launch) {
+        if (ini_set)
+            logf_("[!] [Resolution] %ux%u was refused (the reason is above); running at"
+                  " %s's own mode %lux%lu instead", iw, ih, g_launch_name, lm.w, lm.h);
+        g_decided = lm;
+    } else {
+        if (!pick_mode(&g_decided)) return 0;
+        if (ini_set)
+            logf_("[!] [Resolution] %ux%u was refused (the reason is above); the picker"
+                  " chose %lux%lu instead", iw, ih, g_decided.w, g_decided.h);
+    }
     g_mode_decided = 1;
     *out = g_decided;
     return 1;
@@ -2284,7 +2378,6 @@ static void maybe_install_dispsel(void)
  * heartbeat that rewrites it survives as instrumentation and as the fallback rule for
  * when the scan finds nothing. */
 static char g_xr_prev[64];
-static DWORD g_launch_w, g_launch_h;   /* mode adopted from the launch monitor */
 static char g_xr_marker_win[MAX_PATH];
 static char g_xr_marker_unix[MAX_PATH];
 static char g_xr_mode_win[MAX_PATH];    /* which rule the watchdog actually took */
@@ -3378,8 +3471,19 @@ static void choose_monitor(void)
     for (i = 0; i < n; i++) if (outs[i].primary) prim = i;
     if (prim < 0) { logf_("  [display] xrandr reports no primary output -- leaving it alone"); return; }
 
+    /* ONE MONITOR: NOTHING IS ADOPTED, AND THAT IS THE RULE, NOT AN OMISSION. The
+     * picker chooses, bounded by SM_CXSCREEN -- the desktop as Windows reports it,
+     * which under display scaling is the SCALED size. A 4K panel at 150% therefore
+     * plays at 2560x1440, the size the player asked Windows for, exactly as 1.4
+     * did; typing 3840x2160 under [Resolution] is how they say otherwise
+     * (ini_fit_check keeps any size the monitor lists). FINDINGS 122 briefly made
+     * one monitor adopt its own mode here, like the launch path below; the owner
+     * reverted it before release (FINDINGS 126) because it would have changed what
+     * every single-monitor player on a scaled desktop already gets. Two monitors
+     * keep the launch path: it never read the scaled size, and it shipped that way. */
     if (n == 1) {
-        logf_("  [display] one monitor (%s, %lux%lu) -- nothing to choose",
+        logf_("  [display] one monitor (%s, %lux%lu) -- the mode is chosen within the"
+              " desktop as Windows reports it; type a [Resolution] to choose otherwise",
               outs[0].name, (unsigned long)outs[0].w, (unsigned long)outs[0].h);
         return;
     }
@@ -3456,6 +3560,7 @@ static void choose_monitor(void)
     if (GetPrivateProfileIntA("Display", "FollowLaunchMonitor", 1, ip)) {
         g_launch_w = outs[chosen].w;
         g_launch_h = outs[chosen].h;
+        snprintf(g_launch_name, sizeof g_launch_name, "%s", outs[chosen].name);
         logf_("[+] [display] running at %s's own mode %lux%lu", outs[chosen].name,
               (unsigned long)g_launch_w, (unsigned long)g_launch_h);
     }
@@ -5576,7 +5681,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
         g_artgen_enabled = GetPrivateProfileIntA("Art", "Generate", 1, ip);
         if (g_mon_pending) {
-            if (launch_override(&am)) ensure_art_for_mode(am.w, am.h);
+            /* The ini first, for the same reason decide_mode() reads it first: it is
+             * the mode the run will most likely end at. It cannot be fit-checked yet
+             * -- the screen is about to change -- and if it turns out not to fit, the
+             * patch pass regenerates for whatever stands in, as it always did. */
+            if (ini_override(&am) || launch_override(&am)) ensure_art_for_mode(am.w, am.h);
         } else {
             ini_fit_check();
             if (decide_mode(&am)) ensure_art_for_mode(am.w, am.h);
