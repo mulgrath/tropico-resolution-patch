@@ -454,10 +454,13 @@ static void launch_mode_check(int dw, int dh); /* ditto */
 /* ------------------------------------------------------- display scaling (DPI)
  *
  * THE PATCH IS DPI-UNAWARE, AND MAKES NO AWARENESS CALL. `Tropico.EXE` carries no
- * DPI manifest, so on Windows the desktop size it is told is the scaled one; the
- * game plays at whatever size the display reports, on every path (the launch
- * monitor's mode from EnumDisplaySettings when one is adopted, the picker's bound
- * from SM_CXSCREEN otherwise), and nothing here tries to second-guess scaling.
+ * DPI manifest, so on Windows the desktop size it is told is the scaled one, and
+ * that is what a single monitor plays at: the picker is bounded by SM_CXSCREEN, so
+ * a 4K panel at 150% plays 2560x1440 -- the size the player asked Windows for
+ * (FINDINGS 92, kept by owner's decision in FINDINGS 126). The two-monitor launch
+ * path adopts the launch monitor's mode from EnumDisplaySettings, as it always
+ * has. Nothing here tries to second-guess scaling; a player who wants a different
+ * size types it.
  *
  * HISTORY, so the absence reads as a decision. A per-monitor awareness call was
  * added (2b0248f), reverted (FINDINGS 92), brought back under `[Display]
@@ -3468,26 +3471,20 @@ static void choose_monitor(void)
     for (i = 0; i < n; i++) if (outs[i].primary) prim = i;
     if (prim < 0) { logf_("  [display] xrandr reports no primary output -- leaving it alone"); return; }
 
-    /* ONE MONITOR IS THE LAUNCH MONITOR. This used to return with nothing adopted,
-     * leaving the mode to the picker, which filters against the LOGICAL desktop --
-     * so a 4K panel at 150% ran at 2560x1440 while the same panel beside a second
-     * monitor took the launch path below and ran at its own 3840x2160 (FINDINGS
-     * 92, 122). The two paths now answer alike: the monitor's own mode as the
-     * adapter reports it (FINDINGS 125). Nothing else here applies to one monitor:
-     * it is the primary, so there is no device to substitute and no primary to
-     * move. */
+    /* ONE MONITOR: NOTHING IS ADOPTED, AND THAT IS THE RULE, NOT AN OMISSION. The
+     * picker chooses, bounded by SM_CXSCREEN -- the desktop as Windows reports it,
+     * which under display scaling is the SCALED size. A 4K panel at 150% therefore
+     * plays at 2560x1440, the size the player asked Windows for, exactly as 1.4
+     * did; typing 3840x2160 under [Resolution] is how they say otherwise
+     * (ini_fit_check keeps any size the monitor lists). FINDINGS 122 briefly made
+     * one monitor adopt its own mode here, like the launch path below; the owner
+     * reverted it before release (FINDINGS 126) because it would have changed what
+     * every single-monitor player on a scaled desktop already gets. Two monitors
+     * keep the launch path: it never read the scaled size, and it shipped that way. */
     if (n == 1) {
-        if (GetPrivateProfileIntA("Display", "FollowLaunchMonitor", 1, ip)) {
-            g_launch_w = outs[0].w;
-            g_launch_h = outs[0].h;
-            snprintf(g_launch_name, sizeof g_launch_name, "%s", outs[0].name);
-            logf_("[+] [display] one monitor -- running at %s's own mode %lux%lu",
-                  outs[0].name, (unsigned long)g_launch_w, (unsigned long)g_launch_h);
-        } else {
-            logf_("  [display] one monitor (%s, %lux%lu); FollowLaunchMonitor=0, so its"
-                  " mode is not adopted -- the picker chooses", outs[0].name,
-                  (unsigned long)outs[0].w, (unsigned long)outs[0].h);
-        }
+        logf_("  [display] one monitor (%s, %lux%lu) -- the mode is chosen within the"
+              " desktop as Windows reports it; type a [Resolution] to choose otherwise",
+              outs[0].name, (unsigned long)outs[0].w, (unsigned long)outs[0].h);
         return;
     }
 

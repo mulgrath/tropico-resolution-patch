@@ -25,14 +25,13 @@ the behaviour "run at the resolution of the screen you launched from," which
 is the whole point of the monitor selection above it. Set to `0` to keep the
 mode fixed while still picking the monitor.
 
-With a single monitor the same thing happens: its mode is adopted. With the key at
-`0` the picker chooses instead.
-
-On Windows with display scaling, the default mode is whatever size the display
-reports to a DPI-unaware process; nothing in the patch adjusts for scaling
-(FINDINGS 125). A player who wants a particular size types it under
-`[Resolution]`, which is judged against the monitor's mode list, never the
-desktop size, so it applies with scaling on.
+With a single monitor nothing is adopted and the key has no effect: the picker
+chooses the best mode inside the desktop as Windows reports it, which under
+display scaling is the scaled size (a 4K panel at 150% plays at 2560x1440,
+the size the player asked Windows for). That is what 1.4 did and it is kept
+on purpose (FINDINGS 126). A player who wants a particular size types it
+under `[Resolution]`, which is judged against the monitor's mode list, never
+the desktop size, so it applies with scaling on.
 
 An explicit `[Resolution]` beats the adopted mode either way (since
 2026-09-05; before that the adopted mode was read first and a typed

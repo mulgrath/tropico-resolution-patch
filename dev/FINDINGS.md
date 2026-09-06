@@ -11270,3 +11270,28 @@ exactly that, and nothing else in §124 was shown to matter.
 
 §124's design is superseded by this the same day; its mode-list check is the part
 that survives. The memory note on the scaling rule is rewritten to match.
+
+## 126. One monitor plays at the scaled desktop, as 1.4 did — §122's adoption reverted before release
+
+**Owner's rule, 2026-09-06, before the 1.5 draft went out.** A 4K panel at 150% on
+one monitor SHOULD play at 2560x1440 by default: that respects the player's own
+Windows choice first, and every 1.4 player on a scaled desktop already gets it.
+Typing 3840x2160 under `[Resolution]` is how they choose otherwise, and §125's
+mode-list check keeps it.
+
+§122 had made the single-monitor path adopt the panel's own mode from
+`EnumDisplaySettings`, to match the two-monitor launch path. It shipped in no
+release; reverted here to 1.4's shape -- `choose_monitor()` returns with nothing
+adopted on one monitor and the picker chooses inside `SM_CXSCREEN`. The
+two-monitor launch path is untouched: it adopts the launch monitor's mode as it
+did in 1.4, which never read the scaled size.
+
+Verified on Linux with `probes/loadproxy.c` on the nested rig display at
+2560x1440, its one output marked primary (Xephyr's is not by default, and without
+a primary `choose_monitor()` returns before the branch): the log says `one monitor
+(default, 2560x1440) -- the mode is chosen within the desktop as Windows reports
+it`, nothing is adopted, and the picker lands on 2560x1440. A game run on the same
+rig with no `[Resolution]` typed took the same picker path to slot 4 = 2560x1440. The Windows numbers are §92's: `SM_CXSCREEN`
+is the scaled size in a DPI-unaware process. On the owner's Steam install the
+overlay pre-sets DPI awareness so both numbers are the panel's (§125); a GOG
+install has no overlay and reports the scaled size.
