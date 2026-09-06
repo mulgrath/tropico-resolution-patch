@@ -61,6 +61,13 @@ plays at 3840x2160. Scaling only matters if you set your own `[Resolution]` in
 `tropico-fix.ini` larger than the desktop size Windows reports: the log will say it was
 refused for scaling, and `IgnoreScaling=1` under `[Display]` lets it through.
 
+**Translation packs** work alongside the patch, in either order. A pack such as the
+Russian one adds its own fonts as an archive in the game's `data` folder; the patch
+builds its artwork from whichever archives are present, so the translated text is drawn
+at your resolution. Install the pack before or after the patch, exactly as its own
+instructions say. Adding or removing a pack later is picked up the next time the game
+starts, with a second's rebuild. Uninstalling the patch leaves the pack in place.
+
 **Changing your resolution later** needs nothing from you. The patch checks the display
 every time the game starts.
 

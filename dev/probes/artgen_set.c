@@ -38,8 +38,8 @@ int main(int argc, char **argv)
 
     /* One blob per archive, read once. The Python used to re-read the whole archive
      * per asset -- 372 MB a time, 17.5 s of the 27.6 (FINDINGS 93). */
-    unsigned char *blob[4] = {0}; size_t blen[4] = {0};
-    for (int a = 0; a < 4; a++)
+    unsigned char *blob[AG_MAX_ARCHIVES] = {0}; size_t blen[AG_MAX_ARCHIVES] = {0};
+    for (int a = 0; a < ix.narch; a++)
         if (ix.present[a]) blob[a] = ag_slurp(ix.paths[a], &blen[a]);
 
     size_t ok = 0, skipped = 0, failed = 0, bytes = 0;

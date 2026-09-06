@@ -39,7 +39,7 @@ if [ "${1:-}" = "--list" ]; then
   else
     echo "   configured: (no tropico-fix.ini -- the patch is not installed here)"
   fi
-  M="$(cat "$GAMEDIR/data/ARTSET-MODE.txt" 2>/dev/null || true)"
+  M="$(head -n1 "$GAMEDIR/data/ARTSET-MODE.txt" 2>/dev/null || true)"
   if [ -f "$GAMEDIR/data/ARTSET-MANIFEST.txt" ]; then
     N="$(wc -l < "$GAMEDIR/data/ARTSET-MANIFEST.txt")"
   else

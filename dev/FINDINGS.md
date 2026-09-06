@@ -11104,3 +11104,67 @@ it. The two-monitor run from `Z:` on this desktop is unchanged.
   is the evidence that the physical mode plays; the single-monitor path now reuses
   it, but has not itself been run.
 
+## 123. Language packs: the Russian archive was shadowed by our own loose fonts
+
+**Report, 2026-09-06.** The Russian translation "does not work with the higher
+resolution". The pack (text archive: `data/px3_cyrl.PK2`, `data2/Tropico.lng`,
+`px_cred.lng`, `TROPICO.CFG`, `Xdat39.xdt`, the HTML manual, maps; a second archive
+of bonus maps) ships no loose art, no exe and no replaced stock archive. Its one
+archive holds the 17 stock font families at all five slots under the stock names,
+224 glyphs each as stock, with the upper indices repainted as Cyrillic; four
+further entries are not image assets.
+
+### How the exe takes it
+
+`FUN_004f1710` picks the language name from the Windows LANGID (`0x419` ->
+"russian") unless `data2\overridelanguage` exists, and loads
+`data2\<name>\tropico.lng` with `data2\tropico.lng` as the fallback -- the pack
+simply replaces the fallback. Then `0x4f1e9c`: if `data\px3_cene.PK2` exists the
+charset flag `0x613868` is 1, if `data\px3_cyrl.PK2` exists it is 2, and if `.lng`
+string `0xa8d` is two bytes or longer it is 3. Every other reader of that flag
+(`0x4519fa`.. `0x4563f9`, `0x42a39d`, `0x448e01`, `0x45d7d2`) compares against 3:
+the double-byte paths. Values 1 and 2 change nothing else.
+
+So the Cyrillic fonts arrive purely by name collision. `FUN_004eee00` enumerates
+`.\data\*.pk2` with FindFirstFile and on each pass opens the smallest name greater
+than the last one opened -- a selection sort by `strcmp`, independent of directory
+order -- so the load order is `px.PK2, px2.PK2, px3.PK2, px3_cyrl.PK2, px4.PK2`, and
+a later archive wins a hash collision. That is also how px2..px4 patch px.PK2.
+
+### Why it broke under the patch
+
+The generator indexed the four stock names only, rescaled the Latin atlases out of
+`px.PK2` and wrote them loose; loose files beat every archive (§63.1), so the
+Cyrillic set was never seen and Russian bytes rendered through Latin glyph indices.
+And the marker keyed on the mode alone, so installing the pack after the art was
+generated never regenerated, and removing it never regenerated back.
+
+### The change
+
+`ag_index_load()` lists every `*.pk2` in `data\`, sorts by `strcmp` and loads in
+that order into the existing last-writer-wins map, so the source for each name is
+the one the game would use. Fonts are detected by opcode, so the Cyrillic atlases
+take the font path unchanged. The `.WIN` name harvest walks the same list -- the
+first cut kept `a < 4` there and silently dropped the two names that live in
+`px4.PK2`'s records once the pack pushed it to index 4. `ARTSET-MODE.txt` keeps
+"WxH" on its first line (what the proxy cross-check, `tropico-setmode.sh` and the
+rig read) and then names each archive with its size; any difference regenerates.
+The log names every archive indexed.
+
+Measured: `dev/probes/artgen_langpack.sh` -- stock-only vs stock+pack at
+2560x1440 differ in exactly the 17 fonts, nothing else, and the pack's `comi07.i16`
+equals the Python oracle's rescale of the pack's own container; stock-only output
+byte-identical to the previous build across all 267 assets. In game on the GOG copy
+under the rig at 2560x1440 with the pack installed: the log lists five archives,
+regenerates on the marker change, and the owner confirmed Russian text scaled
+correctly in every area.
+
+### Other packs
+
+Latin-script translations (French, German, Spanish, Italian, Portuguese) ship only
+`.lng` text and use the stock atlases, so they never touched the generator. A
+Central European pack would use `px3_cene.PK2` by the same mechanism and is covered
+by the same glob, untested. Japanese and Chinese are charset 3 and route through
+the double-byte renderer; out of scope. The one shape that would still break is a
+pack that ships its fonts as loose files in `data\`, which the generator overwrites
+by name; none is known to exist.

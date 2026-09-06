@@ -115,6 +115,14 @@ Two monitors
 
     Every launch lists the names it can see in tropico-fix.log.
 
+Translation packs
+    The Russian pack and others like it work with the patch, in either order.
+    Follow the pack's own instructions: it adds its fonts as an archive in
+    data\, and the patch builds its artwork from whichever archives are
+    present, so the translated text is drawn at your resolution. Adding or
+    removing a pack later is picked up the next time the game starts.
+    uninstall.bat leaves the pack alone.
+
 Changing resolution later
     You usually do not have to. The patch reads the display every time it
     starts and builds artwork to match, so changing your resolution or
@@ -137,7 +145,7 @@ It puts back the original binkw32.dll and removes every file the patch
 generated, by the list the patch itself wrote down -- never by wildcard.
 
 Your saved games and TROPICO.CFG are not touched, and neither are the px*.PK2
-archives. The patch never writes to any of them.
+archives -- a translation pack's included. The patch never writes to any of them.
 
 
 --------------------------------------------------------------------------------
