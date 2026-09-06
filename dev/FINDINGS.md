@@ -11295,3 +11295,71 @@ rig with no `[Resolution]` typed took the same picker path to slot 4 = 2560x1440
 is the scaled size in a DPI-unaware process. On the owner's Steam install the
 overlay pre-sets DPI awareness so both numbers are the panel's (§125); a GOG
 install has no overlay and reports the scaled size.
+
+## 127. Issue #1: two monitors at 125% adopted the panel's mode into the scaled desktop
+
+**The report (2026-09-06, the first on the 1.5 draft).** Windows 11, Steam, a
+3840x2160 primary at 125% beside a 2560x1440 second monitor. With 1.4 and again with
+1.5: "the image is being rendered at 3840x2160 but only partially drawn on the
+screen." Setting scaling to 100% fixes it. Log at
+`logs/issue1-steam-4k-125pct-two-monitors.log.gz`.
+
+**What the log says.** The process is DPI-unaware -- `SM_CXSCREEN` and
+`GetDeviceCaps` both read 3072x1728, the 4K panel divided by 1.25, and the DirectDraw
+enumeration puts `\\.\DISPLAY1` at (0,0)-(3072,1728). So the Steam overlay did NOT
+pre-set awareness here, which §126 assumed it always does on Steam; that reading held
+only for the owner's install. The launch path adopted `DISPLAY1`'s own mode from
+`EnumDisplaySettings`, 3840x2160, DllMain cached it and generated the 4K art, and the
+patch pass then printed `ADOPTED MODE DOES NOT FIT ... 3840x2160 ... 3072x1728` with
+the wrong cause ("started on one monitor and opened on another") and wrote slot 4 as
+3840x2160 anyway -- the inert check §122 described. The game draws a 4K frame into a
+3072x1728 surface, and the player sees a corner of it, magnified. The 1.4 symptom was
+the same because 1.4's two-monitor path was the same.
+
+**The mechanism, in one sentence.** One monitor plays inside the scaled desktop (§126);
+two monitors adopted the physical mode, so scaling answered opposite ways on the two
+paths, and the two-monitor answer was the one that cannot be displayed.
+
+### The change
+
+`choose_monitor()` adopts the launch monitor's mode only when it fits the desktop the
+game is given. Judged only when the launch monitor IS the primary, because
+`SM_CXSCREEN` is the primary and the comparison is then exact; a monitor about to be
+made primary (Wine) or driven as a device (DeviceSelect) is not measured by
+`SM_CXSCREEN` yet, and is adopted as before. When the mode does not fit, nothing is
+adopted, the log names the cause (display scaling and the percentage on Windows, a
+virtual desktop under Wine) and the picker chooses inside the scaled desktop, exactly
+as with one monitor. For the reporter that is the largest listed mode inside
+3072x1728, 2560x1440 on a typical adapter -- what a 4K single-monitor player at 150%
+already gets (§124's report shows that size drawing correctly in a DPI-unaware run).
+
+The check lives at adoption because `launch_mode_check()` runs after DllMain has
+cached the decision and generated art for it; its wrong-cause sentence is now
+unreachable for this case and is otherwise untouched.
+
+### Measured
+
+Under Wine on the two-monitor desktop with `probes/loadproxy.c`, shipped DLL against
+this build: the Wine set-primary path (launched from DP-3) and the primary path at
+100% (`Monitor=HDMI-A-5`) log byte-identically. The reporter's shape was reproduced
+with a 1600x900 Wine virtual desktop read against the host's 1920x1080 primary:
+before, `running at HDMI-A-5's own mode 1920x1080` and art for it; after, the refusal
+line and the picker at 1600x900.
+
+**Not measured, and the gate for closing #1:** a native Windows run with two
+monitors and the primary scaled. The owner's dual-boot has both monitors; the GOG
+copy there has no overlay and reports the scaled size (§126), so it should reach the
+new line. Expected log: `DISPLAY1's own mode is 2560x1440, but the desktop Windows
+gives this game is 2048x1152 (display scaling about 125%)` and slot 4 = 1920x1080.
+
+### What this leaves open
+
+* A typed `[Resolution]` larger than the scaled desktop writes the same slot-4 value
+  this report failed on, so on a DPI-unaware install it very likely draws the same
+  corner. `ini_fit_check()` accepts it by the mode list (§125), on the strength of runs
+  where awareness was pre-set. The README's "a size your monitor lists is always kept"
+  stands until a deliberate test says otherwise; the reporter's own answer, 100%
+  scaling, is the only 4K-at-125% result measured so far.
+* Whether the Steam overlay pre-sets DPI awareness depends on something not yet
+  identified (overlay enabled or not, most likely). §126's "on Steam both numbers are
+  the panel's" is an observation about one install, not a rule.

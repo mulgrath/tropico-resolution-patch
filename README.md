@@ -53,11 +53,11 @@ matches itself to that screen and puts your desktop back the way it was when you
 While the game runs, that screen becomes your main display, and if the game crashes it
 can stay that way — starting Tropico again puts it back.
 On Windows, the game opens on whichever monitor you started it from too, at that
-monitor's own resolution — nothing to set, and by default your desktop's main display
-is never touched.
+monitor's resolution as Windows reports it — nothing to set, and by default your
+desktop's main display is never touched.
 
-**Windows display scaling** is respected. On one monitor the game plays at the size
-Windows says your desktop is, such as 2560x1440 on a 4K monitor at 150%. To play at the
+**Windows display scaling** is respected. The game plays at the size Windows says your
+desktop is, such as 2560x1440 on a 4K monitor at 150%, with one monitor or several. To play at the
 monitor's full resolution instead, type it under `[Resolution]` in `tropico-fix.ini`. A
 size your monitor lists as one of its modes is always kept, scaling or not.
 

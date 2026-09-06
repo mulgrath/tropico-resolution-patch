@@ -25,6 +25,17 @@ the behaviour "run at the resolution of the screen you launched from," which
 is the whole point of the monitor selection above it. Set to `0` to keep the
 mode fixed while still picking the monitor.
 
+The adopted mode has to fit the desktop as Windows reports it. When the launch
+monitor is already the primary, its own mode (from `EnumDisplaySettings`, never
+DPI-virtualized) is adopted only if it fits `SM_CXSCREEN`; under display
+scaling it does not, and the picker chooses inside the scaled desktop exactly
+as with one monitor (FINDINGS 127 -- issue #1, where a 4K primary at 125%
+beside a second monitor was adopted at 3840x2160 into a 3072x1728 desktop and
+the game drew only a corner of its picture). A launch monitor that is not the
+primary is adopted as before: on Windows it is driven as a DirectDraw device,
+under Wine it is about to become the primary, and neither is measured by
+`SM_CXSCREEN` at this point.
+
 With a single monitor nothing is adopted and the key has no effect: the picker
 chooses the best mode inside the desktop as Windows reports it, which under
 display scaling is the scaled size (a 4K panel at 150% plays at 2560x1440,

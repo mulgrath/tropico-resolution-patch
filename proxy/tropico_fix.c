@@ -3480,7 +3480,8 @@ static void choose_monitor(void)
      * one monitor adopt its own mode here, like the launch path below; the owner
      * reverted it before release (FINDINGS 126) because it would have changed what
      * every single-monitor player on a scaled desktop already gets. Two monitors
-     * keep the launch path: it never read the scaled size, and it shipped that way. */
+     * take the launch path below, which since FINDINGS 127 reads the scaled size
+     * too when the launch monitor is the primary. */
     if (n == 1) {
         logf_("  [display] one monitor (%s, %lux%lu) -- the mode is chosen within the"
               " desktop as Windows reports it; type a [Resolution] to choose otherwise",
@@ -3558,11 +3559,44 @@ static void choose_monitor(void)
      * removes the condition: whatever mode this monitor is in, the art for it is built
      * a moment from now. */
     if (GetPrivateProfileIntA("Display", "FollowLaunchMonitor", 1, ip)) {
-        g_launch_w = outs[chosen].w;
-        g_launch_h = outs[chosen].h;
-        snprintf(g_launch_name, sizeof g_launch_name, "%s", outs[chosen].name);
-        logf_("[+] [display] running at %s's own mode %lux%lu", outs[chosen].name,
-              (unsigned long)g_launch_w, (unsigned long)g_launch_h);
+        /* THE PRIMARY'S OWN MODE HAS TO FIT THE DESKTOP THE GAME IS GIVEN. outs[] holds
+         * EnumDisplaySettings numbers, which Windows never DPI-virtualizes; the game
+         * is DPI-unaware and gets SM_CXSCREEN, the SCALED desktop. Issue #1 (FINDINGS
+         * 127): a 4K primary at 125% beside a second monitor was adopted at 3840x2160,
+         * the game was given a 3072x1728 desktop, and the picture was drawn at 4K
+         * with only a corner of it on screen. One monitor already plays inside the
+         * scaled desktop (FINDINGS 126); the launch monitor, when it is the primary,
+         * now does the same, so scaling answers the same way on both paths. Only the
+         * primary is judged here: SM_CXSCREEN IS the primary, so the comparison is
+         * exact, while a monitor about to be made primary (Wine) or driven as a
+         * device (DeviceSelect) is checked, or deliberately not, further on.
+         * launch_mode_check() could not catch this: it runs after DllMain has cached
+         * the adopted mode and generated art for it (FINDINGS 122). */
+        int dw = GetSystemMetrics(SM_CXSCREEN), dh = GetSystemMetrics(SM_CYSCREEN);
+        if (chosen == prim && dw > 0 && dh > 0 &&
+            (outs[chosen].w > (DWORD)dw || outs[chosen].h > (DWORD)dh)) {
+            /* Under Wine the same shape is a virtual desktop smaller than the
+             * monitor (Wine virtualizes nothing, FINDINGS 92), so name that instead. */
+            if (running_under_wine())
+                logf_("[!] [display] %s's own mode is %lux%lu, but this game is inside a"
+                      " %dx%d virtual desktop -- the mode is chosen within that desktop,"
+                      " as it is on one monitor",
+                      outs[chosen].name, (unsigned long)outs[chosen].w,
+                      (unsigned long)outs[chosen].h, dw, dh);
+            else
+                logf_("[!] [display] %s's own mode is %lux%lu, but the desktop Windows"
+                      " gives this game is %dx%d (display scaling about %d%%) -- the mode"
+                      " is chosen within that desktop, as it is on one monitor",
+                      outs[chosen].name, (unsigned long)outs[chosen].w,
+                      (unsigned long)outs[chosen].h, dw, dh,
+                      (int)((outs[chosen].w * 100 + dw / 2) / dw));
+        } else {
+            g_launch_w = outs[chosen].w;
+            g_launch_h = outs[chosen].h;
+            snprintf(g_launch_name, sizeof g_launch_name, "%s", outs[chosen].name);
+            logf_("[+] [display] running at %s's own mode %lux%lu", outs[chosen].name,
+                  (unsigned long)g_launch_w, (unsigned long)g_launch_h);
+        }
     }
 
     /* The target, as the name DirectDraw will be asked for. Recorded here
