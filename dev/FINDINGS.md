@@ -11852,3 +11852,33 @@ should draw as they did; and a client-launched Steam run should log the third li
 draw as S1k did. The reporter's own shape (a 4K primary at 125% beside a second
 monitor, unaware) is then the first line and 3840x2160 adopted, which is what they
 asked for; still not measured on a 4K panel here.
+
+## 133. A typed size smaller than the panel is a real mode switch on both editions, and the F2 dialog says so
+
+**The owner's question after §132, 2026-09-07:** does "downsizing" -- 1080p on a 1440p
+monitor, 1440p on a 4K one -- work by typing it? Two runs at 100%, build 1d1dada,
+`[Resolution] 1920x1080`, TUTORIAL clicked, F2 in the map, 1:1 captures, the harness
+of §131:
+
+| run | copy, launch | the process | slot 4 | mode and dpi at every shot | the dialog |
+|---|---|---|---|---|---|
+| H5 | GOG, direct | UNAWARE (in this build a typed size below the desktop declares nothing) | 1920x1080 | 1920x1080, 96 dpi | `Resolution 1920 x 1080`, the tutorial map behind it (H5-t47) |
+| H6 | Steam, launched by the client | PER_MONITOR_AWARE before DllMain (the client's layer, 128.1) -- the state §132's build produces itself | 1920x1080 | 1920x1080, 96 dpi | `Resolution 1920 x 1080` (H6-t51) |
+
+Both logs read `[+] [Resolution] 1920x1080 from tropico-fix.ini wins over
+\\.\DISPLAY1's own mode 2560x1440 -- an explicit setting beats an automatic one`, the
+art was generated at font scale 1.0, and the display switched to 1920x1080 for the run
+and back after the kill. H6 is therefore the downsize under §132's default, measured
+before that build exists: an aware process at a smaller typed mode is a display-mode
+switch and nothing else, and the unaware one (H5) is the same switch with §131.3's
+caveat that the new mode's scale would apply if it had one (100% at 1920x1080 here).
+How the smaller picture fills the panel is the monitor's or the GPU driver's scaling
+choice -- this LG centres it, 128.3 -- and the captures, which are of the mode, say
+nothing about that.
+
+**One log line corrected.** Both runs printed `[*] the mode (1920x1080) is SMALLER
+than the screen it is running in (2560x1440) -- expect the game to paint inside a
+larger fullscreen backdrop`, a note written on 2026-08-23 for the Wine virtual desktop,
+where a smaller mode is a mistake and does paint inside the larger desktop. On native
+Windows the display switches, so `launch_mode_check()` now says that there and keeps
+the old wording under Wine. Logs `logs/scaling-*-typed-1080-*-1d1dada.log.gz`.

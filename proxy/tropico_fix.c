@@ -1296,14 +1296,25 @@ static void apply_patches(void)
          * fullscreen at the larger size and the game paints the smaller one inside it,
          * which looks like the game "shrinking to a window". Measured 2026-08-23 after
          * step 6 dropped the launcher's ini write. One line, so it never costs a
-         * session again. */
+         * session again. On native Windows the display switches to the smaller mode
+         * instead -- measured on both editions with a typed 1920x1080 on the 1440p
+         * panel (FINDINGS 133) -- so the note says that there; how the smaller picture
+         * fills the panel is the monitor's or the GPU driver's scaling setting. */
         {
             int dw = GetSystemMetrics(SM_CXSCREEN), dh = GetSystemMetrics(SM_CYSCREEN);
-            if (dw && dh && ((DWORD)dw > m.w || (DWORD)dh > m.h))
-                logf_("  [*] the mode (%lux%lu) is SMALLER than the screen it is running"
-                      " in (%dx%d) -- expect the game to paint inside a larger fullscreen"
-                      " backdrop. If that is not what you wanted, tropico-fix.ini and the"
-                      " display disagree.", m.w, m.h, dw, dh);
+            if (dw && dh && ((DWORD)dw > m.w || (DWORD)dh > m.h)) {
+                if (running_under_wine())
+                    logf_("  [*] the mode (%lux%lu) is SMALLER than the screen it is running"
+                          " in (%dx%d) -- expect the game to paint inside a larger fullscreen"
+                          " backdrop. If that is not what you wanted, tropico-fix.ini and the"
+                          " display disagree.", m.w, m.h, dw, dh);
+                else
+                    logf_("  [*] the mode (%lux%lu) is smaller than the monitor's own (%dx%d)"
+                          " -- the display switches to it while the game runs; whether the"
+                          " picture is stretched to fill the panel or centred with black"
+                          " around is the monitor's or the GPU driver's scaling setting, not"
+                          " this patch's", m.w, m.h, dw, dh);
+            }
         }
 
         /* The mode is final here. Make the art match it before the game reads any --
