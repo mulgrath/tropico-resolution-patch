@@ -215,3 +215,42 @@ real hardware.
 `TROPICO_TRACE=1 tools/tropico-rig.sh` adds Wine's d3d channels (bounded to the last
 40 MB) when you need to know what failed *before* a crash — a backtrace says where it
 died, never why.
+
+## Trap 8 — DPI awareness set from outside the patch, and a scale that drifts
+
+Two days of Windows scaling runs (FINDINGS 122-127) were read off a process that was
+DPI-aware before `DllMain` ran, and none of them measured scaling at all. Three things
+do that on the owner's machine, and none of them is visible in the game:
+
+- **The Steam client.** It launches the game with `__COMPAT_LAYER=DWM8And16BitMitigation
+  HighDpiAware` in the environment, which overrides every registry layer for that
+  process (FINDINGS 128.1). The overlay toggle does not change it; `DPIUNAWARE` on the
+  exe does not change it. `dev/tools/win-procenv.ps1` reads a running process's
+  environment and parent, and is how this was found.
+- **A compatibility flag on the exe.** `HKCU\Software\Microsoft\Windows
+  NT\CurrentVersion\AppCompatFlags\Layers` holds `HIGHDPIAWARE` for the Steam
+  `Tropico.EXE` (the "Override high DPI scaling" checkbox). Windows adds
+  `DWM8And16BitMitigation` to the same value by itself on first run; that one does not
+  confer awareness, `HIGHDPIAWARE` does.
+- **A scale set by script.** `dev/tools/win-dpi-scale.ps1` sets 125% through the call
+  Settings uses, and it fell back to 100% across the game's own display-mode switch and
+  once on its own. A run launched after that measured nothing (FINDINGS 128.4).
+
+**The rule, the same as trap 2's and trap 7's:** verify the input reached the program.
+Before interpreting any scaling result read `SM_CXSCREEN` against `EnumDisplaySettings`
+in the log block -- equal numbers under a scaled desktop mean the process was aware, and
+the run says nothing about scaling. `dev/tools/win-scaling-run.ps1` runs
+`probes/dpiprobe.c` before every launch and refuses to launch unless the unaware
+reading is the scaled size, probes again after the kill, and reads the game window's
+and the process's awareness from outside while it runs.
+
+**An unaware Steam-edition run** is a direct launch of the Steam exe with `SteamAppId`,
+`SteamGameId` and `SteamClientLaunch` set and nothing else: the stub relaunches through
+the client unless those are present, and the client's launch is what carries the layer
+(`win-scaling-run.ps1 -Env`). The GOG copy is unaware as it stands.
+
+**The compositor, not the mode list, decides what is on screen.** A DPI-unaware window
+is scaled by the desktop's factor, so a mode larger than the scaled desktop is drawn
+larger than the panel and only its top-left corner is visible (FINDINGS 128.3). A mode
+the adapter lists can still be drawn wrong; the mode list only says the panel can show
+it.
