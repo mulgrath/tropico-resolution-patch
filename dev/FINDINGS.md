@@ -11539,3 +11539,31 @@ focused window and driven as a DirectDraw device at 1920x1080 under the 200% pri
 disappeared between 10 and 22 s after launch with no error in its log block and no
 Application-log event. Not reproduced deliberately, so not a known issue
 (TESTING's rule); the shape is DeviceSelect on the secondary with the primary scaled.
+
+## 129. The Windows trip's run, replayed on the Linux rig: same frames, and a diff that means something
+
+**2026-09-07, on the nested rig at 2560x1440**, the GOG copy under Wine, driven by
+`dev/tools/rig-run.sh` with `dev/probes/xinput.c` for input -- the Linux shape of
+§128's harness: the game window awaited, ESC at 10 s, the menu photographed at 22 s,
+TUTORIAL clicked at 24 s (at 0.504, 0.368 of the mode -- within a few pixels of where the Windows
+run clicked at 2560x1440), the map photographed at 40 and 55 s, the process killed at
+60 s, the log block kept beside the shots. Shots in `<gamedir>/rig-shots/`.
+
+* **The 1.5 release DLL and the build of 9af827e (§128.5's `typed_mode_awareness()`,
+  compiled here for the first time) draw the same frames.** Menu captures identical
+  to the pixel; the two map captures differ in 5848 pixels, all inside a 149x221
+  patch at the left edge, which is the shoreline's wave animation caught at another
+  phase. Two captures of one run 15 s apart differ by nothing, so the frames are
+  stable enough that a diff is a measurement.
+* **The rig's map frame is the Windows one.** Against §128.7's D1b capture (native
+  2560x1440 on the dual-boot at 200%), the half-size frames agree to within 5.5% of
+  pixels at a 10% fuzz -- resampling, waves and sprite dither -- with the same HUD,
+  advisor box and world extent by eye.
+* **What does not translate:** anything DPI. Wine virtualizes nothing, so the
+  awareness call of §128.5 returns before it runs. The rig can say the new build
+  regresses nothing on the default and typed paths at any mode; the gate for calling
+  §128.5 done is still the built DLL on the corner shape on the dual-boot.
+
+The game window under `wine explorer /desktop` is a child of the desktop window
+(class `explorer.exe`), not a top-level, so `xinput` searches two levels down; the
+first attempt waited on the top level and never saw it.

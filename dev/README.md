@@ -21,7 +21,10 @@ builds its payload from an explicit list that does not include this directory.
   photograph, read the window's and the process's DPI awareness, kill, verify
   again), `win-screenshot.ps1`, and `win-procenv.ps1` (a running process's
   environment and parent, which is how the Steam client's `__COMPAT_LAYER` was
-  found).
+  found). And its Linux counterpart on the nested rig (FINDINGS 129):
+  `rig-run.sh` (one unattended run: launch, ESC through the intro, photograph
+  the menu, click TUTORIAL, photograph the map, kill, keep the log block) with
+  `probes/xinput.c` for the keyboard and mouse.
 - `WINDOWS-TRIP.bat` — the manual Windows test pass.
 
 ## Recovering deleted instruments

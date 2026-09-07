@@ -189,6 +189,26 @@ The rig window is larger than your monitor, so you only ever see a corner of it.
 does not matter** — `tropico-rigshot.sh` grabs the nested server's *root window*, so the
 capture is the full frame regardless. Shots land in `<gamedir>/rig-shots/`.
 
+**Unattended, the way the Windows trip ran (FINDINGS 128, 129):**
+
+```sh
+TROPICO_DIR=/path/to/app dev/tools/rig-run.sh rel15 2560x1440            # the folder's own DLL
+TROPICO_DIR=/path/to/app dev/tools/rig-run.sh new 2560x1440 --dll proxy/binkw32.dll
+compare -metric AE app/rig-shots/rel15-t55.png app/rig-shots/new-t55.png null:
+```
+
+`rig-run.sh` starts the rig, waits for the game window, sends ESC through the intro,
+photographs the menu, clicks TUTORIAL, photographs the map twice, kills the game and
+keeps the log block beside the shots as `TAG-tropico-fix.log`. Input goes in through
+XTEST (`dev/probes/xinput.c`, built on first use), the same path a real keyboard and
+mouse take, so nothing is posted behind Wine's back. Times count from the window
+appearing, not from launch, because llvmpipe start-up is not stable. The frames are
+deterministic enough to diff: two runs of one build differ by nothing, and two builds
+that draw the same layout differ only in the wave animation at the shoreline. A
+`--dll` run puts the folder's own DLL back on every exit path. What it cannot test is
+anything DPI: Wine virtualizes nothing, so the awareness path of FINDINGS 128 returns
+before doing anything here.
+
 It restores the active art set and kills the wineserver bound to the nested display on
 exit (leaving one attached to a dead server breaks the *next* normal launch — Trap 1).
 
