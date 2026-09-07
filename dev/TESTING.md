@@ -279,3 +279,22 @@ is scaled by the desktop's factor, so a mode larger than the scaled desktop is d
 larger than the panel and only its top-left corner is visible (FINDINGS 128.3). A mode
 the adapter lists can still be drawn wrong; the mode list only says the panel can show
 it.
+
+**A mode switch brings that mode's own scale** (FINDINGS 131.3). The "drift" above is
+Windows applying the recommended scale of whatever mode the game switches to: 100% at
+1920x1080 and 150% at 3840x2160 on the 27-inch panel, whatever the desktop was set to.
+So a run whose game switches modes is never photographed at the scale the probe read
+before launch, and an unaware window in a mode that arrives scaled is a corner (the
+v1.5 release at a typed 3840x2160, at 100%). The driver prints the monitor's effective
+DPI beside every window reading; read it before believing a frame.
+
+**Start the Steam client before a direct launch.** With the client not running, the
+direct launch runs DllMain, starts the client, and is replaced by a second process 16 s
+later (two log blocks from one launch, the ESC and the early shots wasted). The second
+process is still unaware -- the relaunch is only to start the client -- but the run's
+timings are off. With the client up it is one process (FINDINGS 131.4).
+
+**A half-size capture cannot judge a glyph.** `win-screenshot.ps1` halves the frame by
+default, and a pixel-doubled font halved is its 1080p bitmap again, so every capture
+before FINDINGS 131 says nothing about font quality. `win-scaling-run.ps1 -FullShots`
+saves 1:1 (a 4K frame is 17-21 MB); compare crops, not whole frames.

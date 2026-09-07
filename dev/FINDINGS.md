@@ -11669,3 +11669,142 @@ and the launcher read the first line only and are unaffected.
 
 `probes/artgen_masters.c` drives `ag_generate_set()` natively and prints the per-font
 log lines, which is how the tables above were read.
+
+## 131. The shipped DLL on the dual-boot: the typed path draws the whole frame on both editions, a mode switch carries its own scale, and the larger-master fonts are on the panel
+
+**2026-09-07, the Windows session after the Linux one, driven from the desktop app's
+shell as in §128.** Build 1d1dada (`proxy/binkw32.dll`, sha256 `225315fc...`), DISPLAY1
+the 2560x1440 LG as primary, DISPLAY2 the 1080p panel; the GOG copy unaware as it
+stands; the Steam copy given the same DLL and a fresh ini, launched outside the client
+with its own variables (128.4) and the exe's `HIGHDPIAWARE` layer taken off for the run
+and put back after. `tools/win-scaling-run.ps1` verified the unaware probe before every
+launch as before and now also prints the monitor's effective DPI beside every window
+reading, sends a key (`-KeyAt`, F2 for the settings dialog), can re-apply the scale
+mid-run (`-ReapplyAt`) and can capture at 1:1 (`-FullShots`; `win-screenshot.ps1
+-Full`), since a half-size capture of a pixel-doubled font is its 1080p bitmap again.
+Logs `logs/scaling-*-1d1dada*.log.gz` and `logs/scaling-*-v1.5-*.log.gz`, one block
+each; shots as `H*-t*.png` in `<gamedir>\scaling-trip\`, the 1:1 comparisons beside
+them as `ab-*.png` (release over new) and `zoom-*.png` (4x, nearest).
+
+### 131.1 The runs
+
+| run | copy, build, desktop scale | `[Resolution]` | the process saw at DllMain | slot 4 | awareness read from outside; monitor dpi at the shots | on the panel |
+|---|---|---|---|---|---|---|
+| H1 | GOG, 1d1dada, 125% | 2560x1440 | 2048x1152, the `[dpi]` line, then 2560x1440 | 2560x1440 | PER_MONITOR_AWARE | the whole menu (H1-t22); G2b was the corner |
+| H2 | GOG, 1d1dada, 125% | none | 2048x1152; §127's refusal line | 1920x1080 | UNAWARE; 96 dpi (100%) from t=6 on | the whole menu in the 1920x1080 mode (H2-t22) |
+| H2b | as H2, 125% re-applied at t=4 | none | as H2 | 1920x1080 | UNAWARE; 120 dpi (125%) from t=4 to t=40, the window still 1920x1080 panel px | the whole menu (H2b-t22) |
+| H3 | Steam, 1d1dada, 125%, client not running | 2560x1440 | two blocks 16 s apart: the first process ran DllMain and the art, the client started, a second process replaced it, again unaware at DllMain | 2560x1440 | PER_MONITOR_AWARE | the intro at t22 (the ESC had missed), whole |
+| H3b | Steam, 1d1dada, 125%, client running | 2560x1440 | 2048x1152, the `[dpi]` line, 2560x1440 | 2560x1440 | PER_MONITOR_AWARE; 120 dpi held | the whole menu (H3b-t22); S1l was the corner |
+| H4, H4f | GOG, 1d1dada, 125% | 3840x2160 | 2048x1152, the `[dpi]` line, 2560x1440; then accepted by the mode list | 3840x2160 | PER_MONITOR_AWARE; 144 dpi (150%) in the 4K mode | whole: menu, TUTORIAL map (t42), the F2 dialog reading `3840 x 2160` (t47) |
+| H4g | GOG, 1d1dada, 100% | 3840x2160 | 2560x1440, the `[dpi]` line (3840 > 2560), 2560x1440 | 3840x2160 | PER_MONITOR_AWARE; 144 dpi | whole: map and dialog |
+| H4r | GOG, **v1.5 release**, 100% | 3840x2160 | 2560x1440; accepted by the mode list; no awareness call exists in that build | 3840x2160 | UNAWARE; 144 dpi (150%) in the 4K mode | **the top-left 2560x1440 of the frame magnified 1.5x** (H4r-t22, t42): the TUTORIAL click hit the wall, no map |
+| H4c | GOG, v1.5 release with `HIGHDPIAWARE` on the exe, 100% | 3840x2160 | 2560x1440, aware before DllMain | 3840x2160 | PER_MONITOR_AWARE; 144 dpi | whole: map and dialog, doubled fonts -- the control for 131.5 |
+
+### 131.2 §128.5 is done
+
+H1 and H3b are G2b and S1l with the shipped DLL: the same ini, the same unaware
+process at DllMain (the `[dpi]` line can only fire when `SM_CXSCREEN` read the scaled
+size), and the whole frame where the corner was, on both editions. The line reads as
+predicted, first thing after the banner:
+
+    [+] [dpi] [Resolution] 2560x1440 is larger than the desktop Windows scales this game to (2048x1152), so the game is measured in the monitor's own pixels from here on: the desktop now reads 2560x1440
+
+The README's "a size your monitor lists is always kept, scaling or not" is now true of
+the screen and not only of the slot, on the GOG copy and on a Steam exe launched
+without the client's layer. At 100% the line still fires for a mode above the panel
+(H4g: "larger than the desktop Windows scales this game to (2560x1440) ... the desktop
+now reads 2560x1440"), which reads oddly but is the true condition; 131.3 says why it
+matters there too.
+
+### 131.3 Issue #1's gate, and what a mode switch does to the scale
+
+H2 is §127's expected log on native Windows, word for word: `\\.\DISPLAY1's own mode
+is 2560x1440, but the desktop Windows gives this game is 2048x1152 (display scaling
+about 125%) -- the mode is chosen within that desktop, as it is on one monitor`, no
+`[dpi]` line, slot 4 = 1920x1080, the whole frame. The DPI beside each shot shows why
+G1 and H2 look alike and why §128.4's "drift" is not drift: **a display-mode switch
+carries that mode's own recommended scale.** On this 27-inch panel the 1920x1080 mode
+reads 96 dpi (100%) whatever the 2560x1440 desktop was set to, and the 3840x2160 mode
+reads 144 dpi (150%) whether the desktop was at 100% (H4g, H4r, H4c) or at 125% (H4,
+H4f). The offset is usually gone when the game's mode is restored -- the probe after
+H1, H2 and every H4 read 100% -- but not always (H3b kept 125%); not explained. The
+reporter's game never left 3840x2160, which is why their 125% held throughout.
+
+So an unaware window after a switch is scaled by the new mode's factor, not by the
+desktop it started in. H4r is the proof in the negative: the v1.5 release, unaware, a
+typed 3840x2160 on the 1440p panel at 100% -- a case §125 called safe because the
+adapter lists the mode -- is drawn as a corner, because the 4K mode brings 150% with
+it. H2 is the proof in the positive, the 1920x1080 mode bringing 100%. H2b, 125%
+re-applied after the switch, left the window at 1920x1080 panel px and the frame whole:
+a scale applied to a running exclusive-mode window does not re-scale it, so H2b says
+nothing about a mode that arrives scaled, and H4r does. With the shipped DLL the H4r
+shape is gone (H4g: the same ini and scale, the `[dpi]` line, the whole map and
+dialog), because a mode above the panel is always above the desktop as reported.
+
+**For the reporter** (a 4K panel at 125%, two monitors, unaware): §127 now refuses the
+adoption and the picker takes 2560x1440, which is a switch. The frame is whole if the
+2560x1440 mode's recommended scale on their panel is 100%: Windows recommends from
+physical pixel density, and 2560x1440 is 109 ppi at 27 inches and less on anything
+larger, so on a 27-inch or larger 4K panel that mode reads 100% and the frame is H2's.
+§124's report is the same switch on a real player's panel: 4K at 150%, the game at
+2560x1440, drawn correctly. A 24-inch 4K panel (184 ppi native) would get 125% in that
+mode and the corner back; no such panel here, not measured. **Recommendation, the
+owner decides:** the default path is the one path left where a mode's own scale can
+land on an unaware window. Either the default goes native (awareness always declared,
+§128.7's taste question), or -- keeping the scaled-desktop default the scaling rule
+asks for -- awareness is declared only when the mode about to be set differs from the
+desktop's, which is exactly the switch case: the picked size is unchanged, the switch
+is then a real one in panel pixels, and no recommended scale applies. Neither is
+designed or measured; the rule (no DPI code on the default path) stands until the
+owner says otherwise. #1 closes on H2 with the caveat stated.
+
+### 131.4 The Steam edition: start the client first, and what the exe's layer is
+
+* **H3, the client not running.** The direct launch's first process ran DllMain --
+  the `[dpi]` line, the art regenerated -- then the Steam client started (steam.exe two
+  seconds after the launch) and a second process replaced the first 16 s later. The
+  second block has the `[dpi]` line too, so the relaunched process did NOT carry the
+  client's `HighDpiAware` layer: the stub relaunches through the client only to start
+  it, and the game that finally runs is the direct one. The harness's ESC at 10 s hit
+  nothing and t22 was the intro. H3b with the client already up is one block, one
+  process, the expected log and the whole frame. TESTING trap 8 says so now.
+* **H4c, `HIGHDPIAWARE` on the exe.** The registry layer makes the process
+  per-monitor aware, not merely system-aware -- read from outside, and the 4K mode's
+  150% did not scale it. So a client-launched Steam player typing 3840x2160 on a 1440p
+  panel gets the whole frame from the client's layer, and the DLL's own call finds its
+  condition false because the desktop already reads the panel (128.5).
+
+### 131.5 The fonts, on the panel
+
+The log lines at 2560x1440 (H1, H3b) and 3840x2160 (H4*) are §130.3's counts exactly
+-- `comi12.i16: 148 glyph(s) drawn from comi24.i16, 0 kept doubled (family score
+0.92)` at 4K, `copp6.i16: 88 glyph(s) drawn from copp12.i16, 44 kept doubled`, and so
+on -- with no `[x]`, and generation took 1.2 s for the 267 assets, as before.
+
+The 1:1 captures, H4c (release, every glyph a pixel double) against H4g (this build),
+same map, same dialog, same 4K mode:
+
+* the dialog's label block (`Full Screen` down to `Shifting`, 1360x440 px) differs in
+  20,159 of 598,400 pixels, 3.4%, all of them in the glyphs -- the paper, the boxes and
+  the ticks are identical;
+* the advisor's Times paragraph (1360x150 px) differs in 0 of 204,000 pixels, as it
+  must (no larger Times ships);
+* zoomed 4x (`zoom-fullscreen.png`, `zoom-resolution.png`, `zoom-hud.png`), the
+  release's Comic labels and the HUD's Copperplate readouts are staircases of 2x2
+  blocks and this build's have the curve of the master, one pixel per step. At viewer
+  size (`ab-*.png`, the composites unzoomed) the two are hard to tell apart, which is
+  the honest size of the gain: real at 1:1 on a 27-inch 4K, not dramatic.
+
+### 131.6 Not measured
+
+* A 4K panel of any size on the default path -- the reporter's own machine -- and the
+  24-inch case of 131.3.
+* The 1080p panel at 150% (QA section C), still.
+* Why the scale offset sometimes survives the game's exit (H3b) and usually does not,
+  and why a scale applied to a running exclusive-mode window does not re-scale it
+  (H2b). Recorded, not chased.
+* The two-monitor case with the game sent to DISPLAY2 (§128.7's D1), still not
+  reproduced deliberately.
+
+The release DLL used as the control is the v1.5 tag's `known-good/binkw32.dll`
+(sha256 `475fc021...`), kept beside the GOG copy as `binkw32.dll.1.5-release`.
