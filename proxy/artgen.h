@@ -69,13 +69,22 @@ void ag_assets_free(ag_assets *a);
 
 /* --- generation --------------------------------------------------------- */
 
+/* What a font took from its larger master, for the log: glyphs drawn from the
+ * master, glyphs that kept the double, and the family's median shape score. */
+typedef struct { int taken, kept; double median; } ag_master_report;
+
 /* One container, rescaled. Returns a malloc'd buffer the caller frees, or NULL.
  * `from_w/from_h` is what the source class is authored for -- 1600x1200 for i16,
- * 640x480 for the menu assets. Fonts ignore it and take `font_scale` uniformly. */
+ * 640x480 for the menu assets. Fonts ignore it and take `font_scale` uniformly.
+ * `master` is a larger size of the same font family, or NULL: with one, and a
+ * font scale above 1, each glyph's pixels come from the master where the shape
+ * check passes (FINDINGS 130) and the cell geometry stays what the scale gives.
+ * NULL reproduces the plain resample byte for byte. `rep` may be NULL. */
 unsigned char *ag_rescale_container(const unsigned char *d, size_t len,
                                     int to_w, int to_h, int from_w, int from_h,
                                     double font_scale, int font_nn,
-                                    size_t *out_len);
+                                    const unsigned char *master, size_t master_len,
+                                    ag_master_report *rep, size_t *out_len);
 
 /* The whole set: harvest, resolve, generate, write loose files into <gamedir>\data,
  * then the manifest and the marker. Returns the number of assets written, or -1.
@@ -89,7 +98,7 @@ int ag_set_is_current(const char *gamedir, int to_w, int to_h, double font_scale
 
 /* The marker text a set for this mode over these archives carries: "WxH" on the
  * first line (what tools/tropico-setmode.sh and the proxy's cross-check read), then
- * one "name size" line per archive in index order. */
+ * one "name size" line per archive in index order, then the generator revision. */
 int ag_marker_text(const char *datadir, int to_w, int to_h, char *out, size_t n);
 
 #endif

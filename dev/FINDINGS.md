@@ -11579,3 +11579,93 @@ chased.
 The game window under `wine explorer /desktop` is a child of the desktop window
 (class `explorer.exe`), not a top-level, so `xinput` searches two levels down; the
 first attempt waited on the top level and never saw it.
+
+## 130. Scaled fonts drawn from the larger size the game already ships, glyph by glyph, with a shape check
+
+**The question (owner, 2026-09-07):** native 4K is the better default, but the text
+must look good there, since that is where larger resolutions get into trouble.
+
+**What 4K text was.** The generator derives the font scale from the mode as H/1080,
+so at 3840x2160 every glyph is scaled 2.0. At exactly 2.0 the box and nearest filters
+are byte-identical -- each destination cell falls wholly inside one source pixel --
+so a 4K glyph was a lossless pixel double of the 1080p bitmap. Never worse than
+1080p, never better: the extra pixels carried no information. At 1.33 (1440p) and 1.6
+(3072x1728) the fractional resample is where softness actually appears, which is
+what `[Art] FontNearest` exists for.
+
+**What the archives hold.** The seventeen font assets are named face and point size:
+comi07/08/10/12/24, copp6/8/10/12, cour03/05/08, and singletons haet46, nose61,
+scri25, sten10, time16. So for the Comic, Copperplate and Courier faces a larger
+rendering of the same glyphs exists. It is not a clean multiple: comi24's capitals
+are 1.83x comi12's (n=140 glyphs of width >= 10, sd 0.05), each size hinted on its
+own, and across all 224 glyphs the ratio varies widely. Replacing comi12 with comi24
+would change every advance and rewrap every line.
+
+### 130.1 The design
+
+The small font's scaled cell stays exactly what the double gives -- nw, nh, nx, ny
+unchanged, so layout is byte-identical -- and the master's glyph is box-resampled
+INTO that cell. Per glyph, a shape check decides whether the master is the same
+glyph: the small glyph resampled into the cell (the baseline) against the master
+resampled into the same cell, as a Pearson correlation of opacity. A glyph takes the
+master above 0.70, and only when the family's median is above 0.72; anything else,
+including every glyph under 4 px in either direction, keeps the double, which is
+what shipped before. The master for a face at scale s is the same face's smallest
+size that is at least size*s, else its largest size above its own. Only at scales
+above 1. `ag_rescale_container()` takes the master as an argument; with NULL it
+reproduces the old bytes exactly, which is what `probes/artgen_set.c` passes, so the
+Python oracle still holds byte for byte (checked: a 2560x1440 set from the old and
+the new build, 267 files, identical).
+
+### 130.2 The calibration, on stock and on the Russian archive
+
+Correlations of baseline against candidate, glyphs of width and height >= 4:
+
+| pairing | n | min | p05 | median | max |
+|---|---|---|---|---|---|
+| stock comi12 <- comi24, x2.0 | 148 | 0.799 | 0.852 | 0.924 | 0.973 |
+| pack comi12 <- comi24, x2.0 | 218 | 0.799 | 0.840 | 0.923 | 0.973 |
+| stock comi10 <- comi24, x2.0 | 148 | 0.757 | 0.836 | 0.911 | 0.956 |
+| stock comi12 <- comi24, x1.33 | 148 | 0.847 | 0.889 | 0.956 | 0.986 |
+| wrong face: time16 <- comi24, x2.0 | 148 | 0.066 | 0.217 | 0.526 | 0.881 |
+| the adversary: pack comi12 (Cyrillic) <- stock comi24 (Latin), the 124 repainted indices | 124 | -0.415 | -0.135 | 0.000 | 0.573 |
+
+The adversary is the case the owner's rule is about (memory: packs must keep
+working): a pack that repainted its small sizes and left a larger one Latin. Not one
+of its glyphs reaches 0.60. A wrong face has a few look-alikes above 0.85 (l, I, |),
+which is why the family gate exists: its median is 0.53. The small Copperplate sizes
+score 0.75-0.82 against copp12 -- 6 and 8 pt glyphs are hinted hard -- and their
+master rendering is visibly better, so the family gate sits at 0.72, between the
+wrong-face median and the weakest genuine family. Glyphs the check rejects within an
+accepted family keep the double (copp6: 88 taken, 44 kept at 4K).
+
+The Russian archive: its comi12 and comi24 both hold 224 glyphs, the pack repainted
+the same 125 indices in both, and the size relationship matches stock. At 4K it takes
+217-218 Comic glyphs per size from comi24, 211 Copperplate glyphs from copp12 and 216
+Courier from cour08, with the Cyrillic shapes preserved (tiles compared by eye:
+Ћ, ‰, the quotation marks). The archives are kept at
+`~/tropico-ru-backup-2026-09-06/packs/` now.
+
+### 130.3 What each font takes, stock, 4K and 1440p
+
+At 3840x2160: comi07/08/10/12 from comi24 (146-148 of 148 real glyphs), cour05 from
+cour08 (147), copp6/8/10 from copp12 (88/108/114, the rest doubled), cour03 from
+cour08 (143). At 2560x1440: comi08 from comi12, comi12 from comi24, copp6 from copp8,
+and so on by the same rule. Times (the advisor box), Haettenschweiler, the script and
+stencil faces have no larger size and stay a pixel double; the advisor's text is the
+one place native 4K still reads as 1080p.
+
+### 130.4 Measured in the game, on the rig
+
+`dev/tools/rig-run.sh` at 3840x2160 and 2560x1440, the settings dialog photographed
+(§129): the dialog's Comic labels are visibly sharper from the master at 4K, less so
+but still at 1440p; the advisor's Times text is pixel-identical to before, as it
+must be. Layout identical: the menu frames diff by nothing. Generation time
+unchanged to the eye (the check resamples each font twice more; 17 files).
+
+The marker now carries a generator revision line (`fonts master-1`) after the archive
+lines, so a set an older build made is rebuilt once on upgrade; `tools/tropico-setmode.sh`
+and the launcher read the first line only and are unaffected.
+
+`probes/artgen_masters.c` drives `ag_generate_set()` natively and prints the per-font
+log lines, which is how the tables above were read.
