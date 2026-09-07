@@ -9,7 +9,10 @@
  *                               mapped (default 60 s); prints its id and geometry
  *   xinput rect                 the game window's geometry, or "no Tropico window"
  *   xinput click X Y            move the pointer to X,Y (root coordinates) and click
- *   xinput key   NAME           press and release a keysym: Escape, Return, F2 ...
+ *   xinput key   NAME [MS]      press a keysym (Escape, Return, F2 ...) and release it
+ *                               MS later (default 250: in a map the game polls the key
+ *                               state per frame, and on llvmpipe a frame can outlast
+ *                               a short tap -- an 80 ms F2 was missed one run in two)
  *
  * DISPLAY selects the server, so the rig's nested display is just DISPLAY=:9.
  *
@@ -73,7 +76,7 @@ static int print_rect(Window w)
 int main(int argc, char **argv)
 {
     Window root;
-    if (argc < 2) { fprintf(stderr, "usage: xinput wait|rect|click X Y|key NAME\n"); return 2; }
+    if (argc < 2) { fprintf(stderr, "usage: xinput wait|rect|click X Y|key NAME [MS]\n"); return 2; }
     dpy = XOpenDisplay(NULL);
     if (!dpy) { fprintf(stderr, "xinput: cannot open display\n"); return 2; }
     root = DefaultRootWindow(dpy);
@@ -102,18 +105,19 @@ int main(int argc, char **argv)
         printf("clicked at %d,%d\n", x, y);
         return 0;
     }
-    if (!strcmp(argv[1], "key") && argc == 3) {
+    if (!strcmp(argv[1], "key") && (argc == 3 || argc == 4)) {
+        int hold_ms = argc == 4 ? atoi(argv[3]) : 250;
         KeySym ks = XStringToKeysym(argv[2]);
         KeyCode kc = ks == NoSymbol ? 0 : XKeysymToKeycode(dpy, ks);
         if (!kc) { fprintf(stderr, "xinput: no keycode for %s\n", argv[2]); return 2; }
         XTestFakeKeyEvent(dpy, kc, True, CurrentTime);
         XFlush(dpy);
-        usleep(80000);
+        usleep(hold_ms * 1000);
         XTestFakeKeyEvent(dpy, kc, False, CurrentTime);
         XFlush(dpy);
         printf("pressed %s\n", argv[2]);
         return 0;
     }
-    fprintf(stderr, "usage: xinput wait|rect|click X Y|key NAME\n");
+    fprintf(stderr, "usage: xinput wait|rect|click X Y|key NAME [MS]\n");
     return 2;
 }

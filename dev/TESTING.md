@@ -198,8 +198,13 @@ compare -metric AE app/rig-shots/rel15-t55.png app/rig-shots/new-t55.png null:
 ```
 
 `rig-run.sh` starts the rig, waits for the game window, sends ESC through the intro,
-photographs the menu, clicks TUTORIAL, photographs the map twice, kills the game and
-keeps the log block beside the shots as `TAG-tropico-fix.log`. Input goes in through
+photographs the menu, clicks TUTORIAL, photographs the map, opens the settings dialog
+with F2 (only reachable inside a map -- trap 3), photographs it, kills the game and
+keeps the log block beside the shots as `TAG-tropico-fix.log`. The dialog's
+resolution list is the visible form of the mode gate, and its text is what the VText
+fix lays out. The F2 press is checked a second later against the map shot and sent
+again if the frame did not change: in a map the game polls the key per frame, and on
+llvmpipe a press is missed now and then. A whole run is about 30 s. Input goes in through
 XTEST (`dev/probes/xinput.c`, built on first use), the same path a real keyboard and
 mouse take, so nothing is posted behind Wine's back. Times count from the window
 appearing, not from launch, because llvmpipe start-up is not stable. The frames are

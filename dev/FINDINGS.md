@@ -11544,17 +11544,24 @@ Application-log event. Not reproduced deliberately, so not a known issue
 
 **2026-09-07, on the nested rig at 2560x1440**, the GOG copy under Wine, driven by
 `dev/tools/rig-run.sh` with `dev/probes/xinput.c` for input -- the Linux shape of
-§128's harness: the game window awaited, ESC at 10 s, the menu photographed at 22 s,
-TUTORIAL clicked at 24 s (at 0.504, 0.368 of the mode -- within a few pixels of where the Windows
-run clicked at 2560x1440), the map photographed at 40 and 55 s, the process killed at
-60 s, the log block kept beside the shots. Shots in `<gamedir>/rig-shots/`.
+§128's harness: the game window awaited, ESC at 4 s, the menu photographed at 8 s,
+TUTORIAL clicked at 10 s (at 0.504, 0.368 of the mode -- within a few pixels of where
+the Windows run clicked at 2560x1440; the button's animation takes about 4 s and the
+map lands between 16 and 18 s), the map photographed at 18 s, F2 at 20 s and the
+settings dialog photographed at 22 s, the process killed at 24 s, the log block kept
+beside the shots. About 30 s a run. Shots in `<gamedir>/rig-shots/`.
 
 * **The 1.5 release DLL and the build of 9af827e (§128.5's `typed_mode_awareness()`,
   compiled here for the first time) draw the same frames.** Menu captures identical
-  to the pixel; the two map captures differ in 5848 pixels, all inside a 149x221
-  patch at the left edge, which is the shoreline's wave animation caught at another
-  phase. Two captures of one run 15 s apart differ by nothing, so the frames are
-  stable enough that a diff is a measurement.
+  to the pixel; the map and the settings dialog differ by 5000-7000 pixels, all
+  inside a 150x220 patch at the left edge, which is the shoreline's wave animation
+  caught at another phase. Two captures of one run 15 s apart differ by nothing, so
+  the frames are stable enough that a diff is a measurement. The dialog reads
+  `Resolution 2560 x 1440` on both, with the rotated tab labels in place.
+* **F2 is polled, not posted.** ESC through the intro never missed; F2 in the map was
+  missed one run in four at an 80 ms hold and once more at 250 ms, on either build.
+  The driver now checks the frame a second after the press and presses again if the
+  map is still showing; with the check, no run has missed.
 * **The rig's map frame is the Windows one.** Against §128.7's D1b capture (native
   2560x1440 on the dual-boot at 200%), the half-size frames agree to within 5.5% of
   pixels at a 10% fuzz -- resampling, waves and sprite dither -- with the same HUD,
@@ -11563,6 +11570,11 @@ run clicked at 2560x1440), the map photographed at 40 and 55 s, the process kill
   awareness call of §128.5 returns before it runs. The rig can say the new build
   regresses nothing on the default and typed paths at any mode; the gate for calling
   §128.5 done is still the built DLL on the corner shape on the dual-boot.
+
+Not explained: the `[worldfix] FIRING -- N world draw(s) corrected` count at exit is
+6-9 with the 1.5 release and 93-96 with the new build, in either run order, while the
+frames are identical. Nothing between the two touches the painter; recorded, not
+chased.
 
 The game window under `wine explorer /desktop` is a child of the desktop window
 (class `explorer.exe`), not a top-level, so `xinput` searches two levels down; the

@@ -9,12 +9,16 @@
 #   WxH        the rig's screen and the mode the ini is set to (default 2560x1440).
 #   --dll FILE run this proxy build instead of the one in the game folder; the
 #              folder's own DLL is put back on exit, whatever happens.
-#   --no-click stay on the menu (no TUTORIAL click); the map shots then show the menu.
+#   --no-click stay on the menu (no TUTORIAL click); the map shots then show the menu,
+#              and no F2 is sent (the settings dialog opens only inside a map).
 #
 # Times are seconds after the game WINDOW appears, not after launch, because the rig
-# runs on llvmpipe and start-up time is not stable: shot at 6 (intro), ESC at 10,
-# shot at 22 (menu), TUTORIAL at 24, shots at 40 and 55 (map), kill at 60. Override
-# with RIG_SHOTS="6 22 40 55" RIG_ESC=10 RIG_CLICK=24 RIG_KILL=60.
+# runs on llvmpipe and start-up time is not stable: shot at 2 (intro), ESC at 4,
+# shot at 8 (menu), TUTORIAL at 10, shot at 18 (map: the button's animation takes
+# about 4 s and the load lands between 16 and 18), F2 at 20, shot at 22 (the settings dialog: the
+# resolution list is the visible form of the mode gate, and its text is what the
+# VText fix lays out), kill at 24. Override with
+# RIG_SHOTS="2 8 18 22" RIG_ESC=4 RIG_CLICK=10 RIG_F2=20 RIG_KILL=24.
 #
 # The TUTORIAL button is found by proportion of the mode: the menu art is generated
 # per mode, so the button sits at the same fraction of the screen at every size
@@ -48,7 +52,7 @@ GAMEDIR="${TROPICO_DIR:-$(tropico_find_nearby "$PWD" || true)}"
 export TROPICO_DIR="$GAMEDIR"
 OUT="$GAMEDIR/rig-shots"; mkdir -p "$OUT"
 
-SHOTS="${RIG_SHOTS:-6 22 40 55}"; ESC_AT="${RIG_ESC:-10}"; CLICK_AT="${RIG_CLICK:-24}"; KILL_AT="${RIG_KILL:-60}"
+SHOTS="${RIG_SHOTS:-2 8 18 22}"; ESC_AT="${RIG_ESC:-4}"; CLICK_AT="${RIG_CLICK:-10}"; F2_AT="${RIG_F2:-20}"; KILL_AT="${RIG_KILL:-24}"
 read -r TX TY <<<"${RIG_TUTORIAL_XY:-0.504 0.368}"
 
 # The input tool, built once beside its source.
@@ -107,7 +111,7 @@ echo "[$TAG] t=0 $WIN"
 events=""
 for s in $SHOTS; do events="$events $s:shot"; done
 events="$events $ESC_AT:esc $KILL_AT:kill"
-[ "$CLICK" = 1 ] && events="$events $CLICK_AT:click"
+[ "$CLICK" = 1 ] && events="$events $CLICK_AT:click $F2_AT:f2"
 for e in $(echo "$events" | tr ' ' '\n' | sort -t: -k1,1n); do
   t="${e%%:*}"; k="${e##*:}"
   now=$(date +%s.%N)
@@ -116,6 +120,18 @@ for e in $(echo "$events" | tr ' ' '\n' | sort -t: -k1,1n); do
   case "$k" in
     shot)  f="$OUT/$TAG-t$t.png"; import -window root "$f" 2>/dev/null; echo "[$TAG] t=${t}s $("$XIN" rect) -> $f" ;;
     esc)   echo "[$TAG] t=${t}s $("$XIN" key Escape)" ;;
+    f2)    # The game polls F2 per frame in a map, and on llvmpipe a press is missed now and
+           # then whatever the hold. So the press is checked: a second later the frame must
+           # differ from the last map shot by more than the waves do, or it is sent again.
+           last="$(ls -t "$OUT/$TAG"-t*.png 2>/dev/null | head -1)"
+           for try in 1 2 3; do
+             "$XIN" key F2 >/dev/null; sleep 1
+             import -window root "$OUT/$TAG-f2check.png" 2>/dev/null
+             ae="$(compare -metric AE "$last" "$OUT/$TAG-f2check.png" null: 2>&1 || true)"
+             case "$ae" in *e+*|[1-9][0-9][0-9][0-9][0-9][0-9]*) echo "[$TAG] t=${t}s settings: F2 press $try opened the dialog"; break ;; esac
+             [ "$try" = 3 ] && echo "[$TAG] t=${t}s settings: F2 missed three times -- the dialog shot will show the map"
+           done
+           rm -f "$OUT/$TAG-f2check.png" ;;
     click) x=$(awk -v w="$W" -v f="$TX" 'BEGIN{printf "%d", w*f}'); y=$(awk -v h="$H" -v f="$TY" 'BEGIN{printf "%d", h*f}')
            echo "[$TAG] t=${t}s TUTORIAL: $("$XIN" click "$x" "$y")" ;;
     kill)  pid="$(pgrep -f 'Tropico.EXE' | head -1 || true)"
