@@ -25,28 +25,36 @@ the behaviour "run at the resolution of the screen you launched from," which
 is the whole point of the monitor selection above it. Set to `0` to keep the
 mode fixed while still picking the monitor.
 
-The adopted mode has to fit the desktop as Windows reports it. When the launch
-monitor is already the primary, its own mode (from `EnumDisplaySettings`, never
-DPI-virtualized) is adopted only if it fits `SM_CXSCREEN`; under display
-scaling it does not, and the picker chooses inside the scaled desktop exactly
-as with one monitor (FINDINGS 127 -- issue #1, where a 4K primary at 125%
-beside a second monitor was adopted at 3840x2160 into a 3072x1728 desktop and
-the game drew only a corner of its picture). A launch monitor that is not the
-primary is adopted as before: on Windows it is driven as a DirectDraw device,
-under Wine it is about to become the primary, and neither is measured by
-`SM_CXSCREEN` at this point.
+The adopted mode has to fit the desktop as Windows reports it. Since FINDINGS
+132 the DLL declares per-monitor DPI awareness in DllMain on native Windows, so
+that desktop is the panel itself and the launch monitor's own mode always fits.
+The check stays for the cases where awareness could not be declared -- there a
+DPI-unaware process is given the scaled desktop, and FINDINGS 127 (issue #1)
+is what happens without it: a 4K primary at 125% beside a second monitor was
+adopted at 3840x2160 into a 3072x1728 desktop and the game drew only a corner
+of its picture -- and for a Wine virtual desktop. When the launch monitor is
+already the primary, its own mode (from `EnumDisplaySettings`, never
+DPI-virtualized) is adopted only if it fits `SM_CXSCREEN`; otherwise the picker
+chooses inside that desktop exactly as with one monitor. A launch monitor that
+is not the primary is adopted as before: on Windows it is driven as a
+DirectDraw device, under Wine it is about to become the primary, and neither
+is measured by `SM_CXSCREEN` at this point.
 
 With a single monitor nothing is adopted and the key has no effect: the picker
-chooses the best mode inside the desktop as Windows reports it, which under
-display scaling is the scaled size (a 4K panel at 150% plays at 2560x1440,
-the size the player asked Windows for). That is what 1.4 did and it is kept
-on purpose (FINDINGS 126). A player who wants a particular size types it
-under `[Resolution]`, which is judged against the monitor's mode list, never
-the desktop size, so it applies with scaling on. A typed size larger than the
-scaled desktop also makes the process DPI-aware from DllMain, because without
-that the compositor draws the window larger than the panel and only its
-top-left corner is visible (FINDINGS 128, measured at 125%); a typed size that
-fits the scaled desktop changes nothing about awareness.
+chooses the best mode inside the desktop as Windows reports it, which on
+native Windows is the monitor's own resolution whatever the display scale (a
+4K panel at 150% plays at 3840x2160). That is the owner's decision of
+2026-09-07 (FINDINGS 132), reversing the scaled-desktop default 1.4 and 1.5
+played (FINDINGS 126), after the measurements of FINDINGS 128 and 131: a
+DPI-unaware window is drawn by the desktop's factor, and even a mode the game
+switches to brings that mode's own scale with it, so the only picture that is
+always whole is the aware one. A player who wants a smaller size types it under
+`[Resolution]`, which is judged against the monitor's mode list; a listed size
+above the panel (a GPU-scaled 4K mode on a 1440p panel) is kept too. Where the
+awareness call is refused because something set it first (the Steam client's
+launch, a compatibility flag) nothing changes; where it fails outright (a
+Windows before 1703) the game plays inside the scaled desktop as 1.5 did, and
+the log says so.
 
 An explicit `[Resolution]` beats the adopted mode either way (since
 2026-09-05; before that the adopted mode was read first and a typed

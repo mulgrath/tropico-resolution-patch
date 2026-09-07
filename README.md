@@ -56,10 +56,12 @@ On Windows, the game opens on whichever monitor you started it from too, at that
 monitor's resolution as Windows reports it — nothing to set, and by default your
 desktop's main display is never touched.
 
-**Windows display scaling** is respected. The game plays at the size Windows says your
-desktop is, such as 2560x1440 on a 4K monitor at 150%, with one monitor or several. To play at the
-monitor's full resolution instead, type it under `[Resolution]` in `tropico-fix.ini`. A
-size your monitor lists as one of its modes is always kept, scaling or not.
+**Windows display scaling** is left alone. The game plays at your monitor's own resolution
+whatever your desktop is scaled to, such as 3840x2160 on a 4K monitor at 150%, with one
+monitor or several. The interface is built for that size, so it keeps the same share of the
+screen as at 1080p; the world shows more, and the scroll wheel and the magnifier buttons
+zoom it. To play at a smaller size instead, type it under `[Resolution]` in
+`tropico-fix.ini`. A size your monitor lists as one of its modes is always kept.
 
 **Translation packs** work alongside the patch, in either order. A pack such as the
 Russian one adds its own fonts as an archive in the game's `data` folder; the patch

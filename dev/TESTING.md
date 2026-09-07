@@ -272,7 +272,10 @@ and the process's awareness from outside while it runs.
 **An unaware Steam-edition run** is a direct launch of the Steam exe with `SteamAppId`,
 `SteamGameId` and `SteamClientLaunch` set and nothing else: the stub relaunches through
 the client unless those are present, and the client's launch is what carries the layer
-(`win-scaling-run.ps1 -Env`). The GOG copy is unaware as it stands.
+(`win-scaling-run.ps1 -Env`). The GOG copy's process is unaware when it starts, but
+since FINDINGS 132 the DLL itself declares awareness in DllMain, so the unaware
+control is the v1.5 release DLL (`binkw32.dll.1.5-release` beside the GOG copy) or
+`TROPICO_FIX_DISABLE=1`, not the shipped build.
 
 **The compositor, not the mode list, decides what is on screen.** A DPI-unaware window
 is scaled by the desktop's factor, so a mode larger than the scaled desktop is drawn

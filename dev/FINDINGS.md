@@ -11808,3 +11808,47 @@ same map, same dialog, same 4K mode:
 
 The release DLL used as the control is the v1.5 tag's `known-good/binkw32.dll`
 (sha256 `475fc021...`), kept beside the GOG copy as `binkw32.dll.1.5-release`.
+
+## 132. Decision (owner, 2026-09-07): native resolution by default on Windows -- per-monitor DPI awareness from DllMain, always
+
+**The decision.** After §131 the owner asked whether native had become the default
+(it had not) and whether the fix reaches issue #1's reporter (a whole 2560x1440 frame,
+not the 4K they expected, and only on a panel whose 2560x1440 mode carries a 100%
+scale). The answer was to make native the default: `declare_dpi_awareness()` in
+`proxy/tropico_fix.c` now declares `PER_MONITOR_AWARE_V2` first thing in DllMain on
+native Windows, unconditionally, and `typed_mode_awareness()` is gone. This reverses
+the scaled-desktop default of §124-§126 and the "no DPI code on the default path" rule
+of §125, both the owner's, on the strength of §128 and §131: a DPI-unaware window is
+drawn by the desktop's factor, a mode the game switches to brings that mode's own
+recommended scale with it, and the only picture that is always whole is the aware one.
+Native 4K was photographed readable under a 200% desktop in §128.7, and §130's fonts
+are what make it so.
+
+**What changes for a player.** On Windows the desktop reads the panel, so the picker's
+bound is the monitor's own resolution: a 4K panel at 150% plays 3840x2160 where 1.4 and
+1.5 played 2560x1440. The two-monitor launch path adopts the launch monitor's mode as
+before, and §127's fit check is now reached only where awareness could not be declared
+(a Windows before 1703) or under a Wine virtual desktop. A typed `[Resolution]` is
+judged by the mode list as before; a smaller size is how a player says otherwise. On
+Linux nothing changes: Wine virtualizes nothing and the call is skipped. The README's
+scaling paragraph and CONFIG-REFERENCE say the new rule.
+
+**The log.** First line after the banner, one of:
+
+    [+] [dpi] Windows scaled this desktop to 2048x1152 (display scaling about 125%); the game is measured in the monitor's own pixels from here on: the desktop now reads 2560x1440
+    [+] [dpi] per-monitor DPI aware from here on; the desktop reads 2560x1440 (no display scaling in effect)
+    [*] [dpi] DPI awareness was set before this DLL loaded (the Steam client's launch, or a compatibility flag on the exe); the desktop reads 2560x1440
+
+and, only where no call changed the numbers, the `[*]`/`[x]` fallback lines of §128.5
+(the game then plays inside the scaled desktop as 1.5 did, and a typed size above it
+is warned about).
+
+**Not built, not measured.** There is no compiler on the Windows side; the owner
+builds on Linux. The gate, on the dual-boot with `tools/win-scaling-run.ps1` as in
+§131: the H2 setup (GOG copy, DISPLAY1 at 125%, no `[Resolution]`) should log the
+first line above, `SM_CXSCREEN = 2560 x 1440`, slot 4 = 2560x1440, PER_MONITOR_AWARE
+read from outside, and the whole menu; H1's typed 2560x1440 and H4g's typed 3840x2160
+should draw as they did; and a client-launched Steam run should log the third line and
+draw as S1k did. The reporter's own shape (a 4K primary at 125% beside a second
+monitor, unaware) is then the first line and 3840x2160 adopted, which is what they
+asked for; still not measured on a 4K panel here.
