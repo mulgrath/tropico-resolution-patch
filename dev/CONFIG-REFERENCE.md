@@ -42,7 +42,11 @@ display scaling is the scaled size (a 4K panel at 150% plays at 2560x1440,
 the size the player asked Windows for). That is what 1.4 did and it is kept
 on purpose (FINDINGS 126). A player who wants a particular size types it
 under `[Resolution]`, which is judged against the monitor's mode list, never
-the desktop size, so it applies with scaling on.
+the desktop size, so it applies with scaling on. A typed size larger than the
+scaled desktop also makes the process DPI-aware from DllMain, because without
+that the compositor draws the window larger than the panel and only its
+top-left corner is visible (FINDINGS 128, measured at 125%); a typed size that
+fits the scaled desktop changes nothing about awareness.
 
 An explicit `[Resolution]` beats the adopted mode either way (since
 2026-09-05; before that the adopted mode was read first and a typed

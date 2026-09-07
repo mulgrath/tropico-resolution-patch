@@ -453,24 +453,32 @@ static void launch_mode_check(int dw, int dh); /* ditto */
 
 /* ------------------------------------------------------- display scaling (DPI)
  *
- * THE PATCH IS DPI-UNAWARE, AND MAKES NO AWARENESS CALL. `Tropico.EXE` carries no
- * DPI manifest, so on Windows the desktop size it is told is the scaled one, and
- * that is what a single monitor plays at: the picker is bounded by SM_CXSCREEN, so
- * a 4K panel at 150% plays 2560x1440 -- the size the player asked Windows for
- * (FINDINGS 92, kept by owner's decision in FINDINGS 126). The two-monitor launch
- * path adopts the launch monitor's mode from EnumDisplaySettings, as it always
- * has. Nothing here tries to second-guess scaling; a player who wants a different
- * size types it.
+ * THE PATCH IS DPI-UNAWARE ON THE DEFAULT PATH, AND MAKES ONE AWARENESS CALL IN ONE
+ * CASE. `Tropico.EXE` carries no DPI manifest, so on Windows the desktop size it is
+ * told is the scaled one, and that is what the default plays at: the picker is
+ * bounded by SM_CXSCREEN, so a 4K panel at 150% plays 2560x1440 -- the size the
+ * player asked Windows for (FINDINGS 92, kept by owner's decision in FINDINGS 126)
+ * -- and the two-monitor launch path adopts the launch monitor's mode only when it
+ * fits that desktop (FINDINGS 127). A player who wants a different size types it.
  *
- * HISTORY, so the absence reads as a decision. A per-monitor awareness call was
+ * THE ONE CASE is a typed [Resolution] larger than the desktop as Windows reports
+ * it. MEASURED, 2026-09-07 (FINDINGS 128): on a DPI-unaware install at 125% a typed
+ * 2560x1440 above the 2048x1152 scaled desktop passes the mode list, is written to
+ * slot 4, and is drawn as its top-left corner magnified 1.25x -- the compositor
+ * scales an unaware window by the desktop's factor, so the window is larger than
+ * the panel. That is issue #1's picture with the size typed instead of adopted.
+ * The same run with per-monitor awareness declared first in DllMain drew the whole
+ * frame. typed_mode_awareness() declares it, in that case only.
+ *
+ * HISTORY, so the shape reads as a decision. A per-monitor awareness call was
  * added (2b0248f), reverted (FINDINGS 92), brought back under `[Display]
  * IgnoreScaling` (92.1), joined by a scaled-units conversion of the adopted mode
- * (FINDINGS 124), and all of it removed on 2026-09-06 (FINDINGS 125) after the
- * Windows runs: the awareness call was never measured to change the mode, no
- * scaling setting produced a working mode by itself, and the one thing that did
- * work was a typed [Resolution] the monitor lists -- which ini_fit_check() now
- * judges by the adapter's mode list and keeps. That is the whole mechanism: want
- * a size, type it.
+ * (FINDINGS 124), and all of it removed on 2026-09-06 (FINDINGS 125) after Windows
+ * runs in which no scaling setting seemed to do anything -- runs FINDINGS 128 found
+ * were made in a process a compatibility flag had already made aware, so they
+ * measured nothing. The key is not back: typing a size larger than the desktop IS
+ * the request to be measured in the panel's pixels, and asking for a key on top of
+ * it was the confusion the owner refused. Want a size, type it.
  *
  * KNOWN GAP, recorded: a mixed-DPI multi-monitor Windows setup applies the SYSTEM
  * dpi uniformly to an unaware process, so a monitor not at system DPI reports a
@@ -776,7 +784,13 @@ static void ini_fit_check(void)
      * plays perfectly well (DirectDraw mode setting is never DPI-virtualized), was
      * refused here as "does not fit". That was the report behind FINDINGS 124: a
      * valid resolution that simply did not apply. The mode list is not virtualized,
-     * so it says exactly what the panel can do, without any awareness call.
+     * so it says exactly what the panel can do.
+     *
+     * What it does NOT say is how large the compositor will draw the window: a typed
+     * size above the scaled desktop is drawn as a corner unless the process is
+     * DPI-aware (FINDINGS 128), which typed_mode_awareness() has declared by now, so
+     * in that case dw/dh here are already the panel's and the "larger than the
+     * desktop" line below fires only when awareness could not be declared.
      *
      * Under Wine the list is whatever the X screen or virtual desktop allows, and
      * the two numbers agree, so the desktop comparison below is kept there as the
@@ -845,6 +859,77 @@ static void ini_fit_check(void)
     }
     logf_("    Ignoring the configured mode and picking one that fits.");
     g_ini_mode_unusable = 1;
+}
+
+/* --------------------------------------- a typed mode larger than the scaled desktop
+ *
+ * MEASURED ON WINDOWS, 2026-09-07 (FINDINGS 128), the 1440p monitor at 125%, the
+ * DPI-unaware GOG build: a typed [Resolution] 2560x1440 passes the mode list, slot 4
+ * becomes 2560x1440, and the panel shows the top-left 2048x1152 of the frame
+ * magnified -- the menu's right edge and bottom are off screen, issue #1's picture.
+ * The compositor scales a DPI-unaware window by the desktop's factor, so a mode
+ * larger than the scaled desktop is a window larger than the panel. The same run
+ * with per-monitor awareness declared here drew the whole frame.
+ *
+ * So a typed size that exceeds the desktop as Windows reports it makes the process
+ * DPI-aware, before anything reads a metric -- awareness declared after a read does
+ * not correct it (FINDINGS 92.1), which is why this is the first thing DllMain does.
+ * In that case only: the default path is untouched (FINDINGS 126, 127), and a typed
+ * size that fits the scaled desktop plays as it always did. No key: typing a size
+ * larger than the desktop is the request. Under Wine nothing is virtualized
+ * (FINDINGS 92) and nothing is called.
+ *
+ * When something else set awareness before this DLL loaded -- the Steam client
+ * launches its games with `__COMPAT_LAYER=... HighDpiAware`, and a HIGHDPIAWARE
+ * compatibility flag on the exe does the same (FINDINGS 128.1) -- the desktop already
+ * reads the panel, the typed size fits, and this returns. Measured both ways on both
+ * editions: the unaware GOG copy and the Steam exe launched outside the client drew
+ * the corner without this call and the whole frame with it (FINDINGS 128.2). */
+static void typed_mode_awareness(void)
+{
+    UINT iw, ih;
+    int dw, dh;
+    HMODULE u32;
+    typedef BOOL (WINAPI *spdac_t)(HANDLE);
+    spdac_t spdac;
+
+    if (running_under_wine()) return;
+    if (!ini_named(&iw, &ih)) return;
+    dw = GetSystemMetrics(SM_CXSCREEN);
+    dh = GetSystemMetrics(SM_CYSCREEN);
+    if (dw <= 0 || dh <= 0) return;
+    if ((int)iw <= dw && (int)ih <= dh) return;
+
+    u32 = GetModuleHandleA("user32.dll");
+    spdac = u32 ? (spdac_t)(void *)GetProcAddress(u32, "SetProcessDpiAwarenessContext") : NULL;
+    /* DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4. Per-monitor rather
+     * than system-aware because the game can be started on one monitor and opened
+     * on another, and the real numbers are wanted for whichever it lands on. */
+    if (spdac && spdac((HANDLE)-4)) {
+        logf_("[+] [dpi] [Resolution] %ux%u is larger than the desktop Windows scales this"
+              " game to (%dx%d), so the game is measured in the monitor's own pixels from"
+              " here on: the desktop now reads %dx%d", iw, ih, dw, dh,
+              GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        return;
+    }
+    if (spdac)
+        logf_("[*] [dpi] SetProcessDpiAwarenessContext failed (%lu); falling back",
+              (unsigned long)GetLastError());
+    else
+        logf_("[*] [dpi] SetProcessDpiAwarenessContext not exported (pre-1703 Windows);"
+              " falling back");
+    /* SetProcessDPIAware reports success even when it changed nothing (FINDINGS
+     * 122), so the numbers are the verdict, not the return value. */
+    SetProcessDPIAware();
+    if (GetSystemMetrics(SM_CXSCREEN) != dw || GetSystemMetrics(SM_CYSCREEN) != dh)
+        logf_("[+] [dpi] [Resolution] %ux%u is larger than the desktop Windows scales this"
+              " game to (%dx%d); SetProcessDPIAware -- the desktop now reads %dx%d",
+              iw, ih, dw, dh, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    else
+        logf_("[x] [dpi] [Resolution] %ux%u is larger than the desktop Windows scales this"
+              " game to (%dx%d) and no awareness call changed that -- expect only the"
+              " top-left of the picture on screen (FINDINGS 128); 100%% display scaling"
+              " is the way around it", iw, ih, dw, dh);
 }
 
 /* ------------------------------------------------------- decide_mode
@@ -5665,6 +5750,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         logf_("[*] TROPICO_FIX_DISABLE=1 -- forwarding Bink only, applying NOTHING (control run)");
         return TRUE;
     }
+
+    /* FIRST, before any metric is read: a typed [Resolution] larger than the scaled
+     * desktop makes the process DPI-aware (FINDINGS 128). choose_monitor() below is
+     * the first reader, and awareness declared after a read does not correct it. */
+    typed_mode_awareness();
 
     /* For the same reason, and one of its own -- the game resolves
      * DirectDraw at 0x514e55, which is early. Installed only when
