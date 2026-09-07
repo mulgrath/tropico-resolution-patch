@@ -11363,3 +11363,179 @@ gives this game is 2048x1152 (display scaling about 125%)` and slot 4 = 1920x108
 * Whether the Steam overlay pre-sets DPI awareness depends on something not yet
   identified (overlay enabled or not, most likely). §126's "on Steam both numbers are
   the panel's" is an observation about one install, not a rule.
+
+## 128. Windows at 125%, measured: a typed mode above the scaled desktop draws a corner on a DPI-unaware install, and one awareness call from DllMain draws the whole frame
+
+**2026-09-07, on the dual-boot, driven entirely from the desktop app's shell** -- the
+scale set, the game launched, the screen photographed and the process killed by script,
+with no hands on the machine. DISPLAY1 is the 2560x1440 LG, primary, at 125% for the
+runs (logical desktop 2048x1152); DISPLAY2 the 1920x1080 panel at 100%; AMD RX 7900 XT.
+Every launch was preceded by `probes/dpiprobe.c` reading the desktop as an unaware
+32-bit process sees it, and refused unless it read 2048x1152; the same probe ran again
+after each kill. The launch point was the focused window on DISPLAY1, so every log
+carries the reporter's own line, `launched from \\.\DISPLAY1 ... via the focused
+window`. A per-monitor-aware capture photographed the whole panel at fixed times
+(intro, menu, menu), the game window's rectangle, its DPI awareness and its process's
+were read from outside, and the process was killed after 40-52 s. Logs:
+`logs/scaling-*.log.gz`, one block each; the harness is `tools/win-dpi-scale.ps1`,
+`tools/win-scaling-run.ps1`, `tools/win-screenshot.ps1` and `tools/win-procenv.ps1`.
+The dual-boot clock corrected itself between the first and second run, so G1's banner
+reads five hours late.
+
+### 128.1 Why every Steam run before today was DPI-aware, and it was not the patch
+
+**The Steam client launches Tropico with `__COMPAT_LAYER=DWM8And16BitMitigation
+HighDpiAware` in the game's environment** -- read out of the running process's PEB
+with `tools/win-procenv.ps1` (run S1k, parent `steam`). That variable is the
+AppCompat engine's per-process override: it wins over every registry layer, which is
+why removing the exe's `HIGHDPIAWARE` value, and even setting `DPIUNAWARE` in its
+place (run S1j), changed nothing. The process is per-monitor aware at process level
+before its imports run, so the patch's DllMain already reads the panel.
+
+The registry side is the same story: `HKCU\...\AppCompatFlags\Layers` holds
+`DWM8And16BitMitigation HIGHDPIAWARE` for the Steam `Tropico.EXE`, key last written
+2026-09-05 17:05:39, two minutes before the first surviving 1.5rc1 run. Nothing in the
+QA checklist asked for it and nobody remembers setting it; the client that hands the
+same two layers to the process is the obvious author, and Windows does write the
+`DWM8And16BitMitigation` half by itself (it did so for the GOG exe today at 15:28:05,
+one second into G1). The GOG copy carries no `HIGHDPIAWARE` and no Steam client, and
+is the honest control.
+
+So every Steam run of §122-§127 was aware before DllMain: that is §122's
+`SetProcessDpiAwarenessContext` error 5, §125's "no scaling setting changed anything",
+and §126's "the overlay pre-sets awareness", all read off a process the client had
+already made aware. The overlay is innocent (128.4). The flag was put back after the
+runs and is still there, though with the client passing the layer anyway it changes
+nothing.
+
+### 128.2 The runs
+
+| run | copy, build, launch | `[Resolution]` | the process saw | slot 4 | on the panel |
+|---|---|---|---|---|---|
+| G1 | GOG, HEAD (064bacf) | none | 2048x1152 | 1920x1080, via §127's line and the picker | the whole frame, in a 1920x1080 mode |
+| G2b | GOG, HEAD | 2560x1440 | 2048x1152 | 2560x1440, "accepted as typed" by the mode list | **the top-left 2048x1152 of the frame, magnified 1.25x**: the right edge and the bottom are off screen -- the fan, the version label, EXIT at the bottom edge; the intro logo cut the same way |
+| G3 | GOG, rc2 (`apply_ignore_scaling`), `IgnoreScaling=1` | 2560x1440 | 2560x1440, `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` succeeded from DllMain | 2560x1440 | the whole frame |
+| S1k | Steam, rc2, launched by the client, overlay off, key off | 2560x1440 | 2560x1440 -- aware at process level before DllMain, `__COMPAT_LAYER=... HighDpiAware` in its environment | 2560x1440 | the whole frame |
+| S1l | Steam, rc2, launched outside the client with Steam's own variables and no compat layer, key off | 2560x1440 | 2048x1152, window and process UNAWARE, no overlay DLL loaded | 2560x1440, accepted by the mode list | **the corner, exactly as G2b** |
+| S2 | Steam, as S1l, `IgnoreScaling=1` | 2560x1440 | 2560x1440, the DLL's call succeeded, window and process PER_MONITOR_AWARE | 2560x1440 | the whole frame |
+
+Runs not in the table: G2 and S1 launched after the scale had drifted back to 100%
+(128.4) and measured nothing; S1b-S1j were client launches with the overlay on or off,
+the flag removed, and `DPIUNAWARE` set, all aware, all explained by 128.1; S1h, a
+renamed copy of the exe, was relaunched by the stub through the client.
+
+G2b and S1l are issue #1's picture with the resolution typed instead of adopted, on
+both editions, the other GPU vendor, and the patch as it stands after §127. §127's
+"what this leaves open" is closed: on a DPI-unaware install a typed size the monitor
+lists is accepted, written to slot 4, and drawn wrong. The README's "a size your
+monitor lists is always kept, scaling or not" was true of the slot and false of the
+screen. G3 and S2 are the same runs with per-monitor awareness declared from DllMain,
+and the frame is whole; nothing else differs.
+
+### 128.3 The mechanism, and why the mode list was never the point
+
+The compositor scales a DPI-unaware window by the desktop's scale factor. The game's
+window is the mode size in the process's own logical units, so a 2560x1440 mode inside
+a 2048x1152 desktop is a 3200x1800 window in panel pixels, and the panel shows the
+top-left 2560x1440 of it: 2048x1152 of the frame, magnified. A mode equal to the scaled
+desktop is exactly full screen, which is §124's report drawing correctly at 150%. A
+mode smaller than the desktop (G1) is drawn in full. The mode list says what the panel
+can display; it says nothing about how big the compositor will draw the window, and
+that is the check §124 and §125 were missing.
+
+With awareness declared, `SM_CXSCREEN` reads the panel, the exe's own gate reads the
+panel, the window is 2560x1440 in panel pixels, and the frame is whole. The owner's
+long-standing observation fits the same mechanism: the Steam copy (aware, by the
+client) has always shown a smaller mode centred and pillarboxed -- a real display-mode
+switch, letterboxed by the monitor -- while the GOG copy (unaware) showed it in the
+top-left corner with black around, the compositor keeping the desktop's mode.
+
+### 128.4 The harness, so the next run does not fool itself
+
+* **The scale drifts.** Set through `DisplayConfigSetDeviceInfo` (the call Settings
+  uses), 125% held for a launch but fell back to 100% across a display-mode switch --
+  measured with `ChangeDisplaySettingsEx` to 1920x1080 and back, and once with no
+  switch at all, between G3 and S1 -- while `PerMonitorSettings\DpiValue` still said 1.
+  A same-mode switch left it. Whether a scale set in Settings behaves the same is not
+  measured; the reporter's runs kept 125% throughout, and their game never left
+  3840x2160. So G1's menu was drawn after the game's own switch to 1920x1080 had
+  dropped the scale, and it says nothing about an unaware window smaller than a scaled
+  desktop. The driver now probes before every launch and refuses to run otherwise
+  (TESTING trap 8).
+* **Awareness set from outside the patch** comes from the Steam client's launch
+  environment (128.1). The Steam overlay is not involved: with it disabled for the game
+  (`OverlayAppEnable 0`) the client still injects `gameoverlayrenderer.dll`, but the
+  module loads after `binkw32.dll` and the process is already aware when DllMain runs;
+  with the compat variable absent (S1l) the process is unaware, overlay DLL or not. The
+  DLL's `SetThreadDpiAwarenessContext` import is for its own drawing. `Tropico.EXE`
+  itself declares nothing: no manifest resource in either edition, no external
+  manifest, no entry in `sysmain.sdb`.
+* **An unaware Steam-edition run** is a direct launch of the Steam exe with
+  `SteamAppId`, `SteamGameId` and `SteamClientLaunch` set and nothing else -- the stub
+  relaunches through the client unless those are present, and the client's launch is
+  what carries the layer. `win-scaling-run.ps1 -Env` does it.
+* The `DWM8And16BitMitigation` layer Windows adds on first run does not confer
+  awareness: the probe with that layer read 2048x1152 at 125%.
+
+### 128.5 What follows (proposed; the owner decides)
+
+The rule of §125 -- want a size, type it -- stays, and gains the one thing that makes
+it true on an unaware install: **a typed `[Resolution]` larger than the desktop as
+Windows reports it declares per-monitor DPI awareness from DllMain**, before any metric
+is read, on native Windows only. No key: typing a size larger than the desktop is the
+request to be measured in the panel's pixels. The default path is untouched (§126,
+§127), and a typed size that fits the scaled desktop plays exactly as before. When
+awareness was already set by something else -- the Steam client, a compatibility flag
+-- the desktop already reads the panel and the condition is simply false. This is the
+measured Windows case the scaling note demanded before any awareness call came back,
+and it is the reverse of §92.1's key: the player says what they want by typing it, and
+the patch does what that needs. `typed_mode_awareness()` in `proxy/tropico_fix.c` is
+that, not yet built -- there is no compiler on the Windows side. G3 and S2 measured
+rc2's `apply_ignore_scaling()`, the same call at the same point in DllMain; the
+shipped form differs only in its condition.
+
+### 128.6 Not measured
+
+* Why the reporter's Steam client did not pass `HighDpiAware`: their process was
+  unaware with the overlay DLL injected (their log's `DirectDrawCreateEx` is redirected
+  into the same module that hosts the `GetDeviceCaps` IAT target, the overlay's hook
+  pattern, seen here too). A client version or setting; not identifiable from here.
+  The fix does not depend on it: it acts exactly when the process is unaware.
+* The built DLL, on the G2b or S1l shape: the gate for calling 128.5 done.
+* A map, and the F2 dialog: only the intro and the menu were photographed. The corner
+  is a property of the window, not of a screen, so the world view follows.
+* A mixed-DPI desktop, and a typed size on the non-primary monitor under DeviceSelect.
+* The 1080p panel at 150% (QA section C), still untouched.
+
+### 128.7 Legibility at native resolution under a 200% desktop -- the map, photographed
+
+The owner's remaining question, 2026-09-07: a 4K player scales the desktop to 200%
+because things are too small; would the game at native 4K still be readable? Two runs
+on the GOG copy with DISPLAY1 at 200% (logical desktop 1280x720, verified by the probe
+before each launch), rc2's awareness call, `Monitor=\\.\DISPLAY1` pinned because a
+click on the other monitor had sent an earlier attempt to DISPLAY2, and the tutorial
+map loaded by clicking TUTORIAL. Logs `logs/scaling-gog-200pct-*.log.gz`.
+
+* **D1b, 2560x1440 native.** The tutorial loads, the advisor's text box, the HUD, the
+  readouts and the minimap are the size they are at 100%; the world painter fired
+  (78 draws corrected). The desktop's 200% changes nothing the game draws, because
+  the process is measured in panel pixels.
+* **D2, 3840x2160 through the GPU-scaled mode the adapter lists**, on the same
+  27-inch panel: a faithful stand-in for a 27-inch 4K screen, only softer. The art is
+  regenerated at font scale 2.0, so the interface and every line of text occupy the
+  same fraction of the screen as at 1080p -- larger than at 1440p -- while the world
+  shows four times the area of 1080p with smaller sprites, which the game's own zoom
+  (scroll wheel, and the magnifier buttons on the HUD) brings back up. Readable at a
+  glance in the half-size capture.
+
+So the earlier worry that native 4K would be unreadable does not survive the
+measurement: the interface scales with the mode, and the world zooms. Whether the
+default should be native (always aware) or the scaled desktop (§126, as the code
+stands) is a taste question about world scale on small panels, and the owner decides
+it; either way the typed size now works with the player's scaling left alone.
+
+One run ended by itself and is recorded, not diagnosed: D1, sent to DISPLAY2 by the
+focused window and driven as a DirectDraw device at 1920x1080 under the 200% primary,
+disappeared between 10 and 22 s after launch with no error in its log block and no
+Application-log event. Not reproduced deliberately, so not a known issue
+(TESTING's rule); the shape is DeviceSelect on the secondary with the primary scaled.
