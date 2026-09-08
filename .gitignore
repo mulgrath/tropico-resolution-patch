@@ -37,3 +37,6 @@ dist/
 # Scratch builds of the proxy. Only proxy/binkw32.dll and known-good/binkw32.dll
 # are real artifacts; anything else is a variant from an experiment.
 proxy/binkw32_*.dll
+
+# The Linux input probe built by dev/tools/rig-run.sh; its source is xinput.c.
+dev/probes/xinput

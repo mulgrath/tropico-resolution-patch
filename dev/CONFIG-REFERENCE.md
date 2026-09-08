@@ -25,13 +25,36 @@ the behaviour "run at the resolution of the screen you launched from," which
 is the whole point of the monitor selection above it. Set to `0` to keep the
 mode fixed while still picking the monitor.
 
+The adopted mode has to fit the desktop as Windows reports it. Since FINDINGS
+132 the DLL declares per-monitor DPI awareness in DllMain on native Windows, so
+that desktop is the panel itself and the launch monitor's own mode always fits.
+The check stays for the cases where awareness could not be declared -- there a
+DPI-unaware process is given the scaled desktop, and FINDINGS 127 (issue #1)
+is what happens without it: a 4K primary at 125% beside a second monitor was
+adopted at 3840x2160 into a 3072x1728 desktop and the game drew only a corner
+of its picture -- and for a Wine virtual desktop. When the launch monitor is
+already the primary, its own mode (from `EnumDisplaySettings`, never
+DPI-virtualized) is adopted only if it fits `SM_CXSCREEN`; otherwise the picker
+chooses inside that desktop exactly as with one monitor. A launch monitor that
+is not the primary is adopted as before: on Windows it is driven as a
+DirectDraw device, under Wine it is about to become the primary, and neither
+is measured by `SM_CXSCREEN` at this point.
+
 With a single monitor nothing is adopted and the key has no effect: the picker
-chooses the best mode inside the desktop as Windows reports it, which under
-display scaling is the scaled size (a 4K panel at 150% plays at 2560x1440,
-the size the player asked Windows for). That is what 1.4 did and it is kept
-on purpose (FINDINGS 126). A player who wants a particular size types it
-under `[Resolution]`, which is judged against the monitor's mode list, never
-the desktop size, so it applies with scaling on.
+chooses the best mode inside the desktop as Windows reports it, which on
+native Windows is the monitor's own resolution whatever the display scale (a
+4K panel at 150% plays at 3840x2160). That is the owner's decision of
+2026-09-07 (FINDINGS 132), reversing the scaled-desktop default 1.4 and 1.5
+played (FINDINGS 126), after the measurements of FINDINGS 128 and 131: a
+DPI-unaware window is drawn by the desktop's factor, and even a mode the game
+switches to brings that mode's own scale with it, so the only picture that is
+always whole is the aware one. A player who wants a smaller size types it under
+`[Resolution]`, which is judged against the monitor's mode list; a listed size
+above the panel (a GPU-scaled 4K mode on a 1440p panel) is kept too. Where the
+awareness call is refused because something set it first (the Steam client's
+launch, a compatibility flag) nothing changes; where it fails outright (a
+Windows before 1703) the game plays inside the scaled desktop as 1.5 did, and
+the log says so.
 
 An explicit `[Resolution]` beats the adopted mode either way (since
 2026-09-05; before that the adopted mode was read first and a typed
@@ -175,3 +198,19 @@ Only 16:9 has a confirmed dial set. At 4:3, `ys/xs` is 1 and the defect is
 zero, so nothing needs correcting. Any other aspect is left stock — labels
 may overhang — and the log says so; FINDINGS 86 has a predicted 16:10 set
 that has not been confirmed in-game.
+
+## `[Art]`
+
+### `Generate` (shipped, default `1`)
+
+Build the interface art set for the mode at launch, into `data\`, keyed by the
+marker `data\ARTSET-MODE.txt` (mode, archive list, generator revision).
+
+### `FontNearest` (shipped as a comment, default `0`)
+
+Nearest-neighbour instead of the box filter for the fonts, for a fractional scale
+that reads soft. Since FINDINGS 130 a scaled font's glyphs are drawn from the larger
+size of the same face where the archives have one and the shape check passes; those
+glyphs are box-resampled from the master whatever this key says, and the key only
+governs the glyphs that keep the plain resample. At exactly 2.0 (a 4K mode) the two
+filters are identical anyway.

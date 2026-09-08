@@ -189,6 +189,31 @@ The rig window is larger than your monitor, so you only ever see a corner of it.
 does not matter** — `tropico-rigshot.sh` grabs the nested server's *root window*, so the
 capture is the full frame regardless. Shots land in `<gamedir>/rig-shots/`.
 
+**Unattended, the way the Windows trip ran (FINDINGS 128, 129):**
+
+```sh
+TROPICO_DIR=/path/to/app dev/tools/rig-run.sh rel15 2560x1440            # the folder's own DLL
+TROPICO_DIR=/path/to/app dev/tools/rig-run.sh new 2560x1440 --dll proxy/binkw32.dll
+compare -metric AE app/rig-shots/rel15-t55.png app/rig-shots/new-t55.png null:
+```
+
+`rig-run.sh` starts the rig, waits for the game window, sends ESC through the intro,
+photographs the menu, clicks TUTORIAL, photographs the map, opens the settings dialog
+with F2 (only reachable inside a map -- trap 3), photographs it, kills the game and
+keeps the log block beside the shots as `TAG-tropico-fix.log`. The dialog's
+resolution list is the visible form of the mode gate, and its text is what the VText
+fix lays out. The F2 press is checked a second later against the map shot and sent
+again if the frame did not change: in a map the game polls the key per frame, and on
+llvmpipe a press is missed now and then. A whole run is about 30 s. Input goes in through
+XTEST (`dev/probes/xinput.c`, built on first use), the same path a real keyboard and
+mouse take, so nothing is posted behind Wine's back. Times count from the window
+appearing, not from launch, because llvmpipe start-up is not stable. The frames are
+deterministic enough to diff: two runs of one build differ by nothing, and two builds
+that draw the same layout differ only in the wave animation at the shoreline. A
+`--dll` run puts the folder's own DLL back on every exit path. What it cannot test is
+anything DPI: Wine virtualizes nothing, so the awareness path of FINDINGS 128 returns
+before doing anything here.
+
 It restores the active art set and kills the wineserver bound to the nested display on
 exit (leaving one attached to a dead server breaks the *next* normal launch — Trap 1).
 
@@ -215,3 +240,64 @@ real hardware.
 `TROPICO_TRACE=1 tools/tropico-rig.sh` adds Wine's d3d channels (bounded to the last
 40 MB) when you need to know what failed *before* a crash — a backtrace says where it
 died, never why.
+
+## Trap 8 — DPI awareness set from outside the patch, and a scale that drifts
+
+Two days of Windows scaling runs (FINDINGS 122-127) were read off a process that was
+DPI-aware before `DllMain` ran, and none of them measured scaling at all. Three things
+do that on the owner's machine, and none of them is visible in the game:
+
+- **The Steam client.** It launches the game with `__COMPAT_LAYER=DWM8And16BitMitigation
+  HighDpiAware` in the environment, which overrides every registry layer for that
+  process (FINDINGS 128.1). The overlay toggle does not change it; `DPIUNAWARE` on the
+  exe does not change it. `dev/tools/win-procenv.ps1` reads a running process's
+  environment and parent, and is how this was found.
+- **A compatibility flag on the exe.** `HKCU\Software\Microsoft\Windows
+  NT\CurrentVersion\AppCompatFlags\Layers` holds `HIGHDPIAWARE` for the Steam
+  `Tropico.EXE` (the "Override high DPI scaling" checkbox). Windows adds
+  `DWM8And16BitMitigation` to the same value by itself on first run; that one does not
+  confer awareness, `HIGHDPIAWARE` does.
+- **A scale set by script.** `dev/tools/win-dpi-scale.ps1` sets 125% through the call
+  Settings uses, and it fell back to 100% across the game's own display-mode switch and
+  once on its own. A run launched after that measured nothing (FINDINGS 128.4).
+
+**The rule, the same as trap 2's and trap 7's:** verify the input reached the program.
+Before interpreting any scaling result read `SM_CXSCREEN` against `EnumDisplaySettings`
+in the log block -- equal numbers under a scaled desktop mean the process was aware, and
+the run says nothing about scaling. `dev/tools/win-scaling-run.ps1` runs
+`probes/dpiprobe.c` before every launch and refuses to launch unless the unaware
+reading is the scaled size, probes again after the kill, and reads the game window's
+and the process's awareness from outside while it runs.
+
+**An unaware Steam-edition run** is a direct launch of the Steam exe with `SteamAppId`,
+`SteamGameId` and `SteamClientLaunch` set and nothing else: the stub relaunches through
+the client unless those are present, and the client's launch is what carries the layer
+(`win-scaling-run.ps1 -Env`). The GOG copy's process is unaware when it starts, but
+since FINDINGS 132 the DLL itself declares awareness in DllMain, so the unaware
+control is the v1.5 release DLL (`binkw32.dll.1.5-release` beside the GOG copy) or
+`TROPICO_FIX_DISABLE=1`, not the shipped build.
+
+**The compositor, not the mode list, decides what is on screen.** A DPI-unaware window
+is scaled by the desktop's factor, so a mode larger than the scaled desktop is drawn
+larger than the panel and only its top-left corner is visible (FINDINGS 128.3). A mode
+the adapter lists can still be drawn wrong; the mode list only says the panel can show
+it.
+
+**A mode switch brings that mode's own scale** (FINDINGS 131.3). The "drift" above is
+Windows applying the recommended scale of whatever mode the game switches to: 100% at
+1920x1080 and 150% at 3840x2160 on the 27-inch panel, whatever the desktop was set to.
+So a run whose game switches modes is never photographed at the scale the probe read
+before launch, and an unaware window in a mode that arrives scaled is a corner (the
+v1.5 release at a typed 3840x2160, at 100%). The driver prints the monitor's effective
+DPI beside every window reading; read it before believing a frame.
+
+**Start the Steam client before a direct launch.** With the client not running, the
+direct launch runs DllMain, starts the client, and is replaced by a second process 16 s
+later (two log blocks from one launch, the ESC and the early shots wasted). The second
+process is still unaware -- the relaunch is only to start the client -- but the run's
+timings are off. With the client up it is one process (FINDINGS 131.4).
+
+**A half-size capture cannot judge a glyph.** `win-screenshot.ps1` halves the frame by
+default, and a pixel-doubled font halved is its 1080p bitmap again, so every capture
+before FINDINGS 131 says nothing about font quality. `win-scaling-run.ps1 -FullShots`
+saves 1:1 (a 4K frame is 17-21 MB); compare crops, not whole frames.

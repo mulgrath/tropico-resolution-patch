@@ -15,7 +15,18 @@ builds its payload from an explicit list that does not include this directory.
 - `tools/` — three checks, each run on its own: `code-equivalent.sh` (do two
   builds differ only in data?), `ini-doc-check.py` (does the shipped ini
   advertise a key the code ignores?), `sections.py` (resolve a section banner
-  to a line range).
+  to a line range). Plus the Windows scaling harness (FINDINGS 128, TESTING
+  trap 8): `win-dpi-scale.ps1` (read or set a monitor's display scale),
+  `win-scaling-run.ps1` (one unattended run: verify the scale, launch,
+  photograph, read the window's and the process's DPI awareness and the
+  monitor's live DPI, click, send F2, kill, verify again; `-FullShots` for 1:1
+  captures, `-ReapplyAt` to set the scale again after the game's mode switch),
+  `win-screenshot.ps1` (half size, or `-Full`), and `win-procenv.ps1` (a running process's
+  environment and parent, which is how the Steam client's `__COMPAT_LAYER` was
+  found). And its Linux counterpart on the nested rig (FINDINGS 129):
+  `rig-run.sh` (one unattended run: launch, ESC through the intro, photograph
+  the menu, click TUTORIAL, photograph the map, kill, keep the log block) with
+  `probes/xinput.c` for the keyboard and mouse.
 - `WINDOWS-TRIP.bat` — the manual Windows test pass.
 
 ## Recovering deleted instruments
