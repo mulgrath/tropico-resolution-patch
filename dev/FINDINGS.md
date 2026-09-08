@@ -11882,3 +11882,63 @@ larger fullscreen backdrop`, a note written on 2026-08-23 for the Wine virtual d
 where a smaller mode is a mistake and does paint inside the larger desktop. On native
 Windows the display switches, so `launch_mode_check()` now says that there and keeps
 the old wording under Wine. Logs `logs/scaling-*-typed-1080-*-1d1dada.log.gz`.
+
+## 134. The gate of §132 passes: the awareness default plays the monitor's own mode on both editions, measured on the dual-boot
+
+**2026-09-08, the Windows session after §132 and §133 were built, driven from the
+desktop app's shell as in §131.** Build efc667a (`proxy/binkw32.dll`, sha256
+`1b85585e...`, the first build of 0e50927 and ee6c5a3; the same bytes in both game
+folders, checked by hash before the runs, since an earlier deposit had not survived a
+reboot). DISPLAY1 the 2560x1440 LG as primary, DISPLAY2 the 1080p panel;
+`tools/win-scaling-run.ps1` as in §131: the unaware probe verified before every launch
+(2048x1152 at 125%, 2560x1440 at 100%) and again after the kill, the window's and the
+process's awareness and the monitor's effective DPI read from outside at every shot,
+half-size captures. The Steam client was started before H10 and shut down after
+(131.4); the scale was put back to 100% and both inis restored. Logs
+`logs/scaling-*-efc667a.log.gz`, one block each; shots `H7-*` to `H9-*` in the GOG
+copy's `scaling-trip\`, `H10-*` in the Steam copy's.
+
+### 134.1 The runs
+
+| run | copy, desktop scale | `[Resolution]` | first line after the banner | `SM_CXSCREEN` = `EnumDisplaySettings` | slot 4 | awareness read from outside; monitor dpi at the shots | on the panel |
+|---|---|---|---|---|---|---|---|
+| H7 | GOG, 125% | none -- §131's H2 setup, the decisive one | `[+] [dpi] Windows scaled this desktop to 2048x1152 (display scaling about 125%); the game is measured in the monitor's own pixels from here on: the desktop now reads 2560x1440` | 2560x1440 | 2560x1440 | PER_MONITOR_AWARE, window and process; 120 dpi (125%) at t=6, 22, 40 | the whole menu in the 2560x1440 mode (H7-t22). H2, the same setup on 1d1dada, was 1920x1080 |
+| H8 | GOG, 125% | 2560x1440 (H1's shape) | the same line, then `ini override: 2560x1440` | 2560x1440 | 2560x1440 | PER_MONITOR_AWARE; 120 dpi | the whole menu (H8-t22), as H1 |
+| H9 | GOG, 100% | 3840x2160 (H4g's shape); TUTORIAL clicked at 26 s (1935,795 -- 0.504, 0.368 of the 4K mode), F2 at 44 s | `[+] [dpi] per-monitor DPI aware from here on; the desktop reads 2560x1440 (no display scaling in effect)`, then `3840x2160 is larger than the desktop Windows reports (2560x1440) but the monitor lists it as a mode -- accepted as typed` | 2560x1440 | 3840x2160 | PER_MONITOR_AWARE; 144 dpi (150%) in the 4K mode at every shot | whole: the menu (t22), the TUTORIAL map (t42), the F2 dialog reading `3840 x 2160` (t47), as H4g |
+| H10 | Steam, 125%, launched by the client | 2560x1440 | `[*] [dpi] DPI awareness was set before this DLL loaded (the Steam client's launch, or a compatibility flag on the exe); the desktop reads 2560x1440` | 2560x1440 | 2560x1440 | PER_MONITOR_AWARE before DllMain; 120 dpi; `__COMPAT_LAYER=DWM8And16BitMitigation HighDpiAware` in the process's environment, parent `steam`, one block | the whole menu (H10-t22), as S1k and H3b |
+
+The three lines are §132's three, word for word, each on the setup §132 assigned it,
+and no `[*]`/`[x]` fallback line printed in any run. Equal `SM_CXSCREEN` and
+`EnumDisplaySettings` under a scaled desktop are trap 8's mark of an aware process,
+and here that is the finding: the probe read 2048x1152 immediately before H7 and H8
+and again after them, and the `[dpi]` line's own "2048x1152" is what the process
+measured in DllMain before its call, so the runs measured scaling and the DLL removed
+it. The art was generated once for the Steam copy (267 assets for 2560x1440, font
+scale 1.333, 1234 ms) and once for the GOG copy at 3840x2160 (font scale 2.0), with
+§130.3's glyph counts; the 4K mode's 150% did not touch the aware window (H9), and the
+probe after H9 read 2560x1440, the offset gone with the mode as in 131.3.
+
+### 134.2 What the gate says
+
+* **Issue #1 closes on H7.** The setup that gave H2's 1920x1080 -- the picker
+  fitting a mode inside the 2048x1152 desktop Windows scales an unaware game to --
+  now gives the monitor's own 2560x1440, whole, with 125% still in effect on the
+  desktop. The reporter's shape (a 4K primary at 125% beside a second monitor) is
+  the same first line with 3840x2160 adopted, which is what they asked for; §132's
+  caveat stands, a 4K panel is not here to photograph it on.
+* **The typed path is unchanged by the new default.** H8 is H1 and H9 is H4g: the
+  `[dpi]` line first, then the typed size judged by the mode list as before, the
+  whole map and dialog in a mode that brings its own 150%. §133's smaller typed size
+  was measured on 1d1dada under the client's layer (H6), the state this build now
+  produces itself, and is not repeated here.
+* **A client-launched Steam run is what it was.** The client's layer makes the
+  process aware before DllMain, the DLL finds the desktop already reading the panel,
+  prints the `[*]` line and changes nothing (H10 = S1k = H3b). The `HIGHDPIAWARE`
+  registry layer on the Steam exe was left in place for this run; under the client it
+  is redundant with the environment (128.1), and a direct Steam launch without either
+  is §131's H3b shape, which this build would take through the `[+]` line as the GOG
+  copy does.
+* **Not measured here.** A 4K panel; a Windows before 1703, where the call is
+  unavailable and §127's fit check is reached; a direct Steam launch on this build.
+
+Release is the owner's call: merge `1.6` to `main` with an annotated `v1.6` tag.
