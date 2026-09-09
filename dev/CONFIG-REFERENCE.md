@@ -211,6 +211,7 @@ marker `data\ARTSET-MODE.txt` (mode, archive list, generator revision).
 Nearest-neighbour instead of the box filter for the fonts, for a fractional scale
 that reads soft. Since FINDINGS 130 a scaled font's glyphs are drawn from the larger
 size of the same face where the archives have one and the shape check passes; those
-glyphs are box-resampled from the master whatever this key says, and the key only
-governs the glyphs that keep the plain resample. At exactly 2.0 (a 4K mode) the two
+glyphs are box-resampled from the master whatever this key says, held inside the
+plain resample's row and column weights (FINDINGS 135), and the key only governs the
+glyphs that keep the plain resample. At exactly 2.0 (a 4K mode) the two
 filters are identical anyway.

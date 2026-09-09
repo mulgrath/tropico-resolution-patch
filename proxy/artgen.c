@@ -601,15 +601,70 @@ static double master_scores(const cont_t *c, const cont_t *m, double font_scale,
     return sorted[k / 2];
 }
 
-/* The master's glyph resampled into the small glyph's scaled cell. Same emission as
- * rescale_font_sprite, so the container differs only in the pixels. */
-static int master_font_sprite(const cont_t *m, const sprite_t *t, int nw, int nh, buf_t *out)
+/* The master's glyph resampled into the small glyph's scaled cell, then HELD INSIDE
+ * THE DOUBLE'S ENVELOPE: no row and no column may end up with a higher maximum
+ * opacity than the same row or column of the small glyph's own resample.
+ *
+ * WHY (FINDINGS 135). Each size of a face was hinted on its own, and the hinting
+ * differs most at the edges: Copperplate's round capitals overshoot the cap line by
+ * one row, which the 8 pt bitmap draws at a quarter coverage and the 10 and 12 pt
+ * bitmaps at three quarters. Box-fitted into the 8 pt cell, that heavy row landed
+ * near-solid, so C, S and E stood two pixels taller than A, R and V in one word
+ * (owner's 2560x1440 screenshot, 2026-09-08). The double keeps the small size's own
+ * edge weights, and at 1080p that is what the game shows and it reads as one cap
+ * height. So the double is the envelope: where the master's row or column is
+ * heavier, the whole row or column is scaled down to the double's maximum. Inside
+ * the envelope the master's pixels stand, which is where the detail is.
+ *
+ * A row is scaled as a whole, not clipped per cell, so a stroke keeps its shape and
+ * only its weight changes. Rows first, then columns on the row-capped result, each
+ * against the double's own maxima. Same emission as rescale_font_sprite, so the
+ * container differs only in the pixels. Layout is untouched. */
+static void cap_to_envelope(cell_t *dst, const cell_t *base, int nw, int nh)
+{
+    for (int r = 0; r < nh; r++) {
+        int a = 0, b = 0;
+        for (int x = 0; x < nw; x++) {
+            int oa = opacity(&base[(size_t)r * nw + x]), ob = opacity(&dst[(size_t)r * nw + x]);
+            if (oa > a) a = oa;
+            if (ob > b) b = ob;
+        }
+        if (b <= a) continue;
+        for (int x = 0; x < nw; x++) {
+            cell_t *cell = &dst[(size_t)r * nw + x];
+            *cell = to_alpha(opacity(cell) * a / b);
+        }
+    }
+    for (int x = 0; x < nw; x++) {
+        int a = 0, b = 0;
+        for (int r = 0; r < nh; r++) {
+            int oa = opacity(&base[(size_t)r * nw + x]), ob = opacity(&dst[(size_t)r * nw + x]);
+            if (oa > a) a = oa;
+            if (ob > b) b = ob;
+        }
+        if (b <= a) continue;
+        for (int r = 0; r < nh; r++) {
+            cell_t *cell = &dst[(size_t)r * nw + x];
+            *cell = to_alpha(opacity(cell) * a / b);
+        }
+    }
+}
+
+static int master_font_sprite(const cont_t *c, const sprite_t *s,
+                              const cont_t *m, const sprite_t *t, int nw, int nh, buf_t *out)
 {
     static cell_t *dst; static size_t dstcap3;
+    static cell_t *base; static size_t basecap3;
     unsigned char *g;
+    base = (cell_t *)grow(base, &basecap3, (size_t)nw * nh, sizeof(cell_t));
+    dst  = (cell_t *)grow(dst, &dstcap3, (size_t)nw * nh, sizeof(cell_t));
+    /* glyph_grid hands back one static grid, so the double is resampled before the
+     * master is decoded over it */
+    if (glyph_grid(c, s, &g) < 0) return -1;
+    box_resample(g, (int)s->w, (int)s->h, nw, nh, base);
     if (glyph_grid(m, t, &g) < 0) return -1;
-    dst = (cell_t *)grow(dst, &dstcap3, (size_t)nw * nh, sizeof(cell_t));
     box_resample(g, (int)t->w, (int)t->h, nw, nh, dst);
+    cap_to_envelope(dst, base, nw, nh);
     for (int r = 0; r < nh; r++)
         if (emit_row(dst + (size_t)r * nw, nw, r == nh - 1 ? -1 : 0x00, out) < 0) return -1;
     buf_u8(out, 0xC0);
@@ -1029,7 +1084,7 @@ unsigned char *ag_rescale_container(const unsigned char *d, size_t len,
             ny = py_round((double)s->y * ys);
             int rc;
             if (use_master && score[i] >= MASTER_GLYPH_MIN) {
-                rc = master_font_sprite(&m, &m.sprites[i], nw, nh, &pay);
+                rc = master_font_sprite(&c, s, &m, &m.sprites[i], nw, nh, &pay);
                 if (rc < 0) { free(pay.p); rc = rescale_font_sprite(&c, s, nw, nh, font_nn, &pay); }
                 else if (rep) rep->taken++;
             } else {
@@ -1133,8 +1188,9 @@ int ag_marker_text(const char *datadir, int to_w, int to_h, char *out, size_t n)
         L += (size_t)snprintf(out + L, n - L, "\n%s %u", names[a], sizes[a]);
     /* The generator's own revision, so a set made by an older build is rebuilt once
      * on upgrade: the larger-master font path (FINDINGS 130) changes the fonts at
-     * every scale above 1 without changing the mode or the archives. */
-    if (L < n) L += (size_t)snprintf(out + L, n - L, "\nfonts master-1");
+     * every scale above 1 without changing the mode or the archives, and master-2
+     * holds those fonts inside the double's envelope (FINDINGS 135). */
+    if (L < n) L += (size_t)snprintf(out + L, n - L, "\nfonts master-2");
     return na;
 }
 

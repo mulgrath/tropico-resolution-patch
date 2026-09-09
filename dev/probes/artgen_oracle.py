@@ -30,7 +30,7 @@ Usage:  probes/artgen_oracle.py [--app DIR] [--to 2560x1440] [--classes i16]
 import argparse, importlib.util, os, re, struct, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+ROOT = os.path.dirname(os.path.dirname(HERE))   # dev/probes -> repo root
 CLASSES = ('i06', 'i08', 'i10', 'i12', 'i16')
 
 
@@ -181,7 +181,7 @@ def names_oracle(app, work):
     probe = os.path.join(work, 'artgen_names')
     # -lm and the SSE2 flags: this driver now includes proxy/artgen.c whole, so it
     # pulls in the codec's floating point even though the name harvest has none.
-    sp.run(['cc', '-O2', '-Wall', '-Wextra', '-msse2', '-mfpmath=sse', '-o', probe,
+    sp.run(['cc', '-O2', '-Wall', '-Wextra', '-msse2', '-mfpmath=sse', '-I' + os.path.join(ROOT, 'proxy'), '-o', probe,
             os.path.join(HERE, 'artgen_names.c'), '-lm'], check=True)
     data, exe = os.path.join(app, 'data'), os.path.join(app, 'Tropico.EXE')
 
@@ -279,7 +279,7 @@ def main():
     # written here so the flag travels with the source. On 32-bit it is what stops gcc
     # emitting x87 and keeping box_resample's intermediates at 80 bits -- which is a
     # real divergence from this oracle, not a theoretical one (FINDINGS 94).
-    subprocess.run(['cc', '-O2', '-Wall', '-Wextra', '-msse2', '-mfpmath=sse',
+    subprocess.run(['cc', '-O2', '-Wall', '-Wextra', '-msse2', '-mfpmath=sse', '-I' + os.path.join(ROOT, 'proxy'),
                     '-o', probe, src, '-lm'], check=True)
 
     py_blob = os.path.join(work, 'python.blob')
