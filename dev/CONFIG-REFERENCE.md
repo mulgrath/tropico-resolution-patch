@@ -198,20 +198,3 @@ Only 16:9 has a confirmed dial set. At 4:3, `ys/xs` is 1 and the defect is
 zero, so nothing needs correcting. Any other aspect is left stock — labels
 may overhang — and the log says so; FINDINGS 86 has a predicted 16:10 set
 that has not been confirmed in-game.
-
-## `[Art]`
-
-### `Generate` (shipped, default `1`)
-
-Build the interface art set for the mode at launch, into `data\`, keyed by the
-marker `data\ARTSET-MODE.txt` (mode, archive list, generator revision).
-
-### `FontNearest` (shipped as a comment, default `0`)
-
-Nearest-neighbour instead of the box filter for the fonts, for a fractional scale
-that reads soft. Since FINDINGS 130 a scaled font's glyphs are drawn from the larger
-size of the same face where the archives have one and the shape check passes; those
-glyphs are box-resampled from the master whatever this key says, held inside the
-plain resample's row and column weights (FINDINGS 135), and the key only governs the
-glyphs that keep the plain resample. At exactly 2.0 (a 4K mode) the two
-filters are identical anyway.

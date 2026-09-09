@@ -51,9 +51,8 @@ int main(int argc, char **argv)
          * the menu is on screen. */
         int fw = as.from_i06[i] ? 640 : 1600, fh = as.from_i06[i] ? 480 : 1200;
         size_t olen;
-        /* No master: the oracle is the plain resample, byte for byte. */
         unsigned char *o = ag_rescale_container(d, e->size, to_w, to_h, fw, fh,
-                                                font_scale, font_nn, NULL, 0, NULL, &olen);
+                                                font_scale, font_nn, &olen);
         if (!o) {
             /* glastube and siblings: sections outside the sprite chain (FINDINGS 26).
              * The Python refuses these too, so both sides skip and neither guesses. */

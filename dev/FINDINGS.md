@@ -12083,3 +12083,36 @@ byte-identical to the Python, so the plain path is untouched. Shots:
 `app/rig-shots/m2-1440-*`, `m2-2160-*`, `ctl16-1440-*`.
 
 Release is the owner's call: merge `1.7` to `main` with an annotated `v1.7` tag.
+
+## 136. Decision (owner, 2026-09-09): the larger-master font path comes out of 1.7; the plain resample ships
+
+With the envelope of §135 in place the owner still saw truncation on several sides of
+the characters, and named the underlying problem: the bolder 1.6 rendering had a quality
+worth keeping, but not at the price of an inconsistent face, and no amount of manual
+correction was going to reconcile two independently hinted bitmaps. They asked what the
+field does instead.
+
+The answer is that nobody scales hinted bitmaps between sizes. Two sizes of a hinted face
+are not scaled copies of each other -- that is what hinting is for -- so a larger size
+fitted into a smaller size's cell always has its body somewhere the small glyph's body is
+not, and any envelope taken from the small glyph clips real strokes of the master. The
+standard is to rasterize from outlines at the target pixel size with anti-aliasing and
+no or light hinting, so an overshoot row gets fractional coverage from geometry the same
+way at every size (signed distance fields are the GPU form of the same idea). Where only
+bitmaps exist, the accepted answers are integer nearest-neighbour or plain area
+averaging, which is what 1.5 shipped.
+
+So `04ba9a5` (§130), its DLL refresh, and §135's two cuts are reverted in one commit.
+`ag_rescale_container()` is back to its 1.5 signature, `probes/artgen_masters.c` and
+`probes/artgen_edges.c` go with the path they drove, and the marker loses its revision
+line, so a set a 1.6 build made (`fonts master-1`) regenerates once. The oracle at
+2560x1440, font scale 1.333, is byte-identical to the Python again. §130 and §135 stay
+as the record of what was tried and why it cannot work.
+
+**What comes next, in its own session:** the font bitmaps were rasterized from stock
+typefaces, and the asset names say which (Comic Sans MS, Copperplate Gothic Bold,
+Courier New, Times New Roman, Haettenschweiler, Stencil, probably Script MT Bold). The
+first step is an identity oracle: render each face at the stock size and compare against
+the 1600x1200 bitmaps. If that reproduces them, the DLL can rasterize each glyph from the
+installed face into its cell at launch on Windows, gated by the per-glyph shape check so
+a translation pack's repainted bitmaps and a missing face keep the plain resample.
