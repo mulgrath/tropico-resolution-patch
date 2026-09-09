@@ -12009,13 +12009,24 @@ filters give the same faint rows.
 
 ### 135.3 The fix: the double is the envelope
 
-`master_font_sprite()` now resamples the small glyph too (the double, today's 1080p look
-scaled) and holds the master inside it: for every row, and then every column of the
-row-capped result, where the master's maximum opacity exceeds the double's, the whole row
-or column is scaled down to the double's maximum. Inside the envelope the master's pixels
-stand, which is where the detail is. A row is scaled as a whole, not clipped per cell, so
-a stroke keeps its shape and only its weight changes. Layout is untouched: cell, offsets
-and advances are what the double gives, as before.
+`master_font_sprite()` now resamples the small glyph too and holds the master inside it:
+for every row, and then every column of the row-capped result, where the master's
+maximum opacity exceeds the small glyph's, the whole row or column is scaled down to that
+maximum. Inside the envelope the master's pixels stand, which is where the detail is. A
+row is scaled as a whole, not clipped per cell, so a stroke keeps its shape and only its
+weight changes. Layout is untouched: cell, offsets and advances are what the double
+gives, as before.
+
+**The envelope is the NEAREST-NEIGHBOUR double, not the box one.** The first cut used the
+box double, and the owner read the result as the bottoms of the characters cut off
+(2026-09-09), while also saying the 1.6 rendering had a bolder quality worth keeping. Both
+observations are the same fact: at 1.33 the box filter blends the body's first and last
+rows with the row beyond, to about 80%, and an envelope taken from it capped the master's
+crisp body edges to that. On the rig's HUD date the "1"'s bottom body row went from 239
+to 206 and every digit's from 247 to 206-214. The nearest resample never blends: an
+overshoot row stays a quarter, a body row stays solid, which is exactly the stock
+bitmap's own weights row for row. With it the body rows are what 1.6 drew (247) and only
+the overshoot rows return to faint.
 
 Considered and not taken: fitting the master by its solid-ink extent instead of its box.
 The extent depends on a threshold (at half opacity the 191 row counts as solid, at 224 it
@@ -12023,18 +12034,19 @@ does not, and the two answers differ by a row), and every glyph would move by it
 rounding, which is a new way to be uneven. The cap changes no geometry and can only
 shrink, so the output can never look larger than the double it replaced.
 
-After the cap, `copp8` at 1440p: C `63 191 255 ... 191 63` and S identical to the
-double at both ends, the interior still the master's; E `22 162 ... 161`, lighter than
-the double at both ends because the master is. At 4K C and S match the double row for
-row. The master's faint end rows on flat letters (A: 144 where the double has 255) are
-left alone, since the cap only lowers: half a row lighter at the apex, the same on every
-flat letter, and what the master genuinely draws.
+After the cap, `copp8` at 1440p: C and S `63 251 255 ... 255 251 63`, the stock
+overshoot at the ends and the master's solid body inside; E `22 164 ... 161`, lighter
+than the double at both ends because the master is. At 4K C and S match the double at
+the ends row for row. The master's faint end rows on flat letters (A: 144 where the
+double has 255) are left alone, since the cap only lowers: half a row lighter at the
+apex, the same on every flat letter, and what the master genuinely draws.
 
-`probes/artgen_edges.c` is the test: it regenerates a font with and without its master
-and fails on any glyph whose row or column maximum exceeds the double's by more than 1.
-Before the fix, 118 of 147 `copp8` glyphs failed at 1440p and every family tried failed
-somewhere (`copp6`, `comi12`, `cour05`, at 1.33 and at 2.0); after it, 0 of 147, and 0
-across all eight pairings. The marker revision is `fonts master-2`, so a set an older
+`probes/artgen_edges.c` is the test: it regenerates a font with and without its master,
+both nearest-doubled so a rejected glyph is the envelope itself, and fails on any glyph
+whose row or column maximum exceeds the envelope's by more than 1. Against it the 1.6
+code fails 111 of 147 `copp8` glyphs at 1440p and the box-envelope cut 23; every family
+tried failed somewhere (`copp6`, `comi12`, `cour05`, at 1.33 and at 2.0). With the
+nearest envelope, 0 across all eight pairings. The marker revision is `fonts master-2`, so a set an older
 build made is rebuilt once on upgrade. `probes/artgen_oracle.py` had not been run since
 the `dev/` move and could not find `tools/`; its paths are fixed.
 
@@ -12047,16 +12059,18 @@ tutorial box, the menu and the settings dialog are pixel-identical, as the shape
 kept glyphs and the Comic and Times faces should be. The date "MAR 1950", row maxima of
 the red channel through each glyph, the text at 247 on a panel near 107:
 
-| glyph | 1.6: row above the body / row below | 1.7: the same rows |
-|---|---|---|
-| 1 (flat) | 115 / 132 | 115 / 123 |
-| 9 | 206 / 214 | 156 / 132 |
-| 5 | 222 / 247 | 148 / 123 |
-| 0 | 214 / 206 | 173 / 123 |
+| glyph | 1.6: row above the body / row below | 1.7: the same rows | body edge rows, both |
+|---|---|---|---|
+| 1 (flat) | 115 / 132 | 115 / 123 | 222 / 239 |
+| 9 | 206 / 214 | 156 / 132 | 247 / 247 |
+| 5 | 222 / 247 | 148 / 123 | 247 / 247 |
+| 0 | 214 / 206 | 173 / 123 | 247 / 247 |
 
 Under 1.6 the round digits carried a near-solid row above and below the flat one's body,
 a digit two rows taller than its neighbour; under 1.7 those rows are as faint as the
-flat digit's own edge. The body rows are unchanged. The 4K run generated and played
+flat digit's own edge, and the body's edge rows are 1.6's to the value (the box-envelope
+cut had them at 206-214, the cut-off the owner saw). Shots `m3-1440-*`; the earlier
+`m2-*` are the box-envelope cut. The 4K run generated and played
 (267 assets, the marker at `fonts master-2`), and its HUD reads as one height by eye;
 no 1.6 control was run at 4K.
 
