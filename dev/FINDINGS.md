@@ -12431,3 +12431,14 @@ stem (0.96 against 0.69-0.73).
 Reproduce: `dev/probes/font_upscale_spike.py` (all nine plus synthetic, 15 s),
 `--asset comi12 --show S` for the side-by-side, `--synthetic --show R` for the small
 stem case.
+
+## 139. 1.7 verified by the owner on Linux at 2560x1440: the §135 unevenness is gone
+
+**2026-09-09, evening.** The committed 1.7 build (`proxy/binkw32.dll`, sha256
+`0b7c1ee2...`) installed to the GOG copy; the folder's 1440p set checked byte-identical
+to the Python generator's plain 1.333 resample (copp8, comi12) before the run, so the
+game drew exactly the shipped font path. Owner, on the scene that reported §135:
+"It does look correct on 1440p which was the previously tested failure." The
+larger-master path (§130, §135) stays reverted; §137 and §138 record why nothing
+bitmap-based improves on the resample and what an outline path would cost. Release is
+the owner's call: merge `1.7` to `main` with an annotated `v1.7` tag.
