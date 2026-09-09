@@ -12341,3 +12341,93 @@ Reproduce: `dev/probes/font_oracle.py` (all 17, ~10 min, or `--asset comi12`), `
 H,O,S` for ASCII art of stock, render and fit, `--glyphs` for the per-glyph dump,
 `--tone` for the tone curve, `--scale 1.3333 --scale 2.0` for §137.6. No rig run was
 needed: the oracle reads `known-good/fonts-scale1.00/` and the mounted fonts only.
+
+## 138. Spike: no bitmap-only upscaler gets near the outline, and edge reconstruction hurts the small faces it was meant for
+
+**The question (owner, 2026-09-09, after §137):** one process for all seventeen assets,
+crisp at 1440p and 4K. Since the field's answers are integer scaling, whole-frame blur,
+pixel-art filters or replacing the fonts (none of which is that), the spike asked
+whether a better bitmap-only scaler could substitute for outlines, now that §137 gives a
+ground truth to measure against. `dev/probes/font_upscale_spike.py`, throwaway
+measurement, kept for the record.
+
+### 138.1 The measurement
+
+For the nine assets §137 identified, the truth at scale `s` is the same face rendered at
+`ppem*s` in the stock's own mode (4x hinted, box-reduced, half-pixel baseline phase): what
+PopTop's tool would have produced for that resolution. Each scaler starts from the stock
+bitmap alone and outputs the generator's cell, `round(w*s) x round(h*s)`; the truth is
+box-fitted into the same cell. Scored per glyph by Pearson correlation, mean absolute
+error in alpha units, and a blur measure: the share of in-box pixels between 32 and 224
+(`grey`), which the truth also has, so the target is to match it, not minimise it.
+
+Scalers: box (1.5 ships it), nearest (`[Art] FontNearest`), bilinear, bicubic, Lanczos,
+Scale3x with a tolerance then box-down (the pixel-art family that HD mods use; a stand-in
+for xBRZ), and two edge reconstructions treating coverage as a distance field: magnify
+the coverage bilinearly or bicubically, then re-threshold with a one-pixel band,
+`clamp((c - 0.5)*s + 0.5)`. A reference row, `ref:outline`, is the unhinted outline at
+`ppem*s` fitted into the cell: not a bitmap scaler, the ceiling a smooth renderer reaches
+against the hinted truth. Small Copperplate has no outline here, so its stand-in is Comic
+Sans rendered at 11, 14 and 18 ppem (9, 11 and 15 row capitals, like copp6/8/10),
+quantized to the stock's 16 levels, and scored the same way.
+
+### 138.2 Results
+
+Median correlation / MAE / grey, at 1.333 and at 2.0. The full table for all nine and
+the three synthetic sizes is what the script prints; these rows carry the whole story.
+
+| case | box 1.333 | edge-lin 1.333 | Lanczos 1.333 | ref:outline 1.333 | box 2.0 | edge-lin 2.0 | ref:outline 2.0 | truth grey |
+|---|---|---|---|---|---|---|---|---|
+| comi12 (35 ppem) | 0.941 / 19.9 / .26 | 0.938 / 19.9 / .16 | 0.942 / 19.7 / .23 | 0.993 / 8.0 / .17 | 0.907 / 22.2 / .18 | 0.924 / 19.1 / .10 | 0.997 / 6.5 / .12 | .17 / .12 |
+| comi07 (22.6 ppem) | 0.895 / 29.2 / .35 | 0.885 / 27.9 / .21 | 0.898 / 28.2 / .31 | 0.988 / 12.1 / .25 | 0.861 / 30.3 / .24 | 0.894 / 24.8 / .14 | 0.994 / 7.9 / .18 | .25 / .18 |
+| cour08 (47 ppem) | 0.950 / 17.9 / .22 | 0.940 / 18.1 / .14 | 0.950 / 18.1 / .20 | 0.986 / 7.9 / .14 | 0.915 / 20.2 / .15 | 0.922 / 18.6 / .09 | 0.980 / 7.9 / .10 | .14 / .10 |
+| time16 (35 ppem) | 0.917 / 21.8 / .29 | 0.896 / 22.8 / .20 | 0.924 / 21.3 / .26 | 0.934 / 15.3 / .21 | 0.865 / 25.6 / .21 | 0.889 / 22.5 / .13 | 0.972 / 9.3 / .14 | .21 / .14 |
+| synthetic 18 ppem (15-row H) | 0.878 / 32.8 / .46 | 0.847 / 33.7 / .28 | 0.885 / 30.5 / .37 | 0.925 / 21.9 / .30 | 0.823 / 36.4 / .31 | 0.858 / 31.1 / .19 | 0.980 / 12.0 / .23 | .31 / .23 |
+| synthetic 14 ppem (11-row H) | 0.797 / 40.4 / .56 | 0.762 / 42.7 / .38 | 0.806 / 38.9 / .48 | 0.944 / 21.7 / .38 | 0.735 / 45.5 / .40 | 0.784 / 41.1 / .26 | 0.980 / 14.4 / .28 | .39 / .28 |
+| synthetic 11 ppem (9-row H) | 0.802 / 40.6 / .60 | 0.744 / 47.7 / .39 | 0.821 / 38.4 / .54 | 0.957 / 21.4 / .43 | 0.694 / 49.4 / .45 | 0.732 / 48.7 / .32 | 0.959 / 17.6 / .34 | .43 / .35 |
+
+Three findings, in order of weight.
+
+**No bitmap scaler recovers shape the others miss.** On every asset the eight scalers sit
+within 0.03 of one another in correlation and within a few alpha units in error. They
+are all the same information rearranged; Lanczos edges out box by a hundredth, Scale3x
+is box, nearest is box at 2.0 (§86.4). The outline at the same size is a different
+league: half the error at 1.333, a third at 2.0, correlation 0.98-0.99 against 0.86-0.95.
+That is the gap the owner sees as "not crisp", and it is not a filter problem.
+
+**Edge reconstruction changes the look, not the accuracy.** At 2.0 it turns the pixel
+double into smooth-edged glyphs with a grey fraction at or below the truth's (0.10
+against 0.12 on comi12) and the lowest error of any scaler (19.1 against box's 22.2); at
+1.333 it matches the truth's crispness where box is a third softer (0.16 against 0.26,
+truth 0.17). But its correlation is box's or a little under: it sharpens the edge the
+bitmap already implies, it cannot put the edge where the outline had it. For the large
+faces that is a real if modest improvement in appearance at the same fidelity.
+
+**On small glyphs it is worse than box, and those are the glyphs that matter.** At 9-11
+row capitals (copp6, copp8) edge reconstruction loses 0.04-0.06 of correlation to box and
+adds 5-7 alpha units of error. The ASCII art shows why: an 8 pt stem is one pixel wide
+at half coverage, straddling two columns; the truth at 2x is a solid two-pixel stem; box
+gives a soft grey band; the reconstruction thresholds the half-coverage away and leaves
+a hairline. The grey pixels of a small glyph are its strokes, not its edges, and there is
+no rule that tells the two apart from the bitmap alone. This is the Copperplate HUD
+case, and it is exactly where the synthetic ceiling shows the outline would recover the
+stem (0.96 against 0.69-0.73).
+
+### 138.3 What this settles
+
+* A unified bitmap-only process cannot deliver the crispness the owner is asking for.
+  The best available (Lanczos, or edge reconstruction at 2.0 on the large faces) is a
+  cosmetic step over box, measurable but small, and it goes backwards on the small
+  HUD faces.
+* Outline rendering is the only path with headroom, by a factor of two to three in
+  error on every size measured, and it is largest on the small glyphs.
+* So the honest choice is between the outline path where a face is installed with the
+  plain resample elsewhere (§137.7's mixed frame), and shipping the resample as it is.
+  A third option exists for the four Office faces and nose61, untested: a bundled
+  open-licensed look-alike fitted into the same cells by the same renderer. That is a
+  different typeface on the HUD, and whether it reads as the game depends on the
+  look-alike; nothing here measures it.
+
+Reproduce: `dev/probes/font_upscale_spike.py` (all nine plus synthetic, 15 s),
+`--asset comi12 --show S` for the side-by-side, `--synthetic --show R` for the small
+stem case.
