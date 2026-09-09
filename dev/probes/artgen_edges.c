@@ -6,10 +6,10 @@
  * (owner's 2560x1440 screenshot, 2026-09-08).
  *
  * THE RULE THIS CHECKS: for every glyph the master path produces, no row's and no
- * column's maximum opacity exceeds the same row's or column's maximum in the plain
- * double of the small glyph. The double is today's output at 1080p, scaled, and
- * reads as one cap height; the master may sharpen the inside of that envelope,
- * never grow it.
+ * column's maximum opacity exceeds the same row's or column's maximum in the
+ * nearest-neighbour double of the small glyph -- the stock bitmap's own weights,
+ * row for row. That is what reads as one cap height at 1080p; the master may
+ * sharpen the inside of that envelope, never grow it.
  *
  * Same rule as the other probes: include the shipped implementation, never a copy.
  *
@@ -52,8 +52,15 @@ int main(int argc, char **argv)
     if (!ds || !dm) { fprintf(stderr, "cannot read %s or %s\n", ps, pm); return 2; }
 
     ag_master_report rep;
-    unsigned char *dbl = ag_rescale_container(ds, ls, 1600, 1200, 1600, 1200, scale, 0, NULL, 0, NULL, &ld);
-    unsigned char *mst = ag_rescale_container(ds, ls, 1600, 1200, 1600, 1200, scale, 0, dm, lm, &rep, &lo);
+    /* The envelope is the NEAREST-NEIGHBOUR double: it carries the stock glyph's own
+     * row and column weights exactly (a quarter for an overshoot row, solid for a
+     * body row), where the box double blends the body's edge rows at a fractional
+     * scale and would cap the master's crisp edges too (the owner saw that as a
+     * cut-off bottom, 2026-09-09). */
+    unsigned char *dbl = ag_rescale_container(ds, ls, 1600, 1200, 1600, 1200, scale, 1, NULL, 0, NULL, &ld);
+    /* Nearest for the glyphs the shape check rejects too, so a kept glyph is the
+     * envelope itself and only the master-drawn glyphs are under test. */
+    unsigned char *mst = ag_rescale_container(ds, ls, 1600, 1200, 1600, 1200, scale, 1, dm, lm, &rep, &lo);
     if (!dbl || !mst) { fprintf(stderr, "rescale failed\n"); return 2; }
     printf("%s <- %s x%.4f: median %.3f, %d taken, %d kept\n", argv[2], argv[3], scale, rep.median, rep.taken, rep.kept);
     if (rep.taken == 0) { fprintf(stderr, "master not used: nothing to check\n"); return 2; }

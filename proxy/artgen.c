@@ -602,8 +602,9 @@ static double master_scores(const cont_t *c, const cont_t *m, double font_scale,
 }
 
 /* The master's glyph resampled into the small glyph's scaled cell, then HELD INSIDE
- * THE DOUBLE'S ENVELOPE: no row and no column may end up with a higher maximum
- * opacity than the same row or column of the small glyph's own resample.
+ * THE STOCK GLYPH'S ENVELOPE: no row and no column may end up with a higher maximum
+ * opacity than the same row or column of the small glyph's own NEAREST-NEIGHBOUR
+ * resample, which carries the stock bitmap's weights exactly, row for row.
  *
  * WHY (FINDINGS 135). Each size of a face was hinted on its own, and the hinting
  * differs most at the edges: Copperplate's round capitals overshoot the cap line by
@@ -612,9 +613,16 @@ static double master_scores(const cont_t *c, const cont_t *m, double font_scale,
  * near-solid, so C, S and E stood two pixels taller than A, R and V in one word
  * (owner's 2560x1440 screenshot, 2026-09-08). The double keeps the small size's own
  * edge weights, and at 1080p that is what the game shows and it reads as one cap
- * height. So the double is the envelope: where the master's row or column is
- * heavier, the whole row or column is scaled down to the double's maximum. Inside
- * the envelope the master's pixels stand, which is where the detail is.
+ * height. So the stock weights are the envelope: where the master's row or column
+ * is heavier, the whole row or column is scaled down to that maximum. Inside the
+ * envelope the master's pixels stand, which is where the detail is.
+ *
+ * NEAREST, NOT BOX, for the envelope. The box double blends the body's first and
+ * last rows with the row beyond at a fractional scale (about 80% at 1.33), and an
+ * envelope taken from it capped the master's crisp body edges to that -- the owner
+ * read it as the bottoms of the characters cut off (2026-09-09), and it threw away
+ * the bolder edge that is the master's whole point. The nearest resample never
+ * blends: an overshoot row stays a quarter, a body row stays solid.
  *
  * A row is scaled as a whole, not clipped per cell, so a stroke keeps its shape and
  * only its weight changes. Rows first, then columns on the row-capped result, each
@@ -661,7 +669,7 @@ static int master_font_sprite(const cont_t *c, const sprite_t *s,
     /* glyph_grid hands back one static grid, so the double is resampled before the
      * master is decoded over it */
     if (glyph_grid(c, s, &g) < 0) return -1;
-    box_resample(g, (int)s->w, (int)s->h, nw, nh, base);
+    nn_resample(g, (int)s->w, (int)s->h, nw, nh, base);
     if (glyph_grid(m, t, &g) < 0) return -1;
     box_resample(g, (int)t->w, (int)t->h, nw, nh, dst);
     cap_to_envelope(dst, base, nw, nh);
