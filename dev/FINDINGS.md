@@ -11942,3 +11942,130 @@ probe after H9 read 2560x1440, the offset gone with the mode as in 131.3.
   unavailable and §127's fit check is reached; a direct Steam launch on this build.
 
 Release is the owner's call: merge `1.6` to `main` with an annotated `v1.6` tag.
+
+## 135. The larger-master fonts grew the round capitals: the master is now held inside the double's envelope
+
+**The report (owner, 2026-09-08):** at 2560x1440 the characters of one word come out in
+different sizes -- "SERVICE ALL SHIPS" on a building sign, the C, S and E visibly taller
+than the A, R, V and I. 1080p is clean. The owner's guess was fractional scaling.
+
+### 135.1 What the two screenshots measure
+
+The sign is Copperplate at 8 pt (`copp8`), all capitals: the game upcases through its own
+`toupper` (§19) and the font holds 1x1 placeholders for a-z. At 1080p the fonts are stock
+(scale 1.0). Row maxima of brightness through each letter, the correct 1080p shot:
+
+| letter | rows solid | rows faint above / below |
+|---|---|---|
+| e r v i a l h p | 11-20 (10) | none |
+| c, s | 11-20 | 10 at 114, 21 at 104 |
+| S (first) | 9-20 | 8 at 159 |
+
+Copperplate's round capitals overshoot the cap line by one row top and bottom, and the
+8 pt bitmap draws that row at a quarter coverage (stock `copp8` C: row maxima
+`63 255 ... 255 63`). It reads as one cap height because the overshoot is faint.
+
+The 2560x1440 shot, same letters:
+
+| letter | rows solid | edge rows |
+|---|---|---|
+| R V I A H P | 16-26 | 15 and 27 at ~170 |
+| E | 15-27 | 14 at 184 |
+| L | 15-27 | 28 at 187 |
+| C, S | 14-27 | 13 at 200, 28 at 200 |
+
+The overshoot rows are no longer faint: 200 against 114. C and S stand two rows taller than
+A and R, E and L one row. That is the "different sizes".
+
+### 135.2 Why: each size was hinted on its own, and the hinting differs at the edges
+
+At 1440p and at 4K `copp8` takes its pixels from `copp12` (§130's rule: the smallest
+size at least 8 x 1.33 = 10.7, so 12; the log line on the rig confirms it). Its C has the
+overshoot row at THREE quarters (`191 255 ... 255 191`), not a quarter: the larger sizes
+were hinted heavier at the edge. Box-fitted into the 8 pt cell, that row lands at 191
+where the plain double keeps the stock 63. Modelled through the generator's own resampler
+(`probes/artgen_edges.c`, which includes `proxy/artgen.c`), `copp8` at 1440p, row maxima
+top and bottom:
+
+| glyph | cell | double | master (130's output) |
+|---|---|---|---|
+| C | 16x16 | 63 191 ... 191 63 | 191 251 ... 251 191 |
+| S | 15x16 | 63 191 ... 191 63 | 191 251 ... 251 191 |
+| E | 13x15 | 47 162 ... 255 | 22 164 ... 161 |
+| A | 17x13 | 255 ... 255 | 144 ... 144 |
+
+`copp10` would have done the same (`191 255 ...` in its C), so the choice of master is
+not the lever.
+
+The §130 shape check cannot see this: a Pearson correlation over the cell is dominated by
+the stroke body, and these glyphs pass it comfortably (the family's median is 0.84). The master was fitted box to box, and
+the two boxes have different cap-height-to-box ratios.
+
+**4K was assumed clean and is not.** At 2.0 the `copp12` master gives C rows
+`191 217 255 ...` against the double's `63 63 255 ...`: two near-solid rows top and
+bottom, a larger absolute change than at 1440p. §130.4 judged 4K on the settings dialog,
+which is Comic; Copperplate was not looked at. `[Art] FontNearest` cannot help, both
+filters give the same faint rows.
+
+### 135.3 The fix: the double is the envelope
+
+`master_font_sprite()` now resamples the small glyph too (the double, today's 1080p look
+scaled) and holds the master inside it: for every row, and then every column of the
+row-capped result, where the master's maximum opacity exceeds the double's, the whole row
+or column is scaled down to the double's maximum. Inside the envelope the master's pixels
+stand, which is where the detail is. A row is scaled as a whole, not clipped per cell, so
+a stroke keeps its shape and only its weight changes. Layout is untouched: cell, offsets
+and advances are what the double gives, as before.
+
+Considered and not taken: fitting the master by its solid-ink extent instead of its box.
+The extent depends on a threshold (at half opacity the 191 row counts as solid, at 224 it
+does not, and the two answers differ by a row), and every glyph would move by its own
+rounding, which is a new way to be uneven. The cap changes no geometry and can only
+shrink, so the output can never look larger than the double it replaced.
+
+After the cap, `copp8` at 1440p: C `63 191 255 ... 191 63` and S identical to the
+double at both ends, the interior still the master's; E `22 162 ... 161`, lighter than
+the double at both ends because the master is. At 4K C and S match the double row for
+row. The master's faint end rows on flat letters (A: 144 where the double has 255) are
+left alone, since the cap only lowers: half a row lighter at the apex, the same on every
+flat letter, and what the master genuinely draws.
+
+`probes/artgen_edges.c` is the test: it regenerates a font with and without its master
+and fails on any glyph whose row or column maximum exceeds the double's by more than 1.
+Before the fix, 118 of 147 `copp8` glyphs failed at 1440p and every family tried failed
+somewhere (`copp6`, `comi12`, `cour05`, at 1.33 and at 2.0); after it, 0 of 147, and 0
+across all eight pairings. The marker revision is `fonts master-2`, so a set an older
+build made is rebuilt once on upgrade. `probes/artgen_oracle.py` had not been run since
+the `dev/` move and could not find `tools/`; its paths are fixed.
+
+### 135.4 Measured on the rig, GOG copy, 2560x1440 and 3840x2160
+
+`dev/tools/rig-run.sh` at both modes with the new DLL, and a control at 2560x1440 with
+the folder's own 1.6 DLL. The two 1440p map shots differ ONLY in the bottom-right HUD
+panel (the money, date, population and tourist labels, which are Copperplate); the
+tutorial box, the menu and the settings dialog are pixel-identical, as the shape check's
+kept glyphs and the Comic and Times faces should be. The date "MAR 1950", row maxima of
+the red channel through each glyph, the text at 247 on a panel near 107:
+
+| glyph | 1.6: row above the body / row below | 1.7: the same rows |
+|---|---|---|
+| 1 (flat) | 115 / 132 | 115 / 123 |
+| 9 | 206 / 214 | 156 / 132 |
+| 5 | 222 / 247 | 148 / 123 |
+| 0 | 214 / 206 | 173 / 123 |
+
+Under 1.6 the round digits carried a near-solid row above and below the flat one's body,
+a digit two rows taller than its neighbour; under 1.7 those rows are as faint as the
+flat digit's own edge. The body rows are unchanged. The 4K run generated and played
+(267 assets, the marker at `fonts master-2`), and its HUD reads as one height by eye;
+no 1.6 control was run at 4K.
+
+The Steam copy cannot be used for this: launched outside the Steam client its DRM
+wrapper shows "Application load error 5" and exits, which two rig runs and the owner's
+desktop found out first. The rig runs on the GOG copy under `/mnt/Windows`.
+
+The oracle (`probes/artgen_oracle.py`) at 2560x1440, font scale 1.333: 25,820 sprites
+byte-identical to the Python, so the plain path is untouched. Shots:
+`app/rig-shots/m2-1440-*`, `m2-2160-*`, `ctl16-1440-*`.
+
+Release is the owner's call: merge `1.7` to `main` with an annotated `v1.7` tag.
