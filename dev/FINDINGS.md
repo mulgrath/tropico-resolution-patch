@@ -12116,3 +12116,228 @@ first step is an identity oracle: render each face at the stock size and compare
 the 1600x1200 bitmaps. If that reproduces them, the DLL can rasterize each glyph from the
 installed face into its cell at launch on Windows, gated by the per-glyph shape check so
 a translation pack's repainted bitmaps and a missing face keep the plain resample.
+
+## 137. Font identity oracle: nine of the seventeen assets are reproduced from the installed Windows faces at 0.998, the other eight need Office faces this machine does not have
+
+**The question (§136, owner, 2026-09-09):** can the game's fonts be rasterized from the
+original typefaces instead of scaled from bitmaps? First step, before any DLL work: an
+identity oracle that says which face and size produced each asset and how closely a
+fresh rasterization reproduces the shipped 1600x1200 bitmap. `dev/probes/font_oracle.py`
+is that oracle; it measures and prints, and generates nothing.
+
+### 137.1 What the containers actually hold
+
+Three facts had to be established before any comparison meant anything, and two of them
+correct what this file believed.
+
+**Sprite index is the character code minus 32.** The Copperplate 1x1 placeholders sit at
+sprites 65..90, which is a-z, and sprite 0 is the space; 224 sprites cover 32..255 of
+Windows-1252. (§130 and §135 counted glyphs correctly but named them by the raw index.)
+
+**The cell is not the ink box.** The font tool widened each cell to the pen advance and
+deepened it to the baseline, and where the ink reaches neither it stamped two pixels of
+alpha 6 in the last column on the two rows above the baseline. That is a marker, never
+ink: every genuine coverage level is k*16-1 (31, 47, ... 255, the 17 levels of a 4x4
+oversample), and alpha 6 occurs about 280 times per asset, two per glyph that needs it.
+So `x + w` is the advance, exactly as §63 inferred from the engine, and a hyphen's cell is
+11 rows tall with 4 rows of ink at the top. Comparing against the cell instead of the ink
+gave a hyphen a correlation of 0.20 and a caret 0.00; against the ink they are 0.99.
+`copp6`, `copp8` and `copp10` carry no markers at all, unlike `copp12`: those three were
+made by a different run of the tool, or a different tool.
+
+**The rasterizer was a 4x4 oversampler with the outline hinted at the 4x size.** Two
+signatures: the 17 coverage levels above, and stems that are not pixel-aligned (a
+Comic Sans stem reads `=@@*`, four columns at 0.4, 1, 1, 0.6), which rules out hinting
+at the target size. Modelled in FreeType as a 1-bit render at four times the pixel size
+under the v35 bytecode interpreter, box-reduced 4:1 (`ss4-v35`), that mode wins on all
+nine assets it could be tried on, and the best sizes come out integral or half-integral
+at 4x (91, 140, 188 ...). This is what GDI's `ANTIALIASED_QUALITY` did on Windows 9x
+and 2000, which is presumably the tool. Every best fit also chose the same origin phase,
+the baseline half a pixel down (`(0, 0.5)` for 118-142 of ~145 glyphs per asset).
+
+### 137.2 The method
+
+For each asset and each candidate face and mode: an integer-ppem scan 4..100 on cell
+geometry alone, then pixels on the top three plus eighth-ppem steps around the best, then
+a 16-way quarter-pixel origin search per glyph on every one of those candidates (the
+phase-0 ranking was wrong by a quarter ppem twice, comi12 and cour05, before that was
+made exhaustive). Per glyph the measures are the ink box against the render's ink box
+(dw, dh), the top row against the baseline (dtop), the advance `x + w` against
+FreeType's, and two Pearson correlations of coverage: the render box-fitted into the
+stock ink box (`fit`, what a runtime renderer would do, the §130.2 measurement) and both
+placed on a common baseline without resampling (`placed`). Glyphs under 4 px either way
+are skipped. Modes: native bytecode hinting under the v35 and v40 interpreters, no
+hinting, the autohinter, light autohinting, and the two 4x oversampled forms (hinted v35,
+unhinted). FreeType 2.13.2 through ctypes on the system library; Pillow's binding has no
+hinting switch. Faces are the owner's own Windows install under `/mnt/Windows`:
+Comic Sans MS 5.15, Courier New 6.95, Times New Roman 7.12, regular and bold each.
+
+### 137.3 The fit, per asset
+
+Best (face, mode, size) per asset. `cell=` is the share of glyphs whose ink box matches
+the render's exactly; `adv` is the median and spread of FreeType's advance minus `x + w`;
+`fit` is the median / 5th percentile / minimum correlation over all real glyphs.
+
+| asset | face | mode | ppem (x4) | n | cell= | mean dw, dh | adv | fit med / p05 / min | worst glyphs |
+|---|---|---|---|---|---|---|---|---|---|
+| comi07 | Comic Sans MS Regular | ss4-v35 | 22.62 (90.5) | 140 | 96% | 0.04, 0.02 | -0.2 ± 0.3 | 0.998 / 0.964 / 0.781 | î ï |
+| comi08 | Comic Sans MS Regular | ss4-v35 | 26.38 (105.5) | 145 | 97% | 0.04, 0.01 | -0.2 ± 0.3 | 0.999 / 0.993 / 0.762 | î ï |
+| comi10 | Comic Sans MS Regular | ss4-v35 | 29.62 (118.5) | 145 | 97% | 0.05, 0.00 | 0.0 ± 0.4 | 0.999 / 0.995 / 0.628 | î ï |
+| comi12 | Comic Sans MS Regular | ss4-v35 | 35.00 (140) | 147 | 97% | 0.06, 0.00 | 0.0 ± 0.4 | 0.999 / 0.994 / 0.588 | î ï |
+| comi24 | Comic Sans MS Regular | ss4-v35 | 64.38 (257.5) | 148 | 97% | 0.07, 0.01 | 0.0 ± 0.5 | 0.999 / 0.998 / 0.570 | î ï |
+| cour03 | Courier New **Bold** | ss4-v35 | 22.12 (88.5) | 145 | 91% | 0.09, 0.01 | +0.2 ± 0.4 | 0.998 / 0.947 / 0.903 | Â % W |
+| cour05 | Courier New **Bold** | ss4-v35 | 33.62 (134.5) | 148 | 90% | 0.11, 0.00 | +0.2 ± 0.5 | 0.999 / 0.964 / 0.894 | m W M |
+| cour08 | Courier New **Bold** | ss4-v35 | 47.00 (188) | 148 | 87% | 0.14, 0.01 | +0.2 ± 0.6 | 0.999 / 0.930 / 0.857 | W m M |
+| time16 | Times New Roman Regular | ss4-v35 | 35.12 (140.5) | 145 | 86% | 0.12, 0.03 | -0.2 ± 0.4 | 0.998 / 0.944 / 0.805 | j , ß |
+| copp6 | *(no Copperplate here)* | best wrong face | | 132 | 3% | 1.3, 1.7 | | 0.795 / 0.345 / 0.06 | |
+| copp8 | *(no Copperplate here)* | best wrong face | | 142 | 2% | 2.0, 1.8 | | 0.800 / 0.322 / 0.19 | |
+| copp10 | *(no Copperplate here)* | best wrong face | | 147 | 1% | 3.1, 1.8 | | 0.776 / 0.299 / 0.08 | |
+| copp12 | *(no Copperplate here)* | best wrong face | | 147 | 0% | 3.7, 1.8 | | 0.773 / 0.313 / 0.09 | |
+| haet46 | *(no Haettenschweiler here)* | best wrong face | | 148 | 0% | 10.6, 11.7 | | 0.467 / 0.100 / 0.00 | |
+| nose61 | *(unidentified)* | best wrong face | | 148 | 0% | 9.5, 6.9 | | 0.593 / -0.26 / -0.33 | |
+| scri25 | *(no Script MT Bold here)* | best wrong face | | 147 | 1% | 3.2, 2.4 | | 0.414 / 0.104 / -0.08 | |
+| sten10 | *(no Stencil here)* | best wrong face | | 148 | 0% | 4.3, 3.5 | | 0.723 / 0.354 / -0.11 | |
+
+So the names were right about the family and wrong about the weight once: the Courier
+assets are Courier New **Bold**, not Regular (Regular scores 0.64 with the stock ink at
+1.9x its coverage). The ink ratio (stock coverage over render coverage) is 0.99-1.00 on
+every matched asset, so there was no emboldening or gamma, and the tone curve of stock
+against render is the identity within the 16-level quantization. Sizes are not the
+nominal number at any one DPI (comi07 is 3.2x its number, comi24 2.7x, cour03 7.4x,
+time16 2.2x), so a renderer has to carry the ppem per asset or measure it as the oracle
+does; it cannot derive it from the name.
+
+The worst glyphs are informative rather than worrying. Comic's î and ï are 2-3 px
+narrower in the stock than in the 5.15 face and their accents sit 2 px further left: the
+outline changed between the 1990s version PopTop had and the one Windows ships now. The
+wide Courier glyphs (W, M, m) render 1-2 px wider than the stock at 0.86-0.91; everything
+else in the face is above 0.93. Times' j is 3 px wider in the modern face. Two or three
+glyphs per asset, all identifiable, none a shape mismatch.
+
+### 137.4 The wrong-face control, and what it means for the gate
+
+The eight assets whose face is absent are the control: the best any of the six installed
+faces can do against them, with the size, mode and per-glyph phase all searched in their
+favour. Copperplate and Stencil, both capitals-only geometric faces, reach a median of
+0.72-0.80 against Comic Sans Bold or Times Bold, but never above 3% of cells exact and
+with 5th percentiles of 0.30-0.35. The script faces and Haettenschweiler stay under 0.60.
+
+§130.2 put the wrong-face median at 0.53 and the family gate at 0.72. With the size and
+phase searched, a wrong face climbs to 0.80 at the median, and a genuine face sits at
+0.998 with 86-97% of cells exact. The gate for a runtime renderer therefore cannot be the
+correlation alone at 0.72; it should require both a median correlation of at least 0.95
+and a majority of exact ink boxes, which no wrong face approaches (3%) and every genuine
+face clears (86%). The same gate rejects a translation pack's repainted glyphs, which are
+not the face at all, and keeps the plain resample for them (memory: packs must keep
+working). Not yet tested against the Russian archive; that is a runtime-design question,
+and the oracle can run it when that session comes.
+
+### 137.5 Which faces a player has
+
+From the fonts on the owner's install and Microsoft's typography pages for each family
+(learn.microsoft.com/typography/font-list/...):
+
+| face | ships with | on this machine |
+|---|---|---|
+| Comic Sans MS (Regular, Bold) | Windows, every version since 2000 | `Windows/Fonts/comic.ttf`, 5.15 |
+| Courier New (Regular, Bold) | Windows, every version | `Windows/Fonts/cour*.ttf`, 6.95 |
+| Times New Roman (Regular, Bold) | Windows, every version | `Windows/Fonts/times*.ttf`, 7.12 |
+| Copperplate Gothic Bold (`COPRGTB.TTF`) | Office only ("exclusively included with Microsoft products") | absent |
+| Haettenschweiler (`HATTEN.TTF`) | Office only | absent |
+| Stencil (`STENCIL.TTF`) | Office only | absent |
+| Script MT Bold (`SCRIPTBL.TTF`) | Office only | absent |
+
+The owner has no Office install, so the four Office faces could not be tested; the table
+above says nothing about how well they would reproduce their assets, only that their
+assets match none of the Windows faces. `nose61` is a heavy upright brush face with
+swash capitals and a looped G; its name matches no Microsoft face and it is not any of the
+seven. It is the intro/title face and has no larger size to lose.
+
+On bundling (owner's question): none of the seven may be redistributed. The Windows faces
+are licensed under the Windows EULA; Microsoft's 1996-2002 "Core fonts for the Web"
+release allows redistribution of its original installer packages only, unmodified, which
+is a first-run download with an EULA prompt and collides with the no-manual-setup rule.
+The Office faces are Monotype and URW designs licensed to Microsoft for Office; there is
+no official source outside it, and shipping bitmaps pre-rendered from them is
+redistributing a derivative. Rendering at runtime from what the player has installed is
+the ordinary use every application makes of a font, and nothing leaves the machine. So a
+runtime path can only ever be: use the installed face when the gate passes, else the plain
+resample. On a typical machine without Office that is Comic (the dialogs and most of the
+HUD), Courier and Times (the advisor), and never Copperplate (the HUD figures §135 was
+about), Haettenschweiler, Stencil or Script.
+
+### 137.6 The scaled cell at 2560x1440 and 3840x2160
+
+The generator keeps `round(w*s) x round(h*s)` as the cell (§86, §130.1), so the question
+is how far the outline's own ink box at `ppem*s` sits from it. Rendered in the best mode
+at the best ppem times the scale, over all real glyphs:
+
+| asset | 1.333: box == cell / within 1 px / mean dw, dh | 2.0: same |
+|---|---|---|
+| comi07 | 16% / 91% / 0.74, 0.55 | 11% / 61% / 1.01, 0.87 |
+| comi08 | 22% / 94% / 0.59, 0.48 | 11% / 58% / 0.92, 1.01 |
+| comi10 | 21% / 88% / 0.64, 0.51 | 5% / 59% / 1.06, 0.97 |
+| comi12 | 28% / 94% / 0.51, 0.50 | 10% / 67% / 0.92, 0.95 |
+| comi24 | 32% / 92% / 0.50, 0.45 | 11% / 69% / 1.01, 0.80 |
+| cour03 | 14% / 77% / 0.57, 0.83 | 10% / 61% / 0.88, 0.99 |
+| cour05 | 23% / 83% / 0.72, 0.48 | 9% / 49% / 1.30, 0.54 |
+| cour08 | 17% / 81% / 0.68, 0.72 | 7% / 49% / 1.09, 1.14 |
+| time16 | 22% / 89% / 0.62, 0.51 | 13% / 72% / 0.88, 0.83 |
+
+At 1.333 the outline's box is within a pixel of the scaled cell for about nine glyphs in
+ten; at 2.0 the miss is a pixel on average and two is common. The reason is not the
+outline: the scaled cell doubles the antialiasing fringe along with the body (a stock box
+of 11 columns holds an outline 9.5-11 wide, so its double holds 19-22 while the outline
+at 2x wants 19-21), and the per-glyph rounding of §135.3 adds up to half a pixel on top.
+**Box-fitting the render into the scaled cell would stretch each glyph by its own
+pixel**, 2-5% at 4K on small faces, unevenly from glyph to glyph, which is the class of
+defect §135 was about. The right construction is the stock tool's own: render at
+`ppem*s`, place the ink at its natural size on the baseline in the cell, and widen the
+cell to the resample's `nx + nw` and the baseline with the marker pixels, so the advance
+and line layout stay byte-identical to the plain resample and the ink is never resampled.
+When the ink overflows the cell by a pixel, and only then, clip or fit. This is a design
+choice for the runtime session; it is stated here because the table above rules the
+naive fit out.
+
+**Overshoot is consistent by construction.** Top and bottom row maxima at 1.333 in the
+best mode, round capitals against flat: Courier `cour08` C G O S all `255 .. 255`, E H I
+L T all `63 .. 255`; `cour05` rounds `70 .. 193`, flats `127 .. 255`; Times rounds
+`191 .. 191`, flats `255 .. 255`. Every letter of a class gets the same edge coverage,
+because one rasterizer at one size puts the cap line and the overshoot at the same
+fraction for all of them; which is exactly what the stock bitmaps also show (`cour08`
+stock: rounds `255 .. 63`, flats `63 .. 127`, identical within class). Comic Sans varies
+letter to letter in both the stock and the render (stock `comi12` E 255, T 111, L 191 on
+the top row) because the face is drawn irregular; that is the design, not the
+rasterizer. The §135 defect, a round C two rows taller than a flat A in the same word,
+cannot arise from outline rendering.
+
+### 137.7 Recommendation
+
+Outline rendering is feasible, and worth doing, but not for 1.7.
+
+* **What is proven.** The three Windows faces reproduce nine assets to 0.998 median
+  correlation with a stable geometric convention (advance, baseline, marker) that a
+  renderer can honour exactly. Two or three glyphs per asset differ because the face
+  changed since 2001; those the gate will simply leave on the resample.
+* **What is not.** The four Office faces are untestable here and absent on most player
+  machines, and they include Copperplate, the HUD figures that started §135. A 1.7 with
+  outline fonts would sharpen the dialogs and the advisor and leave the HUD numbers on
+  the resample: a mixed frame, which is the objection the owner raised to §130's mixed
+  faces. Whether that reads as an improvement or as inconsistency is an in-game
+  judgment, and the rig cannot make it: the Linux rig has no Windows font stack.
+* **What it costs.** A rasterizer in the DLL. GDI is on every Windows and is the
+  presumed original tool, so `GetGlyphOutline` with `GGO_GRAY8_BITMAP` at `ppem*s` on
+  the installed face is the obvious first cut and needs no FreeType port; but GDI takes
+  integer pixel sizes, and five of the nine best sizes are half-integral at 1x, so a
+  GDI path renders at the 4x integer size and reduces, as the tool did. Plus the gate,
+  the marker construction, the per-asset ppem table, the pack test against the Russian
+  archive, and a Windows session on the dual-boot to judge it.
+
+So: ship 1.7 with the plain resample as §136 decided, and open the outline path as 1.8
+work in its own session, starting from `dev/probes/font_oracle.py`. Owner's call whether
+a Windows-faces-only version is wanted at all, given the Copperplate hole.
+
+Reproduce: `dev/probes/font_oracle.py` (all 17, ~10 min, or `--asset comi12`), `--show
+H,O,S` for ASCII art of stock, render and fit, `--glyphs` for the per-glyph dump,
+`--tone` for the tone curve, `--scale 1.3333 --scale 2.0` for §137.6. No rig run was
+needed: the oracle reads `known-good/fonts-scale1.00/` and the mounted fonts only.
