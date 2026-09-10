@@ -51,8 +51,15 @@ int main(int argc, char **argv)
          * the menu is on screen. */
         int fw = as.from_i06[i] ? 640 : 1600, fh = as.from_i06[i] ? 480 : 1200;
         size_t olen;
+        /* The same master selection the proxy makes, through the same function --
+         * a probe that picked its own would be testing code the game never runs. */
+        const unsigned char *mp = NULL; size_t ml = 0;
+        int mj = ag_pick_master(&as, i, blob, blen, font_scale);
+        if (mj >= 0) { const ag_entry *me = as.src[mj];
+                       mp = blob[me->archive] + me->offset; ml = me->size; }
+        ag_master_report rep;
         unsigned char *o = ag_rescale_container(d, e->size, to_w, to_h, fw, fh,
-                                                font_scale, font_nn, &olen);
+                                                font_scale, font_nn, mp, ml, &rep, &olen);
         if (!o) {
             /* glastube and siblings: sections outside the sprite chain (FINDINGS 26).
              * The Python refuses these too, so both sides skip and neither guesses. */

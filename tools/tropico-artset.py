@@ -33,7 +33,7 @@ the change is undone by deleting the files.
 
 QUALITY: nearest-neighbour on both axes. The font assets alias worst (section 28).
 """
-import argparse, importlib.util, os, re, struct, sys
+import argparse, importlib.util, math, os, re, struct, sys
 
 _HS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tropico-hsquash.py')
 _PK = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tropico-pk2.py')
@@ -193,6 +193,195 @@ def rescale_font_sprite(d, s, nw, nh, filt=box_resample):
     return bytes(out)
 
 
+# ------------------------------------------------ a larger master, scaled uniformly
+#
+# FINDINGS 130/135/136: drawing a scaled font from the next size up looked right in
+# body but fitted each master glyph into its own small cell, so two independently
+# hinted bitmaps fought glyph by glyph (round capitals two rows taller than flat ones).
+# This is the other construction, the owner's (2026-09-09): ONE factor for the whole
+# font, chosen so the master's total advance over A-Z 0-9 equals the plain resample's,
+# every glyph scaled by that factor about the pen origin and the baseline, and placed
+# in the resample's cell. The result keeps the master's own proportions glyph for
+# glyph, so it can be no more uneven than the stock master is. Layout is the
+# resample's: the advance edge and the baseline are unchanged; a glyph that overruns
+# the advance slides left and then clips. The gate is 1.6's family shape check, so a
+# translation pack's repainted master keeps the plain resample.
+
+MASTER_FAMILY_MIN = 0.72        # FINDINGS 130/137: between a wrong face and the weakest genuine one
+# The three bands a uniform factor can fall in. A factor just ABOVE 1 is snapped down
+# to 1 and the master is copied verbatim: PopTop's own hinted bitmap, no resampling, at
+# a size smaller than the resample's by that few percent. A factor just BELOW 1 is never
+# snapped UP -- that would widen every string and can overflow a field -- and is not
+# downscaled either, because a box filter at 0.95 blends every other column and leaves
+# the rest 1:1, which is the mixed crisp/soft edge the owner saw as artifacts on the
+# sides of characters. Only a genuine downscale gets the box filter.
+MASTER_SNAP_UP   = 0.08         # f in [1, 1.08] -> copy verbatim at 1.0
+MASTER_DOWN_MAX  = 0.92         # f <= 0.92 -> box downscale; between the two, no master
+# ...and a second guard on the SIZE the snap actually lands on. The factor above equals
+# the advances; cap height is what the eye reads, and two sizes of a hinted face do not
+# share a height-to-width ratio, so the two disagree. copp8 from copp10 at 1440p is 7.7%
+# shorter than the resample and the owner passed it in game; copp6 from copp12 at 4K
+# would be 10.0% shorter, which is past anything verified. So a snap is refused when the
+# master's cap height misses the resample's by more than this, and the resample stands
+# (at 2.0 that resample is an exact pixel double, so nothing is lost by refusing).
+MASTER_CAP_MAX   = 0.08
+FAMILY_RE = re.compile(r'([A-Za-z]+)(\d+)(?:\.\w+)?$')
+
+
+def font_family(name):
+    m = FAMILY_RE.match(name)
+    return (m.group(1).lower(), int(m.group(2))) if m else (None, None)
+
+
+def font_master_candidates(names, name):
+    """Every larger size of the same face, smallest first."""
+    face, size = font_family(name)
+    if face is None:
+        return []
+    out = []
+    for n in names:
+        f2, s2 = font_family(n)
+        if f2 == face and s2 is not None and s2 > size and n != name:
+            out.append((s2, n))
+    return [n for _, n in sorted(out)]
+
+
+def real_sprites(r):
+    return {s['index']: s for s in r['sprites'] if s['fmt'] == 2 and s['w'] > 0 and s['h'] > 0}
+
+
+def cap_error(rs, rm, f):
+    """(master's H ink height at f) / (the resample's) - 1. H is a flat capital: no
+    overshoot, present in every asset, and the height the eye reads a line by."""
+    ss = real_sprites(rs); sm = real_sprites(rm)
+    i = ord('H') - 32
+    if i not in ss or i not in sm:
+        return 0.0
+    want = ss[i]['h'] * font_scale_of[0]
+    return sm[i]['h'] * f / want - 1.0 if want else 0.0
+
+
+font_scale_of = [1.0]           # set by rescale() before cap_error is called
+
+
+def master_factor(rs, rm, font_scale):
+    """font_scale * (sum of the small font's advances) / (sum of the master's), over
+    A-Z and 0-9 present in both: the master scaled by this is as WIDE as the resample."""
+    ss = real_sprites(rs); sm = real_sprites(rm)
+    codes = [c - 32 for c in list(range(48, 58)) + list(range(65, 91))]
+    a = b = 0
+    for i in codes:
+        if i in ss and i in sm:
+            a += ss[i]['x'] + ss[i]['w']; b += sm[i]['x'] + sm[i]['w']
+    return font_scale * a / b if a and b else 0.0
+
+
+def glyph_grid(d, s):
+    offs, _ = row_offsets(d, s)
+    return [[opacity(e) for e in hs.decode_row(d, offs[y], s['w'])[0]] for y in range(s['h'])]
+
+
+def box_resample_at(grid, w, h, f, ox, oy):
+    """The grid, whose top-left source pixel sits at (ox, oy) in stock pen units,
+    scaled by f about the pen origin. Output pixels are the integer grid of the scaled
+    space; the source covers [ox*f, (ox+w)*f) x [oy*f, (oy+h)*f), so every glyph's
+    baseline and cap line land at the same fractional phase. Returns (rows, x0, y0)."""
+    x0 = int(math.floor(ox * f)); x1 = int(math.ceil((ox + w) * f))
+    y0 = int(math.floor(oy * f)); y1 = int(math.ceil((oy + h) * f))
+    out = []
+    for r in range(y0, y1):
+        sy0, sy1 = r / f - oy, (r + 1) / f - oy       # output row back in source rows
+        row = []
+        for c in range(x0, x1):
+            sx0, sx1 = c / f - ox, (c + 1) / f - ox
+            acc = area = 0.0
+            for y in range(max(0, int(math.floor(sy0))), min(h, int(math.ceil(sy1)))):
+                wy = min(y + 1, sy1) - max(y, sy0)
+                if wy <= 0:
+                    continue
+                line = grid[y]
+                for x in range(max(0, int(math.floor(sx0))), min(w, int(math.ceil(sx1)))):
+                    wx = min(x + 1, sx1) - max(x, sx0)
+                    if wx <= 0:
+                        continue
+                    area += wy * wx
+                    acc += wy * wx * line[x]
+            row.append(int(round(acc / area)) if area else 0)
+        out.append(row)
+    return out, x0, y0
+
+
+def pearson(a, b):
+    n = len(a)
+    ma = sum(a) / n; mb = sum(b) / n
+    sab = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    saa = sum((x - ma) ** 2 for x in a); sbb = sum((y - mb) ** 2 for y in b)
+    return sab / math.sqrt(saa * sbb) if saa > 0 and sbb > 0 else 0.0
+
+
+def family_score(d, rs, m, rm, font_scale):
+    """1.6's gate: median correlation of the master box-fitted into the small glyph's
+    scaled cell against the small glyph's own resample, over glyphs 4 px or larger."""
+    ss = real_sprites(rs); sm = real_sprites(rm)
+    scores = []
+    for i, s in ss.items():
+        t = sm.get(i)
+        if t is None or s['w'] < 4 or s['h'] < 4:
+            continue
+        nw = max(1, int(round(s['w'] * font_scale))); nh = max(1, int(round(s['h'] * font_scale)))
+        base = [opacity(e) for line in box_resample(glyph_grid(d, s), s['w'], s['h'], nw, nh) for e in line]
+        cand = [opacity(e) for line in box_resample(glyph_grid(m, t), t['w'], t['h'], nw, nh) for e in line]
+        scores.append(pearson(base, cand))
+    if len(scores) < 8:
+        return -1.0
+    scores.sort()
+    return scores[len(scores) // 2]
+
+
+MARKER = 6
+
+
+def master_font_sprite(m, t, f, nx, ny, nw, nh, stats):
+    """The master glyph t scaled by f, placed in the resample's cell (nx, ny, nw, nh):
+    the advance edge nx+nw and the baseline are kept, the cell grows left or down if
+    the master's ink needs it, and ink past the advance slides left, then clips.
+    -> (payload, x, y, w, h)"""
+    src = glyph_grid(m, t)
+    # The font tool stamped alpha-6 pixels in a cell's last column to force its extent
+    # (FINDINGS 137.1): a marker, never ink (stock coverage is k*16-1). Scaled with the
+    # glyph it would overrun the advance by a pixel half the time for nothing. The
+    # extent here is the resample's cell, so the marker is dropped.
+    for line in src:
+        if line[-1] == MARKER:
+            line[-1] = 0
+    g, gx0, gy0 = box_resample_at(src, t['w'], t['h'], f, t['x'], t['y'])
+    # trim empty columns the marker left behind
+    while g and all(line[-1] == 0 for line in g) and len(g[0]) > 1:
+        for line in g:
+            line.pop()
+    gh = len(g); gw = len(g[0]) if gh else 0
+    right = nx + nw
+    x0 = min(nx, gx0); y0 = min(ny, gy0)
+    if gx0 + gw > right:
+        # real ink past the advance: the cell grows LEFT (x may go negative, the pen
+        # origin is unchanged) rather than the ink being cut. 1-2 px on a few glyphs.
+        stats['slid'] += 1
+        stats['extended'] = max(stats.get('extended', 0), gx0 + gw - right)
+        gx0 = right - gw
+        x0 = min(x0, gx0)
+    bottom = max(ny + nh, gy0 + gh)
+    W, H = right - x0, bottom - y0
+    cx, cy = gx0 - x0, gy0 - y0
+    grid = [[0] * W for _ in range(H)]
+    for r in range(gh):
+        grid[cy + r][cx:cx + gw] = g[r]
+    out = bytearray()
+    for r, line in enumerate(grid):
+        out += hs.emit_row([to_alpha(v) for v in line], term=None if r == H - 1 else 0x00)
+    out.append(0xC0)
+    return bytes(out), x0, y0, W, H
+
+
 def rescale_sprite(d, s, nw, nh):
     offs, term = row_offsets(d, s)
     if d[term] != 0xC0:
@@ -223,7 +412,7 @@ def rescale_sprite(d, s, nw, nh):
 
 def rescale(d, to_w, to_h, from_w=STOCK_W, from_h=STOCK_H, verbose=False,
             font_scale=None, font_scale_x=None, font_scale_y=None,
-            font_filter='box'):
+            font_filter='box', master=None, report=None):
     r = hs.parse(d)
     if not r['exact']:
         raise ValueError('container chain ends at %d, file is %d -- refusing'
@@ -254,6 +443,37 @@ def rescale(d, to_w, to_h, from_w=STOCK_W, from_h=STOCK_H, verbose=False,
             xs = font_scale_x
         if font_scale_y is not None:
             ys = font_scale_y
+    # The uniform master (see master_font_sprite). Only for a font scaled UP, only
+    # when the family gate passes, and only at a factor that is not itself an upscale.
+    #
+    # WHY THE BAND. A factor near 1 is the master's own bitmap at nearly its own size,
+    # and resampling it by 1.008 keeps every pixel while moving each glyph to its own
+    # fractional phase -- crisp columns split across two at half coverage, for no change
+    # in size. Measured on copp6 (master copp8 at 1.008): soft columns went from 16.5%
+    # of the resample's to 19.2%, worse than what it replaced, and the owner saw it as
+    # artifacts on the sides of characters. So a factor within SNAP of 1 is snapped to
+    # exactly 1 and the master's glyph is copied verbatim -- PopTop's own hinted bitmap,
+    # no resampling at all, at a size off by that same 1-3%. Below the band it is a
+    # genuine DOWNscale, which is what a box filter is for. Above it the master would be
+    # upscaled, which is what the plain resample already does, so nothing is gained.
+    rm = mf = None
+    if font and master is not None and xs == ys and xs > 1.0:
+        rm = hs.parse(master)
+        f = master_factor(r, rm, xs)
+        score = family_score(d, r, master, rm, xs)
+        if report is not None:
+            report.update(factor=f, score=score, taken=0, slid=0, clipped=0)
+
+        font_scale_of[0] = xs
+        if f and 1.0 <= f <= 1.0 + MASTER_SNAP_UP and abs(cap_error(r, rm, 1.0)) <= MASTER_CAP_MAX:
+            if report is not None:
+                report['snapped_from'] = f
+                report['cap'] = cap_error(r, rm, 1.0)
+            f = 1.0
+        if f and (f == 1.0 or f <= MASTER_DOWN_MAX) and score >= MASTER_FAMILY_MIN:
+            mf = f
+        else:
+            rm = None
     out = bytearray(d[:r['table_base']])
     table = [bytearray(t) for t in r['table']]
     blocks = []
@@ -266,7 +486,11 @@ def rescale(d, to_w, to_h, from_w=STOCK_W, from_h=STOCK_H, verbose=False,
             nh = max(1, int(round(s['h'] * ys)))
             nx = int(round(s['x'] * xs))
             ny = int(round(s['y'] * ys))
-            if font:
+            t = rm['sprites'][s['index']] if rm is not None and s['index'] < len(rm['sprites']) else None
+            if font and t is not None and t['fmt'] == 2 and t['w'] > 0 and t['h'] > 0:
+                payload, nx, ny, nw, nh = master_font_sprite(master, t, mf, nx, ny, nw, nh, report)
+                report['taken'] += 1
+            elif font:
                 payload = rescale_font_sprite(
                     d, s, nw, nh,
                     filt=nn_resample if font_filter == 'nn' else box_resample)
@@ -396,6 +620,12 @@ def main():
                          'and is right for a DOWNscale; nn keeps stems crisp and is right '
                          'for an upscale -- lossless at an exact 2.0 (section 86). No '
                          'effect at --font-scale 1.0, where fonts are not resampled.')
+    ap.add_argument('--font-master', action='store_true',
+                    help='draw a scaled-up font from the next size up, scaled by ONE '
+                         'factor per font so its total advance matches the resample, '
+                         'placed on the baseline in the resample\'s cell (FINDINGS 141). '
+                         'Singletons, packs that fail the family gate, and fonts whose '
+                         'master would be an upscale keep the plain resample.')
     ap.add_argument('-v', '--verbose', action='store_true')
     a = ap.parse_args()
 
@@ -455,10 +685,55 @@ def main():
                       % (name, r['count'], '  [FONT: uniform + box filter]'
                          if is_font(d, r) else ''))
             fw, fh = (640, 480) if name in MENU_SRC[0] else (src_w, src_h)
+            master = None; report = {}; mn = None
+            if a.font_master and is_font(d, r):
+                # Every larger size is a candidate; the one whose uniform factor is
+                # CLOSEST TO 1 wins, because a factor of 1 is the master's own bitmap
+                # copied verbatim -- PopTop's hinting, no resampling, no artifacts. The
+                # 1.6 rule (smallest size that reaches the target) picked by nominal
+                # point size, which is not linear in pixels (FINDINGS 137.3) and chose
+                # copp12 for copp8 at 0.918: a factor near enough to 1 to keep the
+                # resolution and far enough to blend every other column.
+                # A verbatim copy beats any resample, so a candidate in the snap band
+                # wins outright, nearest to 1 first; failing that the mildest genuine
+                # downscale; failing that none, and the plain resample stands.
+                snaps, downs = [], []
+                for cand in font_master_candidates([n for n, _ in names], name):
+                    me = dict(names).get(cand)
+                    if me is None:
+                        continue
+                    mb = _blobs.get(me['archive'])
+                    if mb is None:
+                        mb = _blobs[me['archive']] = open(me['archive'], 'rb').read()
+                    blob_m = mb[me['offset']: me['offset'] + me['size']]
+                    fac = master_factor(r, hs.parse(blob_m), a.font_scale or 1.0)
+                    if not fac:
+                        continue
+                    font_scale_of[0] = a.font_scale or 1.0
+                    if 1.0 <= fac <= 1.0 + MASTER_SNAP_UP and \
+                       abs(cap_error(r, hs.parse(blob_m), 1.0)) <= MASTER_CAP_MAX:
+                        snaps.append((fac, cand, blob_m))
+                    elif fac <= MASTER_DOWN_MAX:
+                        downs.append((-fac, cand, blob_m))
+                pick_ = min(snaps) if snaps else (min(downs) if downs else None)
+                if pick_ is not None:
+                    mn, master = pick_[1], pick_[2]
             new = rescale(d, w, h, from_w=fw, from_h=fh, verbose=a.verbose,
                           font_scale=a.font_scale,
                           font_scale_x=a.font_scale_x, font_scale_y=a.font_scale_y,
-                          font_filter=a.font_filter)
+                          font_filter=a.font_filter, master=master, report=report)
+            if report:
+                if not report['taken']:
+                    how = 'KEPT the plain resample'
+                elif 'snapped_from' in report:
+                    how = ('COPIED VERBATIM (factor %.3f snapped to 1, cap %+.1f%%), %d glyph(s), %d slid up to %d px'
+                           % (report['snapped_from'], report['cap'] * 100, report['taken'],
+                              report['slid'], report.get('extended', 0)))
+                else:
+                    how = ('box-downscaled by %.3f, %d glyph(s), %d slid up to %d px'
+                           % (report['factor'], report['taken'], report['slid'], report.get('extended', 0)))
+                print('  %-12s master %-12s family score %.3f  %s'
+                      % (name, mn, report['score'], how))
         except Exception as ex:
             if isinstance(ex, ValueError) and 'chain ends' in str(ex):
                 # section 26's known exception: glastube has extra sections before and

@@ -489,6 +489,346 @@ static int rescale_font_sprite(const cont_t *c, const sprite_t *s, int nw, int n
     return 0;
 }
 
+
+/* ----------------------------------------------- a larger master, scaled uniformly
+ *
+ * FINDINGS 141. A font scaled UP is drawn from a LARGER SIZE THE GAME ALREADY SHIPS,
+ * scaled by ONE factor for the whole font rather than fitted glyph by glyph. §130's
+ * path did the latter and made round capitals two rows taller than flat ones (§135);
+ * a single factor cannot, because every glyph keeps the master's own proportions.
+ *
+ * The factor equals the ADVANCES: master_factor() is font_scale times the small
+ * font's total advance over A-Z and 0-9 divided by the master's, so a line of text
+ * comes out the width the plain resample would draw. Three bands follow from it:
+ *
+ *   f in [1, 1+SNAP_UP]   snap to exactly 1 and COPY THE MASTER VERBATIM. This is the
+ *                         good case: PopTop's own hinted bitmap, never resampled, no
+ *                         blended columns at all. The glyph lands a few percent
+ *                         smaller than the resample would draw it, which is the price.
+ *   f <= DOWN_MAX         a genuine downscale, which is what a box filter is for.
+ *   otherwise             no master; the plain resample stands.
+ *
+ * The gap between DOWN_MAX and 1 is deliberate. A factor of 0.95 keeps every source
+ * pixel while blending roughly every other column and leaving the rest 1:1, so one
+ * glyph has crisp sides and the next has soft ones -- the owner saw exactly that on
+ * the first cut (copp8 from copp12 at 0.918) and called it artifacts on the sides of
+ * characters. Snapping UP instead is refused because it widens every string.
+ *
+ * CAP_MAX is a second guard on the snap. The factor equals the advances, but the eye
+ * reads cap height, and two sizes of a hinted face do not share a height-to-width
+ * ratio. copp8 from copp10 at 1440p is 7.7% shorter and the owner passed it in game;
+ * copp6 from copp12 at 4K would be 10.0% shorter, past anything verified, so it is
+ * refused and the resample stands (at 2.0 that resample is an exact pixel double).
+ *
+ * The family gate is §130's, unchanged: a translation pack's repainted master is not
+ * the same face and scores far below it, so the pack keeps the plain resample. */
+
+#ifndef MASTER_FAMILY_MIN
+#define MASTER_FAMILY_MIN 0.72   /* between a wrong face and the weakest genuine one */
+#endif
+#define MASTER_SNAP_UP    0.08
+#define MASTER_DOWN_MAX   0.92
+#define MASTER_CAP_MAX    0.08
+
+static int py_round(double v);          /* defined with the name harvest below */
+
+/* The container's glyph as an opacity grid. */
+static int glyph_grid(const cont_t *c, const sprite_t *s, unsigned char **grid_out)
+{
+    int w = (int)s->w, h = (int)s->h;
+    static unsigned char *grid; static size_t gridcap;
+    static cell_t *row; static size_t rowcap;
+    grid = (unsigned char *)grow(grid, &gridcap, (size_t)w * h, 1);
+    row  = (cell_t *)grow(row, &rowcap, (size_t)w, sizeof(cell_t));
+    size_t p = s->data_offset;
+    for (int r = 0; r < h; r++) {
+        unsigned L; int term;
+        if (decode_row(c->d, p, w, row, &L, &term) < 0) return -1;
+        unsigned char *line = grid + (size_t)r * w;
+        for (int x = 0; x < w; x++) line[x] = (unsigned char)opacity(&row[x]);
+        p += L;
+        if (p > c->len) return -1;
+    }
+    if (p >= c->len || c->d[p] != 0xC0) return -1;
+    *grid_out = grid;
+    return 0;
+}
+
+static double cells_correlation(const cell_t *a, const cell_t *b, size_t n)
+{
+    double ma = 0, mb = 0;
+    for (size_t i = 0; i < n; i++) { ma += opacity(&a[i]); mb += opacity(&b[i]); }
+    ma /= (double)n; mb /= (double)n;
+    double num = 0, da = 0, db = 0;
+    for (size_t i = 0; i < n; i++) {
+        double x = opacity(&a[i]) - ma, y = opacity(&b[i]) - mb;
+        num += x * y; da += x * x; db += y * y;
+    }
+    if (da <= 0 || db <= 0) return 0.0;
+    return num / sqrt(da * db);
+}
+
+/* A sprite that carries real geometry. Matches the Python's real_sprites(). */
+static int sprite_real(const sprite_t *s) { return s->fmt == 2 && s->w > 0 && s->h > 0; }
+
+/* font_scale * (sum of the small font's advances) / (the master's), over A-Z and 0-9
+ * present in both. Sprite index is the character code minus 32 (FINDINGS 137.1). */
+static double master_factor(const cont_t *c, const cont_t *m, double font_scale)
+{
+    long a = 0, b = 0;
+    for (int code = 48; code <= 90; code++) {
+        if (code > 57 && code < 65) continue;
+        unsigned i = (unsigned)(code - 32);
+        if (i >= c->count || i >= m->count) continue;
+        const sprite_t *s = &c->sprites[i], *t = &m->sprites[i];
+        if (!sprite_real(s) || !sprite_real(t)) continue;
+        a += s->x + (int)s->w;
+        b += t->x + (int)t->w;
+    }
+    return (a && b) ? font_scale * (double)a / (double)b : 0.0;
+}
+
+/* (master's H ink height at f) / (the resample's) - 1. H is a flat capital: no
+ * overshoot, present in every asset, and the height a line is read by. */
+static double cap_error(const cont_t *c, const cont_t *m, double f, double font_scale)
+{
+    unsigned i = (unsigned)('H' - 32);
+    if (i >= c->count || i >= m->count) return 0.0;
+    const sprite_t *s = &c->sprites[i], *t = &m->sprites[i];
+    if (!sprite_real(s) || !sprite_real(t)) return 0.0;
+    double want = (double)s->h * font_scale;
+    return want ? (double)t->h * f / want - 1.0 : 0.0;
+}
+
+/* The family gate: median correlation of the master box-fitted into the small glyph's
+ * scaled cell against the small glyph's own resample, over glyphs 4 px or larger. */
+static double family_score(const cont_t *c, const cont_t *m, double font_scale)
+{
+    static cell_t *base; static size_t basecap;
+    static cell_t *cand; static size_t candcap;
+    static double *sorted; static size_t sortcap;
+    size_t n = 0;
+    sorted = (double *)grow(sorted, &sortcap, c->count ? c->count : 1, sizeof(double));
+    for (unsigned i = 0; i < c->count; i++) {
+        if (i >= m->count) continue;
+        const sprite_t *s = &c->sprites[i], *t = &m->sprites[i];
+        if (!sprite_real(s) || !sprite_real(t) || s->w < 4 || s->h < 4) continue;
+        int nw = py_round((double)s->w * font_scale); if (nw < 1) nw = 1;
+        int nh = py_round((double)s->h * font_scale); if (nh < 1) nh = 1;
+        unsigned char *g;
+        base = (cell_t *)grow(base, &basecap, (size_t)nw * nh, sizeof(cell_t));
+        cand = (cell_t *)grow(cand, &candcap, (size_t)nw * nh, sizeof(cell_t));
+        if (glyph_grid(c, s, &g) < 0) continue;
+        box_resample(g, (int)s->w, (int)s->h, nw, nh, base);
+        if (glyph_grid(m, t, &g) < 0) continue;
+        box_resample(g, (int)t->w, (int)t->h, nw, nh, cand);
+        sorted[n++] = cells_correlation(base, cand, (size_t)nw * nh);
+    }
+    if (n < 8) return -1.0;
+    for (size_t i = 1; i < n; i++) {          /* insertion sort: 224 values at most */
+        double v = sorted[i]; size_t j = i;
+        while (j > 0 && sorted[j-1] > v) { sorted[j] = sorted[j-1]; j--; }
+        sorted[j] = v;
+    }
+    return sorted[n / 2];
+}
+
+/* The grid, whose top-left source pixel sits at (ox, oy) in stock pen units, scaled by
+ * f ABOUT THE PEN ORIGIN. Output pixels are the integer grid of the scaled space, so
+ * every glyph's baseline and cap line land at the same fractional phase -- which is
+ * what makes the result uniform where §135's per-cell fit was not.
+ *
+ * THE FLOATING POINT IS LOAD-BEARING, exactly as in box_resample: the oracle is
+ * byte-identity against the Python, so the expression forms, the accumulation order
+ * and the ties-to-even rounding are all part of the contract. */
+static void box_resample_at(const unsigned char *grid, int w, int h, double f,
+                            int ox, int oy, unsigned char *out, int *ox0, int *oy0,
+                            int *onw, int *onh)
+{
+    int x0 = (int)floor((double)ox * f), x1 = (int)ceil((double)(ox + w) * f);
+    int y0 = (int)floor((double)oy * f), y1 = (int)ceil((double)(oy + h) * f);
+    int nw = x1 - x0, nh = y1 - y0;
+    for (int r = y0; r < y1; r++) {
+        double sy0 = (double)r / f - (double)oy, sy1 = (double)(r + 1) / f - (double)oy;
+        int ystart = (int)floor(sy0); if (ystart < 0) ystart = 0;
+        int yend = (int)ceil(sy1); if (yend > h) yend = h;
+        for (int c = x0; c < x1; c++) {
+            double sx0 = (double)c / f - (double)ox, sx1 = (double)(c + 1) / f - (double)ox;
+            int xstart = (int)floor(sx0); if (xstart < 0) xstart = 0;
+            int xend = (int)ceil(sx1); if (xend > w) xend = w;
+            double acc = 0.0, area = 0.0;
+            for (int y = ystart; y < yend; y++) {
+                double wy = ((y + 1) < sy1 ? (double)(y + 1) : sy1)
+                          - ((double)y > sy0 ? (double)y : sy0);
+                if (wy <= 0) continue;
+                const unsigned char *line = grid + (size_t)y * w;
+                for (int x = xstart; x < xend; x++) {
+                    double wx = ((x + 1) < sx1 ? (double)(x + 1) : sx1)
+                              - ((double)x > sx0 ? (double)x : sx0);
+                    if (wx <= 0) continue;
+                    area += wy * wx;
+                    acc += wy * wx * line[x];
+                }
+            }
+            out[(size_t)(r - y0) * nw + (c - x0)] =
+                (unsigned char)(area != 0.0 ? (int)nearbyint(acc / area) : 0);
+        }
+    }
+    *ox0 = x0; *oy0 = y0; *onw = nw; *onh = nh;
+}
+
+/* The master glyph scaled by f and placed in the resample's cell: the advance edge
+ * nx+nw and the baseline are KEPT, so layout is the plain resample's to the byte. The
+ * cell grows left or down where the master's ink needs it; ink past the advance slides
+ * the glyph left rather than being cut. */
+#define AG_MARKER 6
+
+static int master_font_sprite(const cont_t *m, const sprite_t *t, double f,
+                              int *pnx, int *pny, int *pnw, int *pnh, buf_t *out)
+{
+    static unsigned char *sc; static size_t sccap;
+    static unsigned char *cell; static size_t cellcap;
+    static cell_t *rowbuf; static size_t rowbufcap;
+    int tw = (int)t->w, th = (int)t->h;
+    unsigned char *g;
+    if (glyph_grid(m, t, &g) < 0) return -1;
+
+    /* The font tool stamped alpha-6 pixels in a cell's last column to force its extent
+     * (FINDINGS 137.1): a marker, never ink -- every real coverage level is k*16-1.
+     * The extent here is the resample's cell, so the marker is dropped before scaling
+     * rather than scaled into a phantom column past the advance. */
+    static unsigned char *src; static size_t srccap;
+    src = (unsigned char *)grow(src, &srccap, (size_t)tw * th, 1);
+    memcpy(src, g, (size_t)tw * th);
+    for (int r = 0; r < th; r++)
+        if (src[(size_t)r * tw + (tw - 1)] == AG_MARKER) src[(size_t)r * tw + (tw - 1)] = 0;
+
+    int gx0, gy0, gw, gh;
+    int cw = (int)ceil((double)(t->x + tw) * f) - (int)floor((double)t->x * f) + 2;
+    int ch = (int)ceil((double)(t->y + th) * f) - (int)floor((double)t->y * f) + 2;
+    sc = (unsigned char *)grow(sc, &sccap, (size_t)cw * ch, 1);
+    box_resample_at(src, tw, th, f, t->x, t->y, sc, &gx0, &gy0, &gw, &gh);
+
+    /* trim the empty columns the dropped marker left behind */
+    while (gw > 1) {
+        int empty = 1;
+        for (int r = 0; r < gh; r++) if (sc[(size_t)r * gw + (gw - 1)]) { empty = 0; break; }
+        if (!empty) break;
+        for (int r = 1; r < gh; r++)
+            memmove(sc + (size_t)r * (gw - 1), sc + (size_t)r * gw, (size_t)(gw - 1));
+        gw--;
+    }
+
+    int nx = *pnx, ny = *pny, nw = *pnw, nh = *pnh;
+    int right = nx + nw;
+    int x0 = nx < gx0 ? nx : gx0;
+    if (gx0 + gw > right) { gx0 = right - gw; if (gx0 < x0) x0 = gx0; }
+    int y0 = ny < gy0 ? ny : gy0;
+    int bottom = (ny + nh) > (gy0 + gh) ? (ny + nh) : (gy0 + gh);
+    int W = right - x0, H = bottom - y0;
+    if (W < 1 || H < 1) return -1;
+
+    cell = (unsigned char *)grow(cell, &cellcap, (size_t)W * H, 1);
+    memset(cell, 0, (size_t)W * H);
+    for (int r = 0; r < gh; r++)
+        memcpy(cell + (size_t)(gy0 - y0 + r) * W + (gx0 - x0), sc + (size_t)r * gw, (size_t)gw);
+
+    rowbuf = (cell_t *)grow(rowbuf, &rowbufcap, (size_t)W, sizeof(cell_t));
+    for (int r = 0; r < H; r++) {
+        for (int c = 0; c < W; c++) rowbuf[c] = to_alpha(cell[(size_t)r * W + c]);
+        if (emit_row(rowbuf, W, r == H - 1 ? -1 : 0x00, out) < 0) return -1;
+    }
+    buf_u8(out, 0xC0);
+    *pnx = x0; *pny = y0; *pnw = W; *pnh = H;
+    return 0;
+}
+
+/* Which band a candidate master falls in. -> 1 verbatim (f set to 1), 2 downscale, 0 no. */
+static int master_band(const cont_t *c, const cont_t *m, double font_scale, double *f_out)
+{
+    double f = master_factor(c, m, font_scale);
+    if (f <= 0.0) return 0;
+    if (f >= 1.0 && f <= 1.0 + MASTER_SNAP_UP) {
+        if (fabs(cap_error(c, m, 1.0, font_scale)) > MASTER_CAP_MAX) return 0;
+        *f_out = 1.0;
+        return 1;
+    }
+    if (f <= MASTER_DOWN_MAX) { *f_out = f; return 2; }
+    return 0;
+}
+
+/* ------------------------------------------- which files are a font's candidates
+ *
+ * Font assets are named <face><size>.i16: comi07..comi24, copp6..copp12, cour03..08,
+ * and singletons (haet46, nose61, scri25, sten10, time16) with nothing larger. EVERY
+ * larger size of the same face is a candidate -- §130 picked by the point number, but
+ * those numbers are not linear in pixels (FINDINGS 137.3) and that is how copp8 ended
+ * up on copp12 at 0.918 instead of copp10 at 1.066. The caller measures each. */
+static int font_family(const char *name, char *face, size_t facen, int *size)
+{
+    size_t i = 0, k = 0;
+    while (name[i] && ((name[i] >= 'a' && name[i] <= 'z') || (name[i] >= 'A' && name[i] <= 'Z'))) {
+        if (k + 1 < facen) face[k++] = name[i];
+        i++;
+    }
+    face[k] = 0;
+    if (k == 0 || name[i] < '0' || name[i] > '9') return 0;
+    *size = 0;
+    while (name[i] >= '0' && name[i] <= '9') { *size = *size * 10 + (name[i] - '0'); i++; }
+    return name[i] == '.' || name[i] == 0;
+}
+
+int ag_font_master_next(const ag_assets *as, size_t i, int after_size)
+{
+    char face[32], f2[32]; int size, s2;
+    if (!font_family(as->name[i], face, sizeof face, &size)) return -1;
+    int best = -1, best_size = 0;
+    for (size_t j = 0; j < as->n; j++) {
+        if (j == i || !font_family(as->name[j], f2, sizeof f2, &s2)) continue;
+        if (strcmp(face, f2) != 0 || s2 <= size || s2 <= after_size) continue;
+        if (best < 0 || s2 < best_size) { best = (int)j; best_size = s2; }
+    }
+    return best;
+}
+
+
+/* Which master this asset should be drawn from, measured rather than named. Returns an
+ * index into `as`, or -1. A VERBATIM copy beats any resample, so a candidate in the
+ * snap band wins outright, nearest to 1 first; failing that the mildest genuine
+ * downscale. The caller passes the blobs it already has. */
+int ag_pick_master(const ag_assets *as, size_t i,
+                   unsigned char *const *blob, const size_t *blen, double font_scale)
+{
+    if (font_scale <= 1.0) return -1;
+    const ag_entry *e = as->src[i];
+    if (!blob[e->archive] || (size_t)e->offset + e->size > blen[e->archive]) return -1;
+    cont_t sc; sc.sprites = NULL;
+    if (cont_parse(&sc, blob[e->archive] + e->offset, e->size) != 0 || !sc.exact
+        || !is_font(&sc)) { free(sc.sprites); return -1; }
+
+    int best_band = 0, mj = -1, after = 0, j; double best_f = 0.0;
+    while ((j = ag_font_master_next(as, i, after)) >= 0) {
+        char f2[32]; int s2;
+        font_family(as->name[j], f2, sizeof f2, &s2);
+        after = s2;
+        const ag_entry *me = as->src[j];
+        if (!blob[me->archive] || (size_t)me->offset + me->size > blen[me->archive]) continue;
+        cont_t mc; mc.sprites = NULL;
+        if (cont_parse(&mc, blob[me->archive] + me->offset, me->size) != 0 || !mc.exact) {
+            free(mc.sprites); continue;
+        }
+        double f = 0.0;
+        int band = master_band(&sc, &mc, font_scale, &f);
+        free(mc.sprites);
+        if (!band) continue;
+        int better = !best_band || (band < best_band)
+                  || (band == best_band && fabs(f - 1.0) < fabs(best_f - 1.0));
+        if (better) { best_band = band; best_f = f; mj = j; }
+    }
+    free(sc.sprites);
+    return mj;
+}
+
 /* ------------------------------------------------------------------ the hash */
 
 /* The game's toupper at 0x4eb270. It also upcases bytes >= 0xF0, which a library
@@ -861,7 +1201,9 @@ int ag_resolve(const ag_index *ix, const ag_names *names, int with_menu, ag_asse
  */
 unsigned char *ag_rescale_container(const unsigned char *d, size_t len,
                                     int to_w, int to_h, int from_w, int from_h,
-                                    double font_scale, int font_nn, size_t *out_len)
+                                    double font_scale, int font_nn,
+                                    const unsigned char *master, size_t master_len,
+                                    ag_master_report *rep, size_t *out_len)
 {
     cont_t c; c.sprites = NULL;
     if (cont_parse(&c, d, len) < 0) return NULL;
@@ -870,6 +1212,21 @@ unsigned char *ag_rescale_container(const unsigned char *d, size_t len,
     double xs = (double)to_w / (double)from_w, ys = (double)to_h / (double)from_h;
     int font = is_font(&c);
     if (font) { xs = font_scale; ys = font_scale; }
+
+    /* The uniform master. Only for a font being scaled UP, only when the family gate
+     * passes, and only in one of the two usable bands (see master_band above). */
+    cont_t m; m.sprites = NULL;
+    int use_master = 0, band = 0; double mf = 0.0, score = -1.0;
+    if (font && master && master_len && xs > 1.0 && cont_parse(&m, master, master_len) == 0
+        && m.exact) {
+        band = master_band(&c, &m, xs, &mf);
+        if (band) {
+            score = family_score(&c, &m, xs);
+            use_master = (score >= MASTER_FAMILY_MIN);
+        }
+    }
+    if (rep) { rep->taken = 0; rep->slid = 0; rep->band = use_master ? band : 0;
+               rep->factor = mf; rep->median = score; }
 
     buf_t table = {0}, blocks = {0};
     for (unsigned i = 0; i < c.count; i++) {
@@ -884,9 +1241,21 @@ unsigned char *ag_rescale_container(const unsigned char *d, size_t len,
             nh = py_round((double)s->h * ys); if (nh < 1) nh = 1;
             nx = py_round((double)s->x * xs);
             ny = py_round((double)s->y * ys);
-            int rc = font ? rescale_font_sprite(&c, s, nw, nh, font_nn, &pay)
+            int rc = -1, took = 0;
+            if (use_master && i < m.count && sprite_real(&m.sprites[i])) {
+                int mx = nx, my = ny, mw = nw, mh = nh;
+                rc = master_font_sprite(&m, &m.sprites[i], mf, &mx, &my, &mw, &mh, &pay);
+                if (rc == 0) {
+                    if (mx != nx) { if (rep) rep->slid++; }
+                    nx = mx; ny = my; nw = mw; nh = mh; took = 1;
+                    if (rep) rep->taken++;
+                }
+            }
+            if (!took)
+                rc = font ? rescale_font_sprite(&c, s, nw, nh, font_nn, &pay)
                           : rescale_sprite(&c, s, nw, nh, &pay);
-            if (rc < 0) { free(pay.p); free(table.p); free(blocks.p); free(c.sprites); return NULL; }
+            if (rc < 0) { free(pay.p); free(table.p); free(blocks.p); free(c.sprites);
+                          free(m.sprites); return NULL; }
         }
         /* the 15-byte table record, with both length fields rewritten */
         unsigned char t[15];
@@ -912,7 +1281,7 @@ unsigned char *ag_rescale_container(const unsigned char *d, size_t len,
     buf_add(&out, d, c.table_base);
     buf_add(&out, table.p, table.n);
     buf_add(&out, blocks.p, blocks.n);
-    free(table.p); free(blocks.p); free(c.sprites);
+    free(table.p); free(blocks.p); free(c.sprites); free(m.sprites);
 
     unsigned total = (unsigned)out.n;
     for (int i = 0; i < 7; i++) {
@@ -980,6 +1349,10 @@ int ag_marker_text(const char *datadir, int to_w, int to_h, char *out, size_t n)
     size_t L = (size_t)snprintf(out, n, "%dx%d", to_w, to_h);
     for (int a = 0; a < na && L < n; a++)
         L += (size_t)snprintf(out + L, n - L, "\n%s %u", names[a], sizes[a]);
+    /* A REVISION LINE, so a set an older build left behind is rebuilt once on upgrade.
+     * The uniform-master path (FINDINGS 141) changes the fonts at every scale above 1
+     * without changing the mode or the archives, which the rest of the key covers. */
+    if (L < n) L += (size_t)snprintf(out + L, n - L, "\nfonts uniform-master");
     return na;
 }
 
@@ -1043,10 +1416,35 @@ int ag_generate_set(const char *gamedir, int to_w, int to_h, double font_scale,
         const ag_entry *e = as.src[i];
         if (!blob[e->archive] || (size_t)e->offset + e->size > blen[e->archive]) { failed++; continue; }
         int fw = as.from_i06[i] ? 640 : 1600, fh = as.from_i06[i] ? 480 : 1200;
+
+        const unsigned char *mp = NULL; size_t ml = 0;
+        int mj = ag_pick_master(&as, i, blob, blen, font_scale);
+        if (mj >= 0) {
+            const ag_entry *me = as.src[mj];
+            mp = blob[me->archive] + me->offset; ml = me->size;
+        }
+
         size_t olen;
+        ag_master_report rep;
         unsigned char *o = ag_rescale_container(blob[e->archive] + e->offset, e->size,
-                                                to_w, to_h, fw, fh, font_scale, font_nn, &olen);
+                                                to_w, to_h, fw, fh, font_scale, font_nn,
+                                                mp, ml, &rep, &olen);
         if (!o) { skipped++; continue; }     /* sections outside the sprite chain */
+        if (mp && log && rep.median >= 0) {
+            if (rep.band == 1)
+                snprintf(msg, sizeof msg, "    %s: %d glyph(s) COPIED VERBATIM from %s"
+                         " (family score %.2f, %d slid)", as.name[i], rep.taken,
+                         as.name[mj], rep.median, rep.slid);
+            else if (rep.band == 2)
+                snprintf(msg, sizeof msg, "    %s: %d glyph(s) from %s downscaled by %.3f"
+                         " (family score %.2f, %d slid)", as.name[i], rep.taken,
+                         as.name[mj], rep.factor, rep.median, rep.slid);
+            else
+                snprintf(msg, sizeof msg, "    %s: %s does not match it closely enough"
+                         " (family score %.2f) -- plain resample", as.name[i],
+                         as.name[mj], rep.median);
+            log(msg);
+        }
         snprintf(path, sizeof path, "%s/data/%s", gamedir, as.name[i]);
         FILE *f = fopen(path, "wb");
         if (f) {
@@ -1092,7 +1490,8 @@ int ag_generate_set(const char *gamedir, int to_w, int to_h, double font_scale,
                 size_t sl;
                 unsigned char *so = ag_rescale_container(blob[e->archive] + e->offset,
                                                          e->size, SLOTS[k].w, SLOTS[k].h,
-                                                         640, 480, 1.0, 0, &sl);
+                                                         640, 480, 1.0, 0,
+                                                         NULL, 0, NULL, &sl);
                 if (!so) continue;
                 char sp[2048];
                 snprintf(sp, sizeof sp, "%s/data/%s.%s", gamedir, base, SLOTS[k].ext);

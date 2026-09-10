@@ -12557,3 +12557,111 @@ Reproduce: fonts from the CowboyCollective release (not in the repo), then
 copy the four files into `data/` under a matching `ARTSET-MODE.txt`, and run
 `TROPICO_KEEP_MODE=1 dev/tools/rig-run.sh TAG WxH`. Snapshot the whole loose set
 first: a rig run at a different mode regenerates it and its cleanup clears the marker.
+
+## 141. The larger master, scaled by ONE factor per font: the fonts the owner asked for, shipping in 1.7
+
+**The question (owner, 2026-09-09, evening):** §136 dropped the larger-master path
+because two independently hinted bitmaps could not be reconciled glyph by glyph. The
+owner asked the obvious next thing: take the larger size and apply a *uniform*
+reduction to the whole font, so everything is sized the same way instead of each glyph
+being fitted to its own cell. That is a different construction from §130/§135 and it
+does not have their failure mode by design — a single factor keeps the master's own
+proportions, so the output can be no more uneven than the stock master already is.
+
+### 141.1 The construction
+
+For a font being scaled up, `master_factor()` is `font_scale` times the small font's
+total advance over A-Z and 0-9 divided by the master's, so a line of text comes out the
+width the plain resample would draw. Every glyph is then scaled by that one factor
+**about the pen origin**, not about its own cell, so every baseline and cap line lands
+at the same fractional phase. The glyph is placed in the plain resample's cell: the
+advance edge `round((x+w)*s)` and the baseline are kept exactly, the cell grows left or
+down where the ink needs it, and ink past the advance slides the glyph left rather than
+being cut. **Layout is therefore the plain resample's to the byte** — copp8's capitals
+still occupy 476 px of advance across A-Z either way — and nothing can overflow a field.
+
+### 141.2 Three bands, and why the middle one is empty
+
+The first cut used the §130 master rule (the smallest size whose *point number* reaches
+`size*scale`) and took any factor below the resample's. That gave copp8 — the HUD and
+sign font — `copp12 * 0.918`, and the owner saw it immediately: *"there were some
+noticeable artifacts on the sides of characters."* Measured, copp6 got **worse** than
+what it replaced (soft ink columns 16.5% -> 19.2%). The cause is the factor itself: at
+0.918 or 1.008 a box filter keeps every source pixel while blending roughly every other
+column and leaving the rest 1:1, so one glyph has crisp sides and the next has soft
+ones. So the factor decides which of three things happens:
+
+| band | what happens | why |
+|---|---|---|
+| `1.00 <= f <= 1.08` | **snap to exactly 1 and copy the master verbatim** | PopTop's own hinted bitmap, never resampled. The glyph lands a few percent smaller; that is the whole price. |
+| `f <= 0.92` | box downscale | a genuine downscale, which is what a box filter is for |
+| otherwise | no master, plain resample | the blend case above, or an upscale the resample already does |
+
+Snapping *up* is refused rather than banded: it would widen every string. A second guard
+covers the snap — the factor equals the *advances*, but the eye reads *cap height*, and
+two hinted sizes do not share a height-to-width ratio. copp8 from copp10 is 7.7% shorter
+and the owner passed it in game; copp6 from copp12 at 4K would be 10.0% shorter, past
+anything verified, so `MASTER_CAP_MAX` refuses it and the resample stands (at 2.0 that
+resample is an exact pixel double, so refusing costs nothing).
+
+**The master is chosen by measurement, not by name.** Every larger size of the face is a
+candidate; a verbatim band beats a downscale outright, and within a band the factor
+nearest 1 wins. §130 picked by the point number, and those numbers are not linear in
+pixels (§137.3) — which is exactly how copp8 ended up on copp12 at 0.918 instead of
+copp10 at 1.066. The family gate is §130's, unchanged, so a translation pack's repainted
+master scores far below it and the pack keeps the plain resample.
+
+Two details the construction needed. The tool's alpha-6 extent markers (§137.1) are
+dropped from the master before scaling; scaled with the glyph they became a phantom
+column past the advance and were most of the apparent overrun. And the lowercase slots
+are small caps, not placeholders (§140.3), drawn from the master like everything else.
+
+### 141.3 What each font does at 2560x1440, and what it bought
+
+Soft ink columns — a column no pixel fills, over A-Z and 0-9 — is the crispness measure;
+lower is better.
+
+| font | drawn from | resample | after |
+|---|---|---|---|
+| copp6 | copp8 verbatim (f 1.008, cap -2.5%) | 16.5% | 13.9% |
+| **copp8** | **copp10 verbatim (f 1.066, cap -7.7%)** | **16.2%** | **9.2%** |
+| comi07 | comi10 verbatim (f 1.023, cap -5.3%) | 12.7% | 7.9% |
+| comi08 | comi12 verbatim (f 1.017, cap -4.5%) | 10.7% | 7.0% |
+| comi10 | comi24 downscaled 0.618 | 10.2% | 8.1% |
+| comi12 | comi24 downscaled 0.720 | 8.2% | 7.9% |
+| cour03 | cour05 downscaled 0.874 | 14.3% | 12.8% |
+| copp10, cour05 | no usable master, plain resample | — | unchanged |
+
+copp8 is the HUD readouts and the town signs, the most-read text in the game, and it
+nearly halved. At 3840x2160 only comi07 and comi08 take a master (comi24 at 0.711 and
+0.824); everything else has none, and the plain resample there is a lossless pixel
+double. At 1920x1080 the scale is 1.0, no master is considered at all, and the emitted
+set is byte-identical to PopTop's — the native look is untouched, as always.
+
+**Owner, in game on the GOG copy at 1440p:** *"Oh, that's perfect now. It looks super
+sharp and clean everywhere I just looked."*
+
+### 141.4 The gates
+
+* **C against Python, byte for byte.** `dev/probes/artgen_set.c` (which includes
+  `proxy/artgen.c`, never a copy) against `tools/tropico-artset.py --font-master`:
+  **267 of 267 assets identical at 2560x1440, 267 of 267 at 3840x2160.** Both sides pick
+  the master through the same measurement, and the C calls `ag_pick_master()` — the
+  function the proxy calls — so the diff covers the selection as well as the pixels.
+* **Identity.** At 1600x1200 the C reproduces 260 of 260 archived files byte-identically;
+  fonts at scale 1.0 are still emitted untouched.
+* **The shipped DLL.** A rig run at 2560x1440 with the new `binkw32.dll` generated all
+  267 assets itself, and its `data/` matched the set the owner approved **0 of 267
+  differing**. Log lines name the master and the band per font. Shots
+  `rig-shots/dll-1440-*`; the earlier cuts are `um-`, `um2-`, `um3-1440-*`, and
+  `compare-um2-hud.png` / `money3.png` there are the before-and-after crops.
+* **4K.** `um-2160` against `stock2-2160`: no text region changed except where comi07/08
+  appear; the HUD and settings regions are 0 differing pixels. The `copp6 <- copp12`
+  snap that `MASTER_CAP_MAX` refuses was the one regression the guard was added for.
+
+The marker gains a `fonts uniform-master` line, so a set an older build left behind is
+rebuilt once on upgrade. No new ini key: the path is on wherever it measures well and
+off wherever it does not, which is the no-manual-setup rule.
+
+Reproduce: `dev/probes/artgen_set.c` and `tools/tropico-artset.py --font-master` as
+above, then `TROPICO_DIR=... dev/tools/rig-run.sh TAG 2560x1440 --dll proxy/binkw32.dll`.
