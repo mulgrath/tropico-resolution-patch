@@ -12442,3 +12442,118 @@ game drew exactly the shipped font path. Owner, on the scene that reported §135
 larger-master path (§130, §135) stays reverted; §137 and §138 record why nothing
 bitmap-based improves on the resample and what an outline path would cost. Release is
 the owner's call: merge `1.7` to `main` with an annotated `v1.7` tag.
+
+## 140. Copperplate CC Bold as a bundled substitute: in game on the GOG copy at 1440p and 4K, a modest gain at 1.333, a clear one at 2.0
+
+**The question (owner, 2026-09-09, evening):** §137.5 ruled every Microsoft face out of
+the box; the owner asked whether an open-licensed look-alike could stand in for
+Copperplate Gothic Bold, the HUD figures' face, and wanted it seen in the GOG copy
+before deciding. The leaning going in was against: bundling a font is heavier than the
+patch was meant to be.
+
+### 140.1 The candidate
+
+Copperplate CC (github.com/CowboyCollective/CopperplateCC, Owen Earl of indestructible
+type, released June 2026, SIL OFL 1.1 with no Reserved Font Name): a revival drawn from
+Goudy's 1901 design, Heavy and Bold weights, built with ttfautohint. 369 glyphs; of
+Windows-1252 only ¤ § ª µ º ¼ ½ ¾ are missing, and there is no Cyrillic. The Google
+Fonts alternatives that come up first (Cinzel, Forum, Balthazar) are Trajan-style
+inscriptional capitals with stroke contrast and real serifs; on a specimen next to the
+stock bitmap they read as a different face and were not taken further.
+
+Microsoft's own Copperplate Gothic page (learn.microsoft.com/typography/font-list/
+copperplate-gothic) is the *same* COPRGTB.TTF the assets were made from: "exclusively
+included with Microsoft products", data copyright URW and Font Bureau, redistribution
+via a fonts.com licence. It is not a free alternative; §137.5 stands.
+
+### 140.2 The oracle score (`dev/probes/font_oracle_cc.py`)
+
+§137's method, both CC weights, all seven modes, ppem 4..80 with the phase search:
+
+| asset | best mode | ppem | cell= | fit med / p05 / min | adv | cov |
+|---|---|---|---|---|---|---|
+| copp6  | ss4-v35 | 13.00 | 27% | 0.915 / 0.742 / 0.30 | +0.2 ± 1.1 | 0.96 |
+| copp8  | ss4-v35 | 17.50 | 11% | 0.935 / 0.814 / 0.37 | +1.0 ± 1.4 | 0.94 |
+| copp10 | ss4-v35 | 20.12 |  2% | 0.934 / 0.795 / 0.29 | -0.2 ± 1.8 | 0.94 |
+| copp12 | ss4-v35 | 22.12 |  0% | 0.927 / 0.774 / 0.25 | -1.5 ± 2.1 | 0.95 |
+
+Between the wrong-face control (0.80, 3% exact) and a genuine face (0.998, 86%): a
+real look-alike, not the face. Bold is the weight (Heavy's coverage ratio is 1.25, a
+quarter lighter than the stock ink). The 5th percentile is the glyphs whose drawing
+differs: Goudy's original against Monotype's digitization, mostly the round capitals
+and the figures.
+
+### 140.3 Fitting it into the cells (`dev/probes/font_substitute_cc.py`)
+
+The construction is §137.6's: the cell keeps the plain resample's advance edge
+`round((x+w)*s)` and baseline, the outline is rendered at `ppem*s` in ss4-v35 with the
+half-pixel baseline phase and placed at its natural bearing, and a glyph that would
+overrun the advance slides left, then clips. Two facts came out of that:
+
+* **A-Z and 0-9 fit the stock advances at the oracle's ppem** (10th-percentile
+  ratio 1.00 at 1.333 and 2.0 on every asset), so no condensing was needed. The
+  overruns were all in the lowercase slots and narrow punctuation.
+* **The lowercase slots are not placeholders: every font asset draws them.** In the
+  four Copperplate sizes they hold small caps at 0.77-0.83 of the cap height (copp12:
+  `A` 21x18, `a` 18x15), and the game draws them: "Mar 1950" on the HUD, "San
+  Cristobal" on the sign. Comic, Times and Courier hold true lowercase; Stencil's are
+  its capitals again. §135.1 and §137.1 said "1x1 placeholders for a-z"; that was
+  wrong for all seventeen assets, and the oracle skipped nothing because of it (it
+  compares the glyphs a face has). The first in-game pass left those slots on the
+  plain resample and the owner saw it at once ("the AR in MAR did not change at all");
+  the rerun renders the capital at `ppem * ratio` into each lowercase slot, ratio
+  measured per asset from the stock ink heights. CC has no small caps of its own, by
+  the designer's choice, so this is how an implementation would do it too.
+
+Only 1-14 glyphs per asset clip at all after that, by 4-64 pixels of alpha, all
+punctuation and accented capitals.
+
+### 140.4 In game
+
+GOG copy on the nested rig, 1.7 reference DLL (`0b7c1ee2`), tutorial map at t=18 s,
+same run shape for both: the shipped set, then the four `copp*.i16` replaced in
+`data/` under a matching marker so the proxy keeps them (log: "art set in data/
+matches the mode"). Shots in `<gamedir>/rig-shots/{stock,cc,cc2}-{1440,2160}-t18.png`,
+crops in `compare-{1440,2160}.png` (first pass) and `compare-{1440,2160}-v2.png` there.
+
+* **2560x1440 (scale 1.333):** a modest gain. CC's strokes are full-opacity where the
+  resample's are a fringe; the figures read a touch bolder and cleaner. At normal
+  viewing distance it is a subtle change.
+* **3840x2160 (scale 2.0):** a clear gain. The resample is a pixel-double with a soft
+  fringe; CC is a rendered outline with true diagonals and round bowls, and "$25,000"
+  and "Mar 1950" are plainly sharper, small caps included after the rerun
+  (`cc2-*` shots; the `cc-*` shots are the first pass with resampled small caps).
+
+Nothing else in the frame changed: the advance and baseline are the resample's by
+construction, so the fields, the sign and the layout are where they were.
+
+### 140.5 What this settles, and what it costs
+
+* Legally clean: OFL permits bundling, embedding and rendering; bitmaps made from it
+  on the player's machine are documents, not the font. A copyright line and the
+  licence text go in NOTICE. The 1901 design is out of any protection and the revival
+  is independent of the URW/Font Bureau data Microsoft licenses.
+* Packs unaffected by construction: the gate would be "is this the shipped copp asset"
+  by fingerprint; a replaced archive fails it and gets today's resample. CC could never
+  serve the Russian pack (no Cyrillic).
+* Not the §135 defect. The owner asked whether missing small caps explained the
+  larger-master unevenness. No: §135.2 traced that to the edge rows of the capitals,
+  hinted differently at each size (C and S at 191 where the double keeps 63), and the
+  small caps went through the same resample as everything else, present and scaled.
+  The small caps matter only to an outline path, which needs a second ppem per asset
+  for them.
+* The cost is the thing the owner was leaning against: one font file shipped with the
+  DLL (about 80 KB), the outline renderer of §137-138 built in the proxy, the small-cap
+  slots rendered at their own ppem, and the README saying that above native resolution the HUD figures
+  are drawn in an open revival of the same 1901 face, with an `[Art]` key to turn it
+  off. The resample stays the native-resolution look and the fallback.
+
+The decision is the owner's. The measurements say it works and looks like the game;
+they do not say it is worth carrying a font.
+
+Reproduce: fonts from the CowboyCollective release (not in the repo), then
+`CC_DIR=... dev/probes/font_oracle_cc.py` (about 25 min) and
+`CC_FONT=... dev/probes/font_substitute_cc.py OUT 1.3333333 copp6=13 copp8=17.5 copp10=20.12 copp12=22.12`,
+copy the four files into `data/` under a matching `ARTSET-MODE.txt`, and run
+`TROPICO_KEEP_MODE=1 dev/tools/rig-run.sh TAG WxH`. Snapshot the whole loose set
+first: a rig run at a different mode regenerates it and its cleanup clears the marker.
