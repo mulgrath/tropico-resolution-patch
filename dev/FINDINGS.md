@@ -11942,3 +11942,736 @@ probe after H9 read 2560x1440, the offset gone with the mode as in 131.3.
   unavailable and §127's fit check is reached; a direct Steam launch on this build.
 
 Release is the owner's call: merge `1.6` to `main` with an annotated `v1.6` tag.
+
+## 135. The larger-master fonts grew the round capitals: the master is now held inside the double's envelope
+
+**The report (owner, 2026-09-08):** at 2560x1440 the characters of one word come out in
+different sizes -- "SERVICE ALL SHIPS" on a building sign, the C, S and E visibly taller
+than the A, R, V and I. 1080p is clean. The owner's guess was fractional scaling.
+
+### 135.1 What the two screenshots measure
+
+The sign is Copperplate at 8 pt (`copp8`), all capitals: the game upcases through its own
+`toupper` (§19) and the font holds 1x1 placeholders for a-z. At 1080p the fonts are stock
+(scale 1.0). Row maxima of brightness through each letter, the correct 1080p shot:
+
+| letter | rows solid | rows faint above / below |
+|---|---|---|
+| e r v i a l h p | 11-20 (10) | none |
+| c, s | 11-20 | 10 at 114, 21 at 104 |
+| S (first) | 9-20 | 8 at 159 |
+
+Copperplate's round capitals overshoot the cap line by one row top and bottom, and the
+8 pt bitmap draws that row at a quarter coverage (stock `copp8` C: row maxima
+`63 255 ... 255 63`). It reads as one cap height because the overshoot is faint.
+
+The 2560x1440 shot, same letters:
+
+| letter | rows solid | edge rows |
+|---|---|---|
+| R V I A H P | 16-26 | 15 and 27 at ~170 |
+| E | 15-27 | 14 at 184 |
+| L | 15-27 | 28 at 187 |
+| C, S | 14-27 | 13 at 200, 28 at 200 |
+
+The overshoot rows are no longer faint: 200 against 114. C and S stand two rows taller than
+A and R, E and L one row. That is the "different sizes".
+
+### 135.2 Why: each size was hinted on its own, and the hinting differs at the edges
+
+At 1440p and at 4K `copp8` takes its pixels from `copp12` (§130's rule: the smallest
+size at least 8 x 1.33 = 10.7, so 12; the log line on the rig confirms it). Its C has the
+overshoot row at THREE quarters (`191 255 ... 255 191`), not a quarter: the larger sizes
+were hinted heavier at the edge. Box-fitted into the 8 pt cell, that row lands at 191
+where the plain double keeps the stock 63. Modelled through the generator's own resampler
+(`probes/artgen_edges.c`, which includes `proxy/artgen.c`), `copp8` at 1440p, row maxima
+top and bottom:
+
+| glyph | cell | double | master (130's output) |
+|---|---|---|---|
+| C | 16x16 | 63 191 ... 191 63 | 191 251 ... 251 191 |
+| S | 15x16 | 63 191 ... 191 63 | 191 251 ... 251 191 |
+| E | 13x15 | 47 162 ... 255 | 22 164 ... 161 |
+| A | 17x13 | 255 ... 255 | 144 ... 144 |
+
+`copp10` would have done the same (`191 255 ...` in its C), so the choice of master is
+not the lever.
+
+The §130 shape check cannot see this: a Pearson correlation over the cell is dominated by
+the stroke body, and these glyphs pass it comfortably (the family's median is 0.84). The master was fitted box to box, and
+the two boxes have different cap-height-to-box ratios.
+
+**4K was assumed clean and is not.** At 2.0 the `copp12` master gives C rows
+`191 217 255 ...` against the double's `63 63 255 ...`: two near-solid rows top and
+bottom, a larger absolute change than at 1440p. §130.4 judged 4K on the settings dialog,
+which is Comic; Copperplate was not looked at. `[Art] FontNearest` cannot help, both
+filters give the same faint rows.
+
+### 135.3 The fix: the double is the envelope
+
+`master_font_sprite()` now resamples the small glyph too and holds the master inside it:
+for every row, and then every column of the row-capped result, where the master's
+maximum opacity exceeds the small glyph's, the whole row or column is scaled down to that
+maximum. Inside the envelope the master's pixels stand, which is where the detail is. A
+row is scaled as a whole, not clipped per cell, so a stroke keeps its shape and only its
+weight changes. Layout is untouched: cell, offsets and advances are what the double
+gives, as before.
+
+**The envelope is the NEAREST-NEIGHBOUR double, not the box one.** The first cut used the
+box double, and the owner read the result as the bottoms of the characters cut off
+(2026-09-09), while also saying the 1.6 rendering had a bolder quality worth keeping. Both
+observations are the same fact: at 1.33 the box filter blends the body's first and last
+rows with the row beyond, to about 80%, and an envelope taken from it capped the master's
+crisp body edges to that. On the rig's HUD date the "1"'s bottom body row went from 239
+to 206 and every digit's from 247 to 206-214. The nearest resample never blends: an
+overshoot row stays a quarter, a body row stays solid, which is exactly the stock
+bitmap's own weights row for row. With it the body rows are what 1.6 drew (247) and only
+the overshoot rows return to faint.
+
+Considered and not taken: fitting the master by its solid-ink extent instead of its box.
+The extent depends on a threshold (at half opacity the 191 row counts as solid, at 224 it
+does not, and the two answers differ by a row), and every glyph would move by its own
+rounding, which is a new way to be uneven. The cap changes no geometry and can only
+shrink, so the output can never look larger than the double it replaced.
+
+After the cap, `copp8` at 1440p: C and S `63 251 255 ... 255 251 63`, the stock
+overshoot at the ends and the master's solid body inside; E `22 164 ... 161`, lighter
+than the double at both ends because the master is. At 4K C and S match the double at
+the ends row for row. The master's faint end rows on flat letters (A: 144 where the
+double has 255) are left alone, since the cap only lowers: half a row lighter at the
+apex, the same on every flat letter, and what the master genuinely draws.
+
+`probes/artgen_edges.c` is the test: it regenerates a font with and without its master,
+both nearest-doubled so a rejected glyph is the envelope itself, and fails on any glyph
+whose row or column maximum exceeds the envelope's by more than 1. Against it the 1.6
+code fails 111 of 147 `copp8` glyphs at 1440p and the box-envelope cut 23; every family
+tried failed somewhere (`copp6`, `comi12`, `cour05`, at 1.33 and at 2.0). With the
+nearest envelope, 0 across all eight pairings. The marker revision is `fonts master-2`, so a set an older
+build made is rebuilt once on upgrade. `probes/artgen_oracle.py` had not been run since
+the `dev/` move and could not find `tools/`; its paths are fixed.
+
+### 135.4 Measured on the rig, GOG copy, 2560x1440 and 3840x2160
+
+`dev/tools/rig-run.sh` at both modes with the new DLL, and a control at 2560x1440 with
+the folder's own 1.6 DLL. The two 1440p map shots differ ONLY in the bottom-right HUD
+panel (the money, date, population and tourist labels, which are Copperplate); the
+tutorial box, the menu and the settings dialog are pixel-identical, as the shape check's
+kept glyphs and the Comic and Times faces should be. The date "MAR 1950", row maxima of
+the red channel through each glyph, the text at 247 on a panel near 107:
+
+| glyph | 1.6: row above the body / row below | 1.7: the same rows | body edge rows, both |
+|---|---|---|---|
+| 1 (flat) | 115 / 132 | 115 / 123 | 222 / 239 |
+| 9 | 206 / 214 | 156 / 132 | 247 / 247 |
+| 5 | 222 / 247 | 148 / 123 | 247 / 247 |
+| 0 | 214 / 206 | 173 / 123 | 247 / 247 |
+
+Under 1.6 the round digits carried a near-solid row above and below the flat one's body,
+a digit two rows taller than its neighbour; under 1.7 those rows are as faint as the
+flat digit's own edge, and the body's edge rows are 1.6's to the value (the box-envelope
+cut had them at 206-214, the cut-off the owner saw). Shots `m3-1440-*`; the earlier
+`m2-*` are the box-envelope cut. The 4K run generated and played
+(267 assets, the marker at `fonts master-2`), and its HUD reads as one height by eye;
+no 1.6 control was run at 4K.
+
+The Steam copy cannot be used for this: launched outside the Steam client its DRM
+wrapper shows "Application load error 5" and exits, which two rig runs and the owner's
+desktop found out first. The rig runs on the GOG copy under `/mnt/Windows`.
+
+The oracle (`probes/artgen_oracle.py`) at 2560x1440, font scale 1.333: 25,820 sprites
+byte-identical to the Python, so the plain path is untouched. Shots:
+`app/rig-shots/m2-1440-*`, `m2-2160-*`, `ctl16-1440-*`.
+
+Release is the owner's call: merge `1.7` to `main` with an annotated `v1.7` tag.
+
+## 136. Decision (owner, 2026-09-09): the larger-master font path comes out of 1.7; the plain resample ships
+
+With the envelope of §135 in place the owner still saw truncation on several sides of
+the characters, and named the underlying problem: the bolder 1.6 rendering had a quality
+worth keeping, but not at the price of an inconsistent face, and no amount of manual
+correction was going to reconcile two independently hinted bitmaps. They asked what the
+field does instead.
+
+The answer is that nobody scales hinted bitmaps between sizes. Two sizes of a hinted face
+are not scaled copies of each other -- that is what hinting is for -- so a larger size
+fitted into a smaller size's cell always has its body somewhere the small glyph's body is
+not, and any envelope taken from the small glyph clips real strokes of the master. The
+standard is to rasterize from outlines at the target pixel size with anti-aliasing and
+no or light hinting, so an overshoot row gets fractional coverage from geometry the same
+way at every size (signed distance fields are the GPU form of the same idea). Where only
+bitmaps exist, the accepted answers are integer nearest-neighbour or plain area
+averaging, which is what 1.5 shipped.
+
+So `04ba9a5` (§130), its DLL refresh, and §135's two cuts are reverted in one commit.
+`ag_rescale_container()` is back to its 1.5 signature, `probes/artgen_masters.c` and
+`probes/artgen_edges.c` go with the path they drove, and the marker loses its revision
+line, so a set a 1.6 build made (`fonts master-1`) regenerates once. The oracle at
+2560x1440, font scale 1.333, is byte-identical to the Python again. §130 and §135 stay
+as the record of what was tried and why it cannot work.
+
+**What comes next, in its own session:** the font bitmaps were rasterized from stock
+typefaces, and the asset names say which (Comic Sans MS, Copperplate Gothic Bold,
+Courier New, Times New Roman, Haettenschweiler, Stencil, probably Script MT Bold). The
+first step is an identity oracle: render each face at the stock size and compare against
+the 1600x1200 bitmaps. If that reproduces them, the DLL can rasterize each glyph from the
+installed face into its cell at launch on Windows, gated by the per-glyph shape check so
+a translation pack's repainted bitmaps and a missing face keep the plain resample.
+
+## 137. Font identity oracle: nine of the seventeen assets are reproduced from the installed Windows faces at 0.998, the other eight need Office faces this machine does not have
+
+**The question (§136, owner, 2026-09-09):** can the game's fonts be rasterized from the
+original typefaces instead of scaled from bitmaps? First step, before any DLL work: an
+identity oracle that says which face and size produced each asset and how closely a
+fresh rasterization reproduces the shipped 1600x1200 bitmap. `dev/probes/font_oracle.py`
+is that oracle; it measures and prints, and generates nothing.
+
+### 137.1 What the containers actually hold
+
+Three facts had to be established before any comparison meant anything, and two of them
+correct what this file believed.
+
+**Sprite index is the character code minus 32.** The Copperplate 1x1 placeholders sit at
+sprites 65..90, which is a-z, and sprite 0 is the space; 224 sprites cover 32..255 of
+Windows-1252. (§130 and §135 counted glyphs correctly but named them by the raw index.)
+
+**The cell is not the ink box.** The font tool widened each cell to the pen advance and
+deepened it to the baseline, and where the ink reaches neither it stamped two pixels of
+alpha 6 in the last column on the two rows above the baseline. That is a marker, never
+ink: every genuine coverage level is k*16-1 (31, 47, ... 255, the 17 levels of a 4x4
+oversample), and alpha 6 occurs about 280 times per asset, two per glyph that needs it.
+So `x + w` is the advance, exactly as §63 inferred from the engine, and a hyphen's cell is
+11 rows tall with 4 rows of ink at the top. Comparing against the cell instead of the ink
+gave a hyphen a correlation of 0.20 and a caret 0.00; against the ink they are 0.99.
+`copp6`, `copp8` and `copp10` carry no markers at all, unlike `copp12`: those three were
+made by a different run of the tool, or a different tool.
+
+**The rasterizer was a 4x4 oversampler with the outline hinted at the 4x size.** Two
+signatures: the 17 coverage levels above, and stems that are not pixel-aligned (a
+Comic Sans stem reads `=@@*`, four columns at 0.4, 1, 1, 0.6), which rules out hinting
+at the target size. Modelled in FreeType as a 1-bit render at four times the pixel size
+under the v35 bytecode interpreter, box-reduced 4:1 (`ss4-v35`), that mode wins on all
+nine assets it could be tried on, and the best sizes come out integral or half-integral
+at 4x (91, 140, 188 ...). This is what GDI's `ANTIALIASED_QUALITY` did on Windows 9x
+and 2000, which is presumably the tool. Every best fit also chose the same origin phase,
+the baseline half a pixel down (`(0, 0.5)` for 118-142 of ~145 glyphs per asset).
+
+### 137.2 The method
+
+For each asset and each candidate face and mode: an integer-ppem scan 4..100 on cell
+geometry alone, then pixels on the top three plus eighth-ppem steps around the best, then
+a 16-way quarter-pixel origin search per glyph on every one of those candidates (the
+phase-0 ranking was wrong by a quarter ppem twice, comi12 and cour05, before that was
+made exhaustive). Per glyph the measures are the ink box against the render's ink box
+(dw, dh), the top row against the baseline (dtop), the advance `x + w` against
+FreeType's, and two Pearson correlations of coverage: the render box-fitted into the
+stock ink box (`fit`, what a runtime renderer would do, the §130.2 measurement) and both
+placed on a common baseline without resampling (`placed`). Glyphs under 4 px either way
+are skipped. Modes: native bytecode hinting under the v35 and v40 interpreters, no
+hinting, the autohinter, light autohinting, and the two 4x oversampled forms (hinted v35,
+unhinted). FreeType 2.13.2 through ctypes on the system library; Pillow's binding has no
+hinting switch. Faces are the owner's own Windows install under `/mnt/Windows`:
+Comic Sans MS 5.15, Courier New 6.95, Times New Roman 7.12, regular and bold each.
+
+### 137.3 The fit, per asset
+
+Best (face, mode, size) per asset. `cell=` is the share of glyphs whose ink box matches
+the render's exactly; `adv` is the median and spread of FreeType's advance minus `x + w`;
+`fit` is the median / 5th percentile / minimum correlation over all real glyphs.
+
+| asset | face | mode | ppem (x4) | n | cell= | mean dw, dh | adv | fit med / p05 / min | worst glyphs |
+|---|---|---|---|---|---|---|---|---|---|
+| comi07 | Comic Sans MS Regular | ss4-v35 | 22.62 (90.5) | 140 | 96% | 0.04, 0.02 | -0.2 ± 0.3 | 0.998 / 0.964 / 0.781 | î ï |
+| comi08 | Comic Sans MS Regular | ss4-v35 | 26.38 (105.5) | 145 | 97% | 0.04, 0.01 | -0.2 ± 0.3 | 0.999 / 0.993 / 0.762 | î ï |
+| comi10 | Comic Sans MS Regular | ss4-v35 | 29.62 (118.5) | 145 | 97% | 0.05, 0.00 | 0.0 ± 0.4 | 0.999 / 0.995 / 0.628 | î ï |
+| comi12 | Comic Sans MS Regular | ss4-v35 | 35.00 (140) | 147 | 97% | 0.06, 0.00 | 0.0 ± 0.4 | 0.999 / 0.994 / 0.588 | î ï |
+| comi24 | Comic Sans MS Regular | ss4-v35 | 64.38 (257.5) | 148 | 97% | 0.07, 0.01 | 0.0 ± 0.5 | 0.999 / 0.998 / 0.570 | î ï |
+| cour03 | Courier New **Bold** | ss4-v35 | 22.12 (88.5) | 145 | 91% | 0.09, 0.01 | +0.2 ± 0.4 | 0.998 / 0.947 / 0.903 | Â % W |
+| cour05 | Courier New **Bold** | ss4-v35 | 33.62 (134.5) | 148 | 90% | 0.11, 0.00 | +0.2 ± 0.5 | 0.999 / 0.964 / 0.894 | m W M |
+| cour08 | Courier New **Bold** | ss4-v35 | 47.00 (188) | 148 | 87% | 0.14, 0.01 | +0.2 ± 0.6 | 0.999 / 0.930 / 0.857 | W m M |
+| time16 | Times New Roman Regular | ss4-v35 | 35.12 (140.5) | 145 | 86% | 0.12, 0.03 | -0.2 ± 0.4 | 0.998 / 0.944 / 0.805 | j , ß |
+| copp6 | *(no Copperplate here)* | best wrong face | | 132 | 3% | 1.3, 1.7 | | 0.795 / 0.345 / 0.06 | |
+| copp8 | *(no Copperplate here)* | best wrong face | | 142 | 2% | 2.0, 1.8 | | 0.800 / 0.322 / 0.19 | |
+| copp10 | *(no Copperplate here)* | best wrong face | | 147 | 1% | 3.1, 1.8 | | 0.776 / 0.299 / 0.08 | |
+| copp12 | *(no Copperplate here)* | best wrong face | | 147 | 0% | 3.7, 1.8 | | 0.773 / 0.313 / 0.09 | |
+| haet46 | *(no Haettenschweiler here)* | best wrong face | | 148 | 0% | 10.6, 11.7 | | 0.467 / 0.100 / 0.00 | |
+| nose61 | *(unidentified)* | best wrong face | | 148 | 0% | 9.5, 6.9 | | 0.593 / -0.26 / -0.33 | |
+| scri25 | *(no Script MT Bold here)* | best wrong face | | 147 | 1% | 3.2, 2.4 | | 0.414 / 0.104 / -0.08 | |
+| sten10 | *(no Stencil here)* | best wrong face | | 148 | 0% | 4.3, 3.5 | | 0.723 / 0.354 / -0.11 | |
+
+So the names were right about the family and wrong about the weight once: the Courier
+assets are Courier New **Bold**, not Regular (Regular scores 0.64 with the stock ink at
+1.9x its coverage). The ink ratio (stock coverage over render coverage) is 0.99-1.00 on
+every matched asset, so there was no emboldening or gamma, and the tone curve of stock
+against render is the identity within the 16-level quantization. Sizes are not the
+nominal number at any one DPI (comi07 is 3.2x its number, comi24 2.7x, cour03 7.4x,
+time16 2.2x), so a renderer has to carry the ppem per asset or measure it as the oracle
+does; it cannot derive it from the name.
+
+The worst glyphs are informative rather than worrying. Comic's î and ï are 2-3 px
+narrower in the stock than in the 5.15 face and their accents sit 2 px further left: the
+outline changed between the 1990s version PopTop had and the one Windows ships now. The
+wide Courier glyphs (W, M, m) render 1-2 px wider than the stock at 0.86-0.91; everything
+else in the face is above 0.93. Times' j is 3 px wider in the modern face. Two or three
+glyphs per asset, all identifiable, none a shape mismatch.
+
+### 137.4 The wrong-face control, and what it means for the gate
+
+The eight assets whose face is absent are the control: the best any of the six installed
+faces can do against them, with the size, mode and per-glyph phase all searched in their
+favour. Copperplate and Stencil, both capitals-only geometric faces, reach a median of
+0.72-0.80 against Comic Sans Bold or Times Bold, but never above 3% of cells exact and
+with 5th percentiles of 0.30-0.35. The script faces and Haettenschweiler stay under 0.60.
+
+§130.2 put the wrong-face median at 0.53 and the family gate at 0.72. With the size and
+phase searched, a wrong face climbs to 0.80 at the median, and a genuine face sits at
+0.998 with 86-97% of cells exact. The gate for a runtime renderer therefore cannot be the
+correlation alone at 0.72; it should require both a median correlation of at least 0.95
+and a majority of exact ink boxes, which no wrong face approaches (3%) and every genuine
+face clears (86%). The same gate rejects a translation pack's repainted glyphs, which are
+not the face at all, and keeps the plain resample for them (memory: packs must keep
+working). Not yet tested against the Russian archive; that is a runtime-design question,
+and the oracle can run it when that session comes.
+
+### 137.5 Which faces a player has
+
+From the fonts on the owner's install and Microsoft's typography pages for each family
+(learn.microsoft.com/typography/font-list/...):
+
+| face | ships with | on this machine |
+|---|---|---|
+| Comic Sans MS (Regular, Bold) | Windows, every version since 2000 | `Windows/Fonts/comic.ttf`, 5.15 |
+| Courier New (Regular, Bold) | Windows, every version | `Windows/Fonts/cour*.ttf`, 6.95 |
+| Times New Roman (Regular, Bold) | Windows, every version | `Windows/Fonts/times*.ttf`, 7.12 |
+| Copperplate Gothic Bold (`COPRGTB.TTF`) | Office only ("exclusively included with Microsoft products") | absent |
+| Haettenschweiler (`HATTEN.TTF`) | Office only | absent |
+| Stencil (`STENCIL.TTF`) | Office only | absent |
+| Script MT Bold (`SCRIPTBL.TTF`) | Office only | absent |
+
+The owner has no Office install, so the four Office faces could not be tested; the table
+above says nothing about how well they would reproduce their assets, only that their
+assets match none of the Windows faces. `nose61` is a heavy upright brush face with
+swash capitals and a looped G; its name matches no Microsoft face and it is not any of the
+seven. It is the intro/title face and has no larger size to lose.
+
+On bundling (owner's question): none of the seven may be redistributed. The Windows faces
+are licensed under the Windows EULA; Microsoft's 1996-2002 "Core fonts for the Web"
+release allows redistribution of its original installer packages only, unmodified, which
+is a first-run download with an EULA prompt and collides with the no-manual-setup rule.
+The Office faces are Monotype and URW designs licensed to Microsoft for Office; there is
+no official source outside it, and shipping bitmaps pre-rendered from them is
+redistributing a derivative. Rendering at runtime from what the player has installed is
+the ordinary use every application makes of a font, and nothing leaves the machine. So a
+runtime path can only ever be: use the installed face when the gate passes, else the plain
+resample. On a typical machine without Office that is Comic (the dialogs and most of the
+HUD), Courier and Times (the advisor), and never Copperplate (the HUD figures §135 was
+about), Haettenschweiler, Stencil or Script.
+
+### 137.6 The scaled cell at 2560x1440 and 3840x2160
+
+The generator keeps `round(w*s) x round(h*s)` as the cell (§86, §130.1), so the question
+is how far the outline's own ink box at `ppem*s` sits from it. Rendered in the best mode
+at the best ppem times the scale, over all real glyphs:
+
+| asset | 1.333: box == cell / within 1 px / mean dw, dh | 2.0: same |
+|---|---|---|
+| comi07 | 16% / 91% / 0.74, 0.55 | 11% / 61% / 1.01, 0.87 |
+| comi08 | 22% / 94% / 0.59, 0.48 | 11% / 58% / 0.92, 1.01 |
+| comi10 | 21% / 88% / 0.64, 0.51 | 5% / 59% / 1.06, 0.97 |
+| comi12 | 28% / 94% / 0.51, 0.50 | 10% / 67% / 0.92, 0.95 |
+| comi24 | 32% / 92% / 0.50, 0.45 | 11% / 69% / 1.01, 0.80 |
+| cour03 | 14% / 77% / 0.57, 0.83 | 10% / 61% / 0.88, 0.99 |
+| cour05 | 23% / 83% / 0.72, 0.48 | 9% / 49% / 1.30, 0.54 |
+| cour08 | 17% / 81% / 0.68, 0.72 | 7% / 49% / 1.09, 1.14 |
+| time16 | 22% / 89% / 0.62, 0.51 | 13% / 72% / 0.88, 0.83 |
+
+At 1.333 the outline's box is within a pixel of the scaled cell for about nine glyphs in
+ten; at 2.0 the miss is a pixel on average and two is common. The reason is not the
+outline: the scaled cell doubles the antialiasing fringe along with the body (a stock box
+of 11 columns holds an outline 9.5-11 wide, so its double holds 19-22 while the outline
+at 2x wants 19-21), and the per-glyph rounding of §135.3 adds up to half a pixel on top.
+**Box-fitting the render into the scaled cell would stretch each glyph by its own
+pixel**, 2-5% at 4K on small faces, unevenly from glyph to glyph, which is the class of
+defect §135 was about. The right construction is the stock tool's own: render at
+`ppem*s`, place the ink at its natural size on the baseline in the cell, and widen the
+cell to the resample's `nx + nw` and the baseline with the marker pixels, so the advance
+and line layout stay byte-identical to the plain resample and the ink is never resampled.
+When the ink overflows the cell by a pixel, and only then, clip or fit. This is a design
+choice for the runtime session; it is stated here because the table above rules the
+naive fit out.
+
+**Overshoot is consistent by construction.** Top and bottom row maxima at 1.333 in the
+best mode, round capitals against flat: Courier `cour08` C G O S all `255 .. 255`, E H I
+L T all `63 .. 255`; `cour05` rounds `70 .. 193`, flats `127 .. 255`; Times rounds
+`191 .. 191`, flats `255 .. 255`. Every letter of a class gets the same edge coverage,
+because one rasterizer at one size puts the cap line and the overshoot at the same
+fraction for all of them; which is exactly what the stock bitmaps also show (`cour08`
+stock: rounds `255 .. 63`, flats `63 .. 127`, identical within class). Comic Sans varies
+letter to letter in both the stock and the render (stock `comi12` E 255, T 111, L 191 on
+the top row) because the face is drawn irregular; that is the design, not the
+rasterizer. The §135 defect, a round C two rows taller than a flat A in the same word,
+cannot arise from outline rendering.
+
+### 137.7 Recommendation
+
+Outline rendering is feasible, and worth doing, but not for 1.7.
+
+* **What is proven.** The three Windows faces reproduce nine assets to 0.998 median
+  correlation with a stable geometric convention (advance, baseline, marker) that a
+  renderer can honour exactly. Two or three glyphs per asset differ because the face
+  changed since 2001; those the gate will simply leave on the resample.
+* **What is not.** The four Office faces are untestable here and absent on most player
+  machines, and they include Copperplate, the HUD figures that started §135. A 1.7 with
+  outline fonts would sharpen the dialogs and the advisor and leave the HUD numbers on
+  the resample: a mixed frame, which is the objection the owner raised to §130's mixed
+  faces. Whether that reads as an improvement or as inconsistency is an in-game
+  judgment, and the rig cannot make it: the Linux rig has no Windows font stack.
+* **What it costs.** A rasterizer in the DLL. GDI is on every Windows and is the
+  presumed original tool, so `GetGlyphOutline` with `GGO_GRAY8_BITMAP` at `ppem*s` on
+  the installed face is the obvious first cut and needs no FreeType port; but GDI takes
+  integer pixel sizes, and five of the nine best sizes are half-integral at 1x, so a
+  GDI path renders at the 4x integer size and reduces, as the tool did. Plus the gate,
+  the marker construction, the per-asset ppem table, the pack test against the Russian
+  archive, and a Windows session on the dual-boot to judge it.
+
+So: ship 1.7 with the plain resample as §136 decided, and open the outline path as 1.8
+work in its own session, starting from `dev/probes/font_oracle.py`. Owner's call whether
+a Windows-faces-only version is wanted at all, given the Copperplate hole.
+
+Reproduce: `dev/probes/font_oracle.py` (all 17, ~10 min, or `--asset comi12`), `--show
+H,O,S` for ASCII art of stock, render and fit, `--glyphs` for the per-glyph dump,
+`--tone` for the tone curve, `--scale 1.3333 --scale 2.0` for §137.6. No rig run was
+needed: the oracle reads `known-good/fonts-scale1.00/` and the mounted fonts only.
+
+## 138. Spike: no bitmap-only upscaler gets near the outline, and edge reconstruction hurts the small faces it was meant for
+
+**The question (owner, 2026-09-09, after §137):** one process for all seventeen assets,
+crisp at 1440p and 4K. Since the field's answers are integer scaling, whole-frame blur,
+pixel-art filters or replacing the fonts (none of which is that), the spike asked
+whether a better bitmap-only scaler could substitute for outlines, now that §137 gives a
+ground truth to measure against. `dev/probes/font_upscale_spike.py`, throwaway
+measurement, kept for the record.
+
+### 138.1 The measurement
+
+For the nine assets §137 identified, the truth at scale `s` is the same face rendered at
+`ppem*s` in the stock's own mode (4x hinted, box-reduced, half-pixel baseline phase): what
+PopTop's tool would have produced for that resolution. Each scaler starts from the stock
+bitmap alone and outputs the generator's cell, `round(w*s) x round(h*s)`; the truth is
+box-fitted into the same cell. Scored per glyph by Pearson correlation, mean absolute
+error in alpha units, and a blur measure: the share of in-box pixels between 32 and 224
+(`grey`), which the truth also has, so the target is to match it, not minimise it.
+
+Scalers: box (1.5 ships it), nearest (`[Art] FontNearest`), bilinear, bicubic, Lanczos,
+Scale3x with a tolerance then box-down (the pixel-art family that HD mods use; a stand-in
+for xBRZ), and two edge reconstructions treating coverage as a distance field: magnify
+the coverage bilinearly or bicubically, then re-threshold with a one-pixel band,
+`clamp((c - 0.5)*s + 0.5)`. A reference row, `ref:outline`, is the unhinted outline at
+`ppem*s` fitted into the cell: not a bitmap scaler, the ceiling a smooth renderer reaches
+against the hinted truth. Small Copperplate has no outline here, so its stand-in is Comic
+Sans rendered at 11, 14 and 18 ppem (9, 11 and 15 row capitals, like copp6/8/10),
+quantized to the stock's 16 levels, and scored the same way.
+
+### 138.2 Results
+
+Median correlation / MAE / grey, at 1.333 and at 2.0. The full table for all nine and
+the three synthetic sizes is what the script prints; these rows carry the whole story.
+
+| case | box 1.333 | edge-lin 1.333 | Lanczos 1.333 | ref:outline 1.333 | box 2.0 | edge-lin 2.0 | ref:outline 2.0 | truth grey |
+|---|---|---|---|---|---|---|---|---|
+| comi12 (35 ppem) | 0.941 / 19.9 / .26 | 0.938 / 19.9 / .16 | 0.942 / 19.7 / .23 | 0.993 / 8.0 / .17 | 0.907 / 22.2 / .18 | 0.924 / 19.1 / .10 | 0.997 / 6.5 / .12 | .17 / .12 |
+| comi07 (22.6 ppem) | 0.895 / 29.2 / .35 | 0.885 / 27.9 / .21 | 0.898 / 28.2 / .31 | 0.988 / 12.1 / .25 | 0.861 / 30.3 / .24 | 0.894 / 24.8 / .14 | 0.994 / 7.9 / .18 | .25 / .18 |
+| cour08 (47 ppem) | 0.950 / 17.9 / .22 | 0.940 / 18.1 / .14 | 0.950 / 18.1 / .20 | 0.986 / 7.9 / .14 | 0.915 / 20.2 / .15 | 0.922 / 18.6 / .09 | 0.980 / 7.9 / .10 | .14 / .10 |
+| time16 (35 ppem) | 0.917 / 21.8 / .29 | 0.896 / 22.8 / .20 | 0.924 / 21.3 / .26 | 0.934 / 15.3 / .21 | 0.865 / 25.6 / .21 | 0.889 / 22.5 / .13 | 0.972 / 9.3 / .14 | .21 / .14 |
+| synthetic 18 ppem (15-row H) | 0.878 / 32.8 / .46 | 0.847 / 33.7 / .28 | 0.885 / 30.5 / .37 | 0.925 / 21.9 / .30 | 0.823 / 36.4 / .31 | 0.858 / 31.1 / .19 | 0.980 / 12.0 / .23 | .31 / .23 |
+| synthetic 14 ppem (11-row H) | 0.797 / 40.4 / .56 | 0.762 / 42.7 / .38 | 0.806 / 38.9 / .48 | 0.944 / 21.7 / .38 | 0.735 / 45.5 / .40 | 0.784 / 41.1 / .26 | 0.980 / 14.4 / .28 | .39 / .28 |
+| synthetic 11 ppem (9-row H) | 0.802 / 40.6 / .60 | 0.744 / 47.7 / .39 | 0.821 / 38.4 / .54 | 0.957 / 21.4 / .43 | 0.694 / 49.4 / .45 | 0.732 / 48.7 / .32 | 0.959 / 17.6 / .34 | .43 / .35 |
+
+Three findings, in order of weight.
+
+**No bitmap scaler recovers shape the others miss.** On every asset the eight scalers sit
+within 0.03 of one another in correlation and within a few alpha units in error. They
+are all the same information rearranged; Lanczos edges out box by a hundredth, Scale3x
+is box, nearest is box at 2.0 (§86.4). The outline at the same size is a different
+league: half the error at 1.333, a third at 2.0, correlation 0.98-0.99 against 0.86-0.95.
+That is the gap the owner sees as "not crisp", and it is not a filter problem.
+
+**Edge reconstruction changes the look, not the accuracy.** At 2.0 it turns the pixel
+double into smooth-edged glyphs with a grey fraction at or below the truth's (0.10
+against 0.12 on comi12) and the lowest error of any scaler (19.1 against box's 22.2); at
+1.333 it matches the truth's crispness where box is a third softer (0.16 against 0.26,
+truth 0.17). But its correlation is box's or a little under: it sharpens the edge the
+bitmap already implies, it cannot put the edge where the outline had it. For the large
+faces that is a real if modest improvement in appearance at the same fidelity.
+
+**On small glyphs it is worse than box, and those are the glyphs that matter.** At 9-11
+row capitals (copp6, copp8) edge reconstruction loses 0.04-0.06 of correlation to box and
+adds 5-7 alpha units of error. The ASCII art shows why: an 8 pt stem is one pixel wide
+at half coverage, straddling two columns; the truth at 2x is a solid two-pixel stem; box
+gives a soft grey band; the reconstruction thresholds the half-coverage away and leaves
+a hairline. The grey pixels of a small glyph are its strokes, not its edges, and there is
+no rule that tells the two apart from the bitmap alone. This is the Copperplate HUD
+case, and it is exactly where the synthetic ceiling shows the outline would recover the
+stem (0.96 against 0.69-0.73).
+
+### 138.3 What this settles
+
+* A unified bitmap-only process cannot deliver the crispness the owner is asking for.
+  The best available (Lanczos, or edge reconstruction at 2.0 on the large faces) is a
+  cosmetic step over box, measurable but small, and it goes backwards on the small
+  HUD faces.
+* Outline rendering is the only path with headroom, by a factor of two to three in
+  error on every size measured, and it is largest on the small glyphs.
+* So the honest choice is between the outline path where a face is installed with the
+  plain resample elsewhere (§137.7's mixed frame), and shipping the resample as it is.
+  A third option exists for the four Office faces and nose61, untested: a bundled
+  open-licensed look-alike fitted into the same cells by the same renderer. That is a
+  different typeface on the HUD, and whether it reads as the game depends on the
+  look-alike; nothing here measures it.
+
+Reproduce: `dev/probes/font_upscale_spike.py` (all nine plus synthetic, 15 s),
+`--asset comi12 --show S` for the side-by-side, `--synthetic --show R` for the small
+stem case.
+
+## 139. 1.7 verified by the owner on Linux at 2560x1440: the §135 unevenness is gone
+
+**2026-09-09, evening.** The committed 1.7 build (`proxy/binkw32.dll`, sha256
+`0b7c1ee2...`) installed to the GOG copy; the folder's 1440p set checked byte-identical
+to the Python generator's plain 1.333 resample (copp8, comi12) before the run, so the
+game drew exactly the shipped font path. Owner, on the scene that reported §135:
+"It does look correct on 1440p which was the previously tested failure." The
+larger-master path (§130, §135) stays reverted; §137 and §138 record why nothing
+bitmap-based improves on the resample and what an outline path would cost. Release is
+the owner's call: merge `1.7` to `main` with an annotated `v1.7` tag.
+
+## 140. Copperplate CC Bold as a bundled substitute: in game on the GOG copy at 1440p and 4K, a modest gain at 1.333, a clear one at 2.0
+
+**The question (owner, 2026-09-09, evening):** §137.5 ruled every Microsoft face out of
+the box; the owner asked whether an open-licensed look-alike could stand in for
+Copperplate Gothic Bold, the HUD figures' face, and wanted it seen in the GOG copy
+before deciding. The leaning going in was against: bundling a font is heavier than the
+patch was meant to be.
+
+### 140.1 The candidate
+
+Copperplate CC (github.com/CowboyCollective/CopperplateCC, Owen Earl of indestructible
+type, released June 2026, SIL OFL 1.1 with no Reserved Font Name): a revival drawn from
+Goudy's 1901 design, Heavy and Bold weights, built with ttfautohint. 369 glyphs; of
+Windows-1252 only ¤ § ª µ º ¼ ½ ¾ are missing, and there is no Cyrillic. The Google
+Fonts alternatives that come up first (Cinzel, Forum, Balthazar) are Trajan-style
+inscriptional capitals with stroke contrast and real serifs; on a specimen next to the
+stock bitmap they read as a different face and were not taken further.
+
+Microsoft's own Copperplate Gothic page (learn.microsoft.com/typography/font-list/
+copperplate-gothic) is the *same* COPRGTB.TTF the assets were made from: "exclusively
+included with Microsoft products", data copyright URW and Font Bureau, redistribution
+via a fonts.com licence. It is not a free alternative; §137.5 stands.
+
+### 140.2 The oracle score (`dev/probes/font_oracle_cc.py`)
+
+§137's method, both CC weights, all seven modes, ppem 4..80 with the phase search:
+
+| asset | best mode | ppem | cell= | fit med / p05 / min | adv | cov |
+|---|---|---|---|---|---|---|
+| copp6  | ss4-v35 | 13.00 | 27% | 0.915 / 0.742 / 0.30 | +0.2 ± 1.1 | 0.96 |
+| copp8  | ss4-v35 | 17.50 | 11% | 0.935 / 0.814 / 0.37 | +1.0 ± 1.4 | 0.94 |
+| copp10 | ss4-v35 | 20.12 |  2% | 0.934 / 0.795 / 0.29 | -0.2 ± 1.8 | 0.94 |
+| copp12 | ss4-v35 | 22.12 |  0% | 0.927 / 0.774 / 0.25 | -1.5 ± 2.1 | 0.95 |
+
+Between the wrong-face control (0.80, 3% exact) and a genuine face (0.998, 86%): a
+real look-alike, not the face. Bold is the weight (Heavy's coverage ratio is 1.25, a
+quarter lighter than the stock ink). The 5th percentile is the glyphs whose drawing
+differs: Goudy's original against Monotype's digitization, mostly the round capitals
+and the figures.
+
+### 140.3 Fitting it into the cells (`dev/probes/font_substitute_cc.py`)
+
+The construction is §137.6's: the cell keeps the plain resample's advance edge
+`round((x+w)*s)` and baseline, the outline is rendered at `ppem*s` in ss4-v35 with the
+half-pixel baseline phase and placed at its natural bearing, and a glyph that would
+overrun the advance slides left, then clips. Two facts came out of that:
+
+* **A-Z and 0-9 fit the stock advances at the oracle's ppem** (10th-percentile
+  ratio 1.00 at 1.333 and 2.0 on every asset), so no condensing was needed. The
+  overruns were all in the lowercase slots and narrow punctuation.
+* **The lowercase slots are not placeholders: every font asset draws them.** In the
+  four Copperplate sizes they hold small caps at 0.77-0.83 of the cap height (copp12:
+  `A` 21x18, `a` 18x15), and the game draws them: "Mar 1950" on the HUD, "San
+  Cristobal" on the sign. Comic, Times and Courier hold true lowercase; Stencil's are
+  its capitals again. §135.1 and §137.1 said "1x1 placeholders for a-z"; that was
+  wrong for all seventeen assets, and the oracle skipped nothing because of it (it
+  compares the glyphs a face has). The first in-game pass left those slots on the
+  plain resample and the owner saw it at once ("the AR in MAR did not change at all");
+  the rerun renders the capital at `ppem * ratio` into each lowercase slot, ratio
+  measured per asset from the stock ink heights. CC has no small caps of its own, by
+  the designer's choice, so this is how an implementation would do it too.
+
+Only 1-14 glyphs per asset clip at all after that, by 4-64 pixels of alpha, all
+punctuation and accented capitals.
+
+### 140.4 In game
+
+GOG copy on the nested rig, 1.7 reference DLL (`0b7c1ee2`), tutorial map at t=18 s,
+same run shape for both: the shipped set, then the four `copp*.i16` replaced in
+`data/` under a matching marker so the proxy keeps them (log: "art set in data/
+matches the mode"). Shots in `<gamedir>/rig-shots/{stock,cc,cc2}-{1440,2160}-t18.png`,
+crops in `compare-{1440,2160}.png` (first pass) and `compare-{1440,2160}-v2.png` there.
+
+* **2560x1440 (scale 1.333):** a modest gain. CC's strokes are full-opacity where the
+  resample's are a fringe; the figures read a touch bolder and cleaner. At normal
+  viewing distance it is a subtle change.
+* **3840x2160 (scale 2.0):** a clear gain. The resample is a pixel-double with a soft
+  fringe; CC is a rendered outline with true diagonals and round bowls, and "$25,000"
+  and "Mar 1950" are plainly sharper, small caps included after the rerun
+  (`cc2-*` shots; the `cc-*` shots are the first pass with resampled small caps).
+
+Nothing else in the frame changed: the advance and baseline are the resample's by
+construction, so the fields, the sign and the layout are where they were.
+
+### 140.5 What this settles, and what it costs
+
+* Legally clean: OFL permits bundling, embedding and rendering; bitmaps made from it
+  on the player's machine are documents, not the font. A copyright line and the
+  licence text go in NOTICE. The 1901 design is out of any protection and the revival
+  is independent of the URW/Font Bureau data Microsoft licenses.
+* Packs unaffected by construction: the gate would be "is this the shipped copp asset"
+  by fingerprint; a replaced archive fails it and gets today's resample. CC could never
+  serve the Russian pack (no Cyrillic).
+* Not the §135 defect. The owner asked whether missing small caps explained the
+  larger-master unevenness. No: §135.2 traced that to the edge rows of the capitals,
+  hinted differently at each size (C and S at 191 where the double keeps 63), and the
+  small caps went through the same resample as everything else, present and scaled.
+  The small caps matter only to an outline path, which needs a second ppem per asset
+  for them.
+* The cost is the thing the owner was leaning against: one font file shipped with the
+  DLL (about 80 KB), the outline renderer of §137-138 built in the proxy, the small-cap
+  slots rendered at their own ppem, and the README saying that above native resolution the HUD figures
+  are drawn in an open revival of the same 1901 face, with an `[Art]` key to turn it
+  off. The resample stays the native-resolution look and the fallback.
+
+The decision is the owner's. The measurements say it works and looks like the game;
+they do not say it is worth carrying a font.
+
+Reproduce: fonts from the CowboyCollective release (not in the repo), then
+`CC_DIR=... dev/probes/font_oracle_cc.py` (about 25 min) and
+`CC_FONT=... dev/probes/font_substitute_cc.py OUT 1.3333333 copp6=13 copp8=17.5 copp10=20.12 copp12=22.12`,
+copy the four files into `data/` under a matching `ARTSET-MODE.txt`, and run
+`TROPICO_KEEP_MODE=1 dev/tools/rig-run.sh TAG WxH`. Snapshot the whole loose set
+first: a rig run at a different mode regenerates it and its cleanup clears the marker.
+
+## 141. The larger master, scaled by ONE factor per font: the fonts the owner asked for, shipping in 1.7
+
+**The question (owner, 2026-09-09, evening):** §136 dropped the larger-master path
+because two independently hinted bitmaps could not be reconciled glyph by glyph. The
+owner asked the obvious next thing: take the larger size and apply a *uniform*
+reduction to the whole font, so everything is sized the same way instead of each glyph
+being fitted to its own cell. That is a different construction from §130/§135 and it
+does not have their failure mode by design — a single factor keeps the master's own
+proportions, so the output can be no more uneven than the stock master already is.
+
+### 141.1 The construction
+
+For a font being scaled up, `master_factor()` is `font_scale` times the small font's
+total advance over A-Z and 0-9 divided by the master's, so a line of text comes out the
+width the plain resample would draw. Every glyph is then scaled by that one factor
+**about the pen origin**, not about its own cell, so every baseline and cap line lands
+at the same fractional phase. The glyph is placed in the plain resample's cell: the
+advance edge `round((x+w)*s)` and the baseline are kept exactly, the cell grows left or
+down where the ink needs it, and ink past the advance slides the glyph left rather than
+being cut. **Layout is therefore the plain resample's to the byte** — copp8's capitals
+still occupy 476 px of advance across A-Z either way — and nothing can overflow a field.
+
+### 141.2 Three bands, and why the middle one is empty
+
+The first cut used the §130 master rule (the smallest size whose *point number* reaches
+`size*scale`) and took any factor below the resample's. That gave copp8 — the HUD and
+sign font — `copp12 * 0.918`, and the owner saw it immediately: *"there were some
+noticeable artifacts on the sides of characters."* Measured, copp6 got **worse** than
+what it replaced (soft ink columns 16.5% -> 19.2%). The cause is the factor itself: at
+0.918 or 1.008 a box filter keeps every source pixel while blending roughly every other
+column and leaving the rest 1:1, so one glyph has crisp sides and the next has soft
+ones. So the factor decides which of three things happens:
+
+| band | what happens | why |
+|---|---|---|
+| `1.00 <= f <= 1.08` | **snap to exactly 1 and copy the master verbatim** | PopTop's own hinted bitmap, never resampled. The glyph lands a few percent smaller; that is the whole price. |
+| `f <= 0.92` | box downscale | a genuine downscale, which is what a box filter is for |
+| otherwise | no master, plain resample | the blend case above, or an upscale the resample already does |
+
+Snapping *up* is refused rather than banded: it would widen every string. A second guard
+covers the snap — the factor equals the *advances*, but the eye reads *cap height*, and
+two hinted sizes do not share a height-to-width ratio. copp8 from copp10 is 7.7% shorter
+and the owner passed it in game; copp6 from copp12 at 4K would be 10.0% shorter, past
+anything verified, so `MASTER_CAP_MAX` refuses it and the resample stands (at 2.0 that
+resample is an exact pixel double, so refusing costs nothing).
+
+**The master is chosen by measurement, not by name.** Every larger size of the face is a
+candidate; a verbatim band beats a downscale outright, and within a band the factor
+nearest 1 wins. §130 picked by the point number, and those numbers are not linear in
+pixels (§137.3) — which is exactly how copp8 ended up on copp12 at 0.918 instead of
+copp10 at 1.066. The family gate is §130's, unchanged, so a translation pack's repainted
+master scores far below it and the pack keeps the plain resample.
+
+Two details the construction needed. The tool's alpha-6 extent markers (§137.1) are
+dropped from the master before scaling; scaled with the glyph they became a phantom
+column past the advance and were most of the apparent overrun. And the lowercase slots
+are small caps, not placeholders (§140.3), drawn from the master like everything else.
+
+### 141.3 What each font does at 2560x1440, and what it bought
+
+Soft ink columns — a column no pixel fills, over A-Z and 0-9 — is the crispness measure;
+lower is better.
+
+| font | drawn from | resample | after |
+|---|---|---|---|
+| copp6 | copp8 verbatim (f 1.008, cap -2.5%) | 16.5% | 13.9% |
+| **copp8** | **copp10 verbatim (f 1.066, cap -7.7%)** | **16.2%** | **9.2%** |
+| comi07 | comi10 verbatim (f 1.023, cap -5.3%) | 12.7% | 7.9% |
+| comi08 | comi12 verbatim (f 1.017, cap -4.5%) | 10.7% | 7.0% |
+| comi10 | comi24 downscaled 0.618 | 10.2% | 8.1% |
+| comi12 | comi24 downscaled 0.720 | 8.2% | 7.9% |
+| cour03 | cour05 downscaled 0.874 | 14.3% | 12.8% |
+| copp10, cour05 | no usable master, plain resample | — | unchanged |
+
+copp8 is the HUD readouts and the town signs, the most-read text in the game, and it
+nearly halved. At 3840x2160 only comi07 and comi08 take a master (comi24 at 0.711 and
+0.824); everything else has none, and the plain resample there is a lossless pixel
+double. At 1920x1080 the scale is 1.0, no master is considered at all, and the emitted
+set is byte-identical to PopTop's — the native look is untouched, as always.
+
+**Owner, in game on the GOG copy at 1440p:** *"Oh, that's perfect now. It looks super
+sharp and clean everywhere I just looked."*
+
+### 141.4 The gates
+
+* **C against Python, byte for byte.** `dev/probes/artgen_set.c` (which includes
+  `proxy/artgen.c`, never a copy) against `tools/tropico-artset.py --font-master`:
+  **267 of 267 assets identical at 2560x1440, 267 of 267 at 3840x2160.** Both sides pick
+  the master through the same measurement, and the C calls `ag_pick_master()` — the
+  function the proxy calls — so the diff covers the selection as well as the pixels.
+* **Identity.** At 1600x1200 the C reproduces 260 of 260 archived files byte-identically;
+  fonts at scale 1.0 are still emitted untouched.
+* **The shipped DLL.** A rig run at 2560x1440 with the new `binkw32.dll` generated all
+  267 assets itself, and its `data/` matched the set the owner approved **0 of 267
+  differing**. Log lines name the master and the band per font. Shots
+  `rig-shots/dll-1440-*`; the earlier cuts are `um-`, `um2-`, `um3-1440-*`, and
+  `compare-um2-hud.png` / `money3.png` there are the before-and-after crops.
+* **4K, end to end with the shipped DLL** (owner's gate before merging). `rig-run.sh
+  dll-2160 3840x2160` on the GOG copy: the DLL generated all 267 assets itself in
+  2096 ms and its `data/` came out **byte-identical to the Python oracle's 4K set,
+  267 of 267**. Against a plain-resample set of the same mode, exactly two assets
+  differ -- `comi07` and `comi08`, both drawn down from `comi24` -- and everything
+  else, the HUD's Copperplate included, is the resample it always was. Text regions on
+  the map shot against the 1.7 control: HUD readouts 0 differing pixels, town sign 0,
+  and the tutorial box's 2762 are the terrain behind its transparent panel, the text
+  itself identical glyph for glyph. The `copp6 <- copp12` snap that `MASTER_CAP_MAX`
+  refuses (10.0% short) was the one regression the guard was added for.
+* **1920x1080, through the new code path.** Scale is 1.0, no master is considered, and
+  all 17 font assets in `data/` come out byte-identical to PopTop's own. The native
+  look cannot be touched by this path.
+
+The marker gains a `fonts uniform-master` line, so a set an older build left behind is
+rebuilt once on upgrade. No new ini key: the path is on wherever it measures well and
+off wherever it does not, which is the no-manual-setup rule.
+
+Reproduce: `dev/probes/artgen_set.c` and `tools/tropico-artset.py --font-master` as
+above, then `TROPICO_DIR=... dev/tools/rig-run.sh TAG 2560x1440 --dll proxy/binkw32.dll`.

@@ -29,7 +29,7 @@ command -v zip >/dev/null 2>&1 || { echo "!! zip is required for the Windows pac
 # mingw stamps each build, so two builds of identical source never compare equal --
 # rebuilding unconditionally would churn the shipped binary on every release for no
 # reason. Rebuild only when the source is actually newer than the artifact.
-if [ "$ROOT/proxy/tropico_fix.c" -nt "$ROOT/known-good/binkw32.dll" ]; then
+if [ "$ROOT/proxy/tropico_fix.c" -nt "$ROOT/known-good/binkw32.dll" ] || [ "$ROOT/proxy/artgen.c" -nt "$ROOT/known-good/binkw32.dll" ]; then
   "$ROOT/proxy/build.sh" >/dev/null
   cp "$ROOT/proxy/binkw32.dll" "$ROOT/known-good/binkw32.dll"
   echo "   known-good/binkw32.dll rebuilt: the source was newer"

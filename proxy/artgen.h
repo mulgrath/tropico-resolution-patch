@@ -42,6 +42,10 @@ typedef struct {
     unsigned *map;   size_t mapcap;
 } ag_index;
 
+/* What the master path did with one container, for the log. band: 0 none, 1 the
+ * master copied verbatim, 2 box-downscaled by `factor`. */
+typedef struct { int taken, slid, band; double factor, median; } ag_master_report;
+
 int  ag_index_load(ag_index *ix, const char *datadir);
 void ag_index_free(ag_index *ix);
 const ag_entry *ag_lookup(const ag_index *ix, const char *name);
@@ -69,22 +73,25 @@ void ag_assets_free(ag_assets *a);
 
 /* --- generation --------------------------------------------------------- */
 
-/* What a font took from its larger master, for the log: glyphs drawn from the
- * master, glyphs that kept the double, and the family's median shape score. */
-typedef struct { int taken, kept; double median; } ag_master_report;
-
 /* One container, rescaled. Returns a malloc'd buffer the caller frees, or NULL.
  * `from_w/from_h` is what the source class is authored for -- 1600x1200 for i16,
- * 640x480 for the menu assets. Fonts ignore it and take `font_scale` uniformly.
- * `master` is a larger size of the same font family, or NULL: with one, and a
- * font scale above 1, each glyph's pixels come from the master where the shape
- * check passes (FINDINGS 130) and the cell geometry stays what the scale gives.
- * NULL reproduces the plain resample byte for byte. `rep` may be NULL. */
+ * 640x480 for the menu assets. Fonts ignore it and take `font_scale` uniformly. */
 unsigned char *ag_rescale_container(const unsigned char *d, size_t len,
                                     int to_w, int to_h, int from_w, int from_h,
                                     double font_scale, int font_nn,
                                     const unsigned char *master, size_t master_len,
                                     ag_master_report *rep, size_t *out_len);
+
+/* Which larger size of the same face a font asset should be drawn from, if any.
+ * Returns an index into `as`, or -1. Names are <face><size>.i16 and the point number
+ * is NOT linear in pixels (FINDINGS 137.3), so every larger size is a candidate and
+ * the caller measures each one; this only enumerates them. */
+int ag_font_master_next(const ag_assets *as, size_t i, int after_size);
+
+/* Which master asset `i` should be drawn from, measured over the candidates rather
+ * than chosen by name. -> an index into `as`, or -1 for none. */
+int ag_pick_master(const ag_assets *as, size_t i,
+                   unsigned char *const *blob, const size_t *blen, double font_scale);
 
 /* The whole set: harvest, resolve, generate, write loose files into <gamedir>\data,
  * then the manifest and the marker. Returns the number of assets written, or -1.
@@ -98,7 +105,7 @@ int ag_set_is_current(const char *gamedir, int to_w, int to_h, double font_scale
 
 /* The marker text a set for this mode over these archives carries: "WxH" on the
  * first line (what tools/tropico-setmode.sh and the proxy's cross-check read), then
- * one "name size" line per archive in index order, then the generator revision. */
+ * one "name size" line per archive in index order. */
 int ag_marker_text(const char *datadir, int to_w, int to_h, char *out, size_t n);
 
 #endif
