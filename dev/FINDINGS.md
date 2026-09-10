@@ -12655,9 +12655,19 @@ sharp and clean everywhere I just looked."*
   differing**. Log lines name the master and the band per font. Shots
   `rig-shots/dll-1440-*`; the earlier cuts are `um-`, `um2-`, `um3-1440-*`, and
   `compare-um2-hud.png` / `money3.png` there are the before-and-after crops.
-* **4K.** `um-2160` against `stock2-2160`: no text region changed except where comi07/08
-  appear; the HUD and settings regions are 0 differing pixels. The `copp6 <- copp12`
-  snap that `MASTER_CAP_MAX` refuses was the one regression the guard was added for.
+* **4K, end to end with the shipped DLL** (owner's gate before merging). `rig-run.sh
+  dll-2160 3840x2160` on the GOG copy: the DLL generated all 267 assets itself in
+  2096 ms and its `data/` came out **byte-identical to the Python oracle's 4K set,
+  267 of 267**. Against a plain-resample set of the same mode, exactly two assets
+  differ -- `comi07` and `comi08`, both drawn down from `comi24` -- and everything
+  else, the HUD's Copperplate included, is the resample it always was. Text regions on
+  the map shot against the 1.7 control: HUD readouts 0 differing pixels, town sign 0,
+  and the tutorial box's 2762 are the terrain behind its transparent panel, the text
+  itself identical glyph for glyph. The `copp6 <- copp12` snap that `MASTER_CAP_MAX`
+  refuses (10.0% short) was the one regression the guard was added for.
+* **1920x1080, through the new code path.** Scale is 1.0, no master is considered, and
+  all 17 font assets in `data/` come out byte-identical to PopTop's own. The native
+  look cannot be touched by this path.
 
 The marker gains a `fonts uniform-master` line, so a set an older build left behind is
 rebuilt once on upgrade. No new ini key: the path is on wherever it measures well and
