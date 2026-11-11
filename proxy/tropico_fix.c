@@ -434,7 +434,8 @@ static const DWORD TABLE_SIG[10] = {640,480, 800,600, 1024,768, 1280,1024, 1600,
  *   the HUD/background art is drawn at the slot's STOCK width, so the target
  *        width must not exceed it -- 1600 for slot 4.  This is the hard ceiling
  *        on widescreen and the reason slot 4 is the only usable home.
- *   width % 4 == 0, else the row pitch is padded and the image shears.
+ *   width % 4 == 0, else the row pitch is padded and the image shears -- relaxed
+ *        to an even width under Wine, where pitch_fix() makes the pitch exact.
  *   the compare-chain dispatches on width and rejects on a height mismatch
  *        rather than falling through, so widths must be unique across slots.
  *   the mode must actually exist, or the game cannot set it.
@@ -579,6 +580,16 @@ static int collides_with_stock(DWORD w)
     return w == 640 || w == 800 || w == 1024 || w == 1280;
 }
 
+/* The width rule, in one place. A width that is not a multiple of 4 gets its rows
+ * padded by DirectDraw and used to shear (FINDINGS 10). Under Wine pitch_fix() gives
+ * the engine's surface an exact pitch, which needs only a DWORD-aligned row -- any
+ * EVEN width -- so 1366x768 is usable there (FINDINGS 142). On native Windows the
+ * old rule stands until the same measurement has been made there. */
+static DWORD width_step(void)
+{
+    return running_under_wine() ? 2 : 4;
+}
+
 /* ---------------------------------------------- art sets: GENERATED, not staged
  *
  * An earlier version of this logic used to live here: the installer staged one set per connected monitor into
@@ -631,7 +642,7 @@ static int pick_mode_pass(mode_t *out, int capped)
         if (!EnumDisplaySettingsA(NULL, i, &dm)) break;
         DWORD w = dm.dmPelsWidth, h = dm.dmPelsHeight;
         if (!w || !h) continue;
-        if (w % 4) continue;                       /* pitch shear              */
+        if (w % width_step()) continue;            /* pitch shear              */
         /* Two passes. The stock-art caps below are a ROUGH PROXY for "does art
          * exist at this size" -- they were written before art was generated per mode,
          * and they now reject 2560x1440 outright (h > 1200) even when its art set is
@@ -742,7 +753,11 @@ static int ini_override(mode_t *m)
     UINT w, h;
     if (!ini_named(&w, &h)) return 0;
     if (g_ini_mode_unusable) return 0;   /* does not fit this screen -- see above */
-    if (w % 4) { logf_("  ini: width %u is not a multiple of 4 -- ignoring (would shear)", w); return 0; }
+    if (w % width_step()) {
+        logf_("  ini: width %u is not a multiple of %lu -- ignoring (would shear)",
+              w, (unsigned long)width_step());
+        return 0;
+    }
     if (collides_with_stock(w)) { logf_("  ini: width %u collides with a stock slot -- ignoring (would be unreachable)", w); return 0; }
     /* The stock art cap describes STOCK art, and the generator replaces stock art at
      * whatever size we are about to use -- so past the cap is only a problem when
@@ -796,9 +811,14 @@ static void ini_fit_check(void)
      * native Windows (FINDINGS 132), so dw/dh here are the panel's and the "larger
      * than the desktop" line below fires only when awareness could not be declared.
      *
-     * Under Wine the list is whatever the X screen or virtual desktop allows, and
-     * the two numbers agree, so the desktop comparison below is kept there as the
-     * exact check it always was. */
+     * Under Wine the desktop comparison below runs first, because its diagnosis of a
+     * mode that does not fit (wrong monitor, scaled adapter) is the useful one there.
+     * But FITTING IS NOT BEING AVAILABLE: Proton on a 1366x768 screen lists no
+     * 1360x768 at all and refuses it with DDERR_UNSUPPORTED, so a typed 1360x768
+     * passed the desktop check, went into slot 4, and played the intro over black
+     * (FINDINGS 142). So under Wine a size that fits must also be listed. Under the
+     * GOG launcher's virtual desktop that always holds -- Wine lists the desktop's
+     * own size, and the launcher sizes the desktop to the ini (FINDINGS 7). */
     if (!running_under_wine()) {
         DEVMODEA dm; DWORD i, mw = 0, mh = 0;
         /* The monitor the game will open on when one has been chosen (win32_outputs
@@ -830,7 +850,26 @@ static void ini_fit_check(void)
         }
         /* No mode list at all: fall through to the desktop comparison. */
     }
-    if (!(iw > dw || ih > dh)) return;
+    if (!(iw > dw || ih > dh)) {
+        if (running_under_wine()) {
+            DEVMODEA dm; DWORD i;
+            for (i = 0; ; i++) {
+                memset(&dm, 0, sizeof dm); dm.dmSize = sizeof dm;
+                if (!EnumDisplaySettingsA(NULL, i, &dm)) break;
+                if ((int)dm.dmPelsWidth == iw && (int)dm.dmPelsHeight == ih) return;
+            }
+            if (i > 0) {
+                logf_("[x] CONFIGURED MODE IS NOT ONE THIS SCREEN OFFERS. tropico-fix.ini"
+                      " asks for %dx%d; it fits the %dx%d screen, but Wine lists no mode"
+                      " of that size, so asking for it would render nothing at all -- you"
+                      " would hear the intro over a black screen.", iw, ih, dw, dh);
+                logf_("    Ignoring the configured mode and picking one that fits. To play"
+                      " at the screen's own size, leave [Resolution] commented out.");
+                g_ini_mode_unusable = 1;
+            }
+        }
+        return;
+    }
 
     /* THE MODE MUST FIT THE SCREEN IT WILL RUN ON. When it does not, the game asks
      * for a mode larger than its desktop and renders NOTHING -- the intro audio
@@ -1273,7 +1312,14 @@ static void apply_patches(void)
     /* --- 4. slot 4, in BOTH tables ----------------------------------------- *
      * Patching the data table alone is not enough. A parallel
      * mapping lives in code and silently drops any mode it does not recognise. */
-    mode_t m;
+    /* Zeroed, and `have_mode` says whether it was ever filled. Everything below that
+     * sizes something FROM the mode is gated on it. FINDINGS 142: a 1366x768 screen
+     * under Proton offered no usable mode, decide_mode() failed, and the patch went on
+     * to aim the world painter with stack garbage ("viewport width 1600 ->
+     * 2076138895") and to send the menu to the stock 1600x1200 slot on a 768-high
+     * screen -- the intro's audio over black. No mode must mean the stock game. */
+    mode_t m = {0, 0};
+    int have_mode = 0;
     {
         /* Read before the picker runs -- it is the picker's behaviour this changes. */
         char ip3[MAX_PATH];
@@ -1281,8 +1327,12 @@ static void apply_patches(void)
         g_artgen_enabled = GetPrivateProfileIntA("Art", "Generate", 1, ip3);
     }
     if (!decide_mode(&m)) {
-        logf_("[-] no mode satisfied the constraints; leaving slot 4 stock (1600x1200)");
+        logf_("[-] no mode satisfied the constraints; leaving slot 4 stock (1600x1200)"
+              " and running the STOCK game -- the world painter is not patched and the"
+              " menu stays at its own 640x480. The lines above say which modes were"
+              " refused and why.");
     } else {
+        have_mode = 1;
         /* An earlier fallback art-switch used to sit here: on the path where the configured
          * mode did not fit, the staged art was for the unusable mode and had to be
          * swapped for a different staged set. There is nothing to swap now -- whatever
@@ -1358,7 +1408,10 @@ static void apply_patches(void)
     {
         char ip[MAX_PATH];
         snprintf(ip, sizeof ip, "%s\\tropico-fix.ini", g_dir);
-        if (GetPrivateProfileIntA("WorldFix", "Enable", 1, ip)) {
+        if (!have_mode) {
+            if (GetPrivateProfileIntA("WorldFix", "Enable", 1, ip))
+                logf_("  [world] no mode was chosen -- the world painter is left stock");
+        } else if (GetPrivateProfileIntA("WorldFix", "Enable", 1, ip)) {
             UINT mw = (UINT)GetPrivateProfileIntA("WorldFix", "Match", 1600, ip);
             UINT nw = (UINT)GetPrivateProfileIntA("WorldFix", "Width", 0, ip);
             if (!nw) nw = (UINT)m.w;
@@ -1462,6 +1515,16 @@ static void apply_patches(void)
                       " the menu will fail to open its art (run tropico-install.sh)", g_menu_slot);
             else if (!have_menu_art)
                 logf_("  [menu] no synthesised menu art; leaving the menu at stock 640x480");
+            /* Slot 4 is only worth sending the menu to when THIS run put a mode in it.
+             * Otherwise it holds the stock 1600x1200, which a small screen cannot show
+             * -- and the menu is the first thing drawn, so that is a black screen with
+             * the intro playing over it. An explicit Slot= is still honoured. */
+            if (!have_mode && g_menu_slot == 4 &&
+                GetPrivateProfileIntA("Menu", "Slot", -1000, ip) == -1000) {
+                g_menu_slot = -1;
+                logf_("  [menu] no mode was chosen, so slot 4 is stock 1600x1200 -- leaving"
+                      " the menu at stock 640x480 rather than sending it there");
+            }
         }
 
         /* The frontend preset. Installed whenever the menu slot is redirected
@@ -1564,7 +1627,9 @@ static void apply_patches(void)
             g_vt_boxdy = GetPrivateProfileIntA("VText", "BoxDY", vt_dialled ?  -99 : 0, ip);
             g_vt_boxdx = GetPrivateProfileIntA("VText", "BoxDX", vt_dialled ?  -14 : 0, ip);
             g_vt_entry = GetPrivateProfileIntA("VText", "Entry", vt_dialled, ip);
-            if (!vt_dialled && !g_vt_boxh && !g_vt_boxdy)
+            if (!g_mode_w && !g_vt_boxh && !g_vt_boxdy)
+                logf_("  [vtext] no mode was chosen -- rotated labels left stock");
+            else if (!vt_dialled && !g_vt_boxh && !g_vt_boxdy)
                 logf_("[-] [vtext] no dials for %ux%u (aspect %.4f; only 16:9 is confirmed)"
                       " -- rotated labels left STOCK and will overhang. A set for this"
                       " aspect can likely be derived the same way the 16:9 one was, but it"
@@ -2280,6 +2345,89 @@ static void ddw_hook_vtable(IDirectDrawSurface7 *s)
     }
 }
 
+/* ------------------------------------------------------ the row-pitch fix
+ *
+ * WHY 1366 SHEARED, AND WHY IT NEED NOT. The engine renders every frame into ONE
+ * system-memory offscreen surface and addresses it as base + (width*y + x)*2 -- it
+ * never reads lPitch (FINDINGS 10, 36, 115.4). DirectDraw pads a 16bpp row to 8
+ * bytes, so at a width that is not a multiple of 4 (1366: 2732 -> 2736 bytes) every
+ * row lands 4 bytes further right than the engine thinks, and the picture shears.
+ *
+ * The engine's assumption is made TRUE rather than the engine changed: the surface is
+ * given memory we allocate, with pitch exactly width*2, through SetSurfaceDesc --
+ * DirectDraw's own facility for caller-owned surface memory. Blt to the primary reads
+ * the surface through its real pitch and writes the primary through ITS real pitch,
+ * so the padding on the screen side is DirectDraw's business and is handled.
+ * Measured under Proton (FINDINGS 142): at 1358, 1362 and 1366 the surface locks with
+ * our pointer and pitch, and a pattern written the engine's way survives Blt into a
+ * padded surface with 0 wrong pixels out of ~1M.
+ *
+ * The memory is the surface's for good: the engine keeps writing through the pointer
+ * (the cursor family included) and it must stay valid as long as the surface can be
+ * locked. It is never freed -- a surface is created per mode set, a handful per
+ * session at ~2 MB each -- which is a deliberate trade for not tracking Release.
+ *
+ * INERT AT EVERY WIDTH THAT WAS ALREADY LEGAL. It acts only when DirectDraw actually
+ * padded the row, which no multiple-of-4 width does, so 1080p/1440p/4K runs are the
+ * same calls as before. */
+static void pitch_fix(IDirectDrawSurface7 *s, const DDSURFACEDESC2 *desc)
+{
+    DDSURFACEDESC2 sd, nd;
+    DWORD rowb;
+    LONG pitch = 0;
+    void *mem;
+    HRESULT hr;
+
+    if (!(desc->dwFlags & DDSD_CAPS) || (desc->ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE))
+        return;
+    memset(&sd, 0, sizeof sd); sd.dwSize = sizeof sd;
+    if (IDirectDrawSurface7_GetSurfaceDesc(s, &sd) != DD_OK) return;
+    if (!(sd.ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY)) return;
+    if (sd.ddpfPixelFormat.dwRGBBitCount != 16 || !sd.dwWidth || !sd.dwHeight) return;
+    rowb = sd.dwWidth * 2;
+    if (sd.dwFlags & DDSD_PITCH) pitch = sd.lPitch;
+    else {
+        DDSURFACEDESC2 ld; memset(&ld, 0, sizeof ld); ld.dwSize = sizeof ld;
+        if (IDirectDrawSurface7_Lock(s, NULL, &ld, DDLOCK_WAIT, NULL) != DD_OK) return;
+        pitch = ld.lPitch;
+        IDirectDrawSurface7_Unlock(s, NULL);
+    }
+    if (pitch == (LONG)rowb) return;                 /* nothing padded: the usual case */
+
+    if (rowb % 4) {
+        logf_("[x] [pitch] a %lux%lu 16bpp surface has pitch %ld, not %lu, and an odd width"
+              " cannot be given a DWORD-aligned exact pitch -- THE PICTURE WILL SHEAR",
+              (unsigned long)sd.dwWidth, (unsigned long)sd.dwHeight, (long)pitch,
+              (unsigned long)rowb);
+        return;
+    }
+    mem = VirtualAlloc(NULL, (SIZE_T)rowb * sd.dwHeight, MEM_COMMIT | MEM_RESERVE,
+                       PAGE_READWRITE);
+    if (!mem) {
+        logf_("[x] [pitch] could not allocate %lu bytes for a %lux%lu surface -- THE"
+              " PICTURE WILL SHEAR", (unsigned long)(rowb * sd.dwHeight),
+              (unsigned long)sd.dwWidth, (unsigned long)sd.dwHeight);
+        return;
+    }
+    memset(&nd, 0, sizeof nd); nd.dwSize = sizeof nd;
+    nd.dwFlags = DDSD_LPSURFACE | DDSD_PITCH | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    nd.dwWidth = sd.dwWidth; nd.dwHeight = sd.dwHeight;
+    nd.lPitch = (LONG)rowb; nd.lpSurface = mem;
+    nd.ddpfPixelFormat = sd.ddpfPixelFormat;
+    hr = IDirectDrawSurface7_SetSurfaceDesc(s, &nd, 0);
+    if (hr != DD_OK) {
+        VirtualFree(mem, 0, MEM_RELEASE);
+        logf_("[x] [pitch] SetSurfaceDesc refused an exact pitch for the %lux%lu surface"
+              " (0x%08lx) -- THE PICTURE WILL SHEAR", (unsigned long)sd.dwWidth,
+              (unsigned long)sd.dwHeight, (unsigned long)hr);
+        return;
+    }
+    logf_("[+] [pitch] %lux%lu 16bpp surface %p: DirectDraw padded its rows to %ld bytes;"
+          " given its own memory at exactly %lu, the width the engine assumes",
+          (unsigned long)sd.dwWidth, (unsigned long)sd.dwHeight, (void *)s, (long)pitch,
+          (unsigned long)rowb);
+}
+
 /* Which surface the per-frame Blt will be aimed at -- the one thing both consumers
  * need from CreateSurface. The descriptor is forwarded EXACTLY as the game wrote
  * it and the surface that comes back is the game's own; all this does is remember
@@ -2292,6 +2440,8 @@ static HRESULT WINAPI hook_CreateSurface(IDirectDraw7 *self, DDSURFACEDESC2 *des
     HRESULT hr = g_real_cs(self, desc, out, unk);
 
     if (hr != DD_OK || !desc || !out || !*out) return hr;
+
+    pitch_fix(*out, desc);
 
     /* Before the primary-surface test, not after it: the failure watch wants the
      * offscreen surface the engine Locks every frame just as much as the primary,
@@ -5096,9 +5246,14 @@ static int patch_menu_apply(void)
     { DWORD r = (DWORD)(SIZE_T)(tr - (entry + 5)); memcpy(det + 1, &r, 4); }
     det[5] = det[6] = det[7] = 0x90;   /* pad the 3 bytes the jmp does not cover */
     if (!poke(entry, det, 8)) { logf_("[x] [menu] VirtualProtect failed"); return 0; }
-    logf_("[+] [menu] apply-video %08lx detoured -> %p"
-          " (frontend preset -> slot %d, so the menu survives a return from a map)",
-          (unsigned long)g_applyvideo_va, (void *)tr, g_menu_slot);
+    if (g_menu_slot >= 0)
+        logf_("[+] [menu] apply-video %08lx detoured -> %p"
+              " (frontend preset -> slot %d, so the menu survives a return from a map)",
+              (unsigned long)g_applyvideo_va, (void *)tr, g_menu_slot);
+    else
+        logf_("[+] [menu] apply-video %08lx detoured -> %p (for the fullscreen fix; the"
+              " frontend preset is left at its own slot)",
+              (unsigned long)g_applyvideo_va, (void *)tr);
     return 1;
 }
 
