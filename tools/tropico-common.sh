@@ -108,8 +108,10 @@ tropico_validate_mode() {
   _w="$1"; _h="$2"
   case "$_w" in *[!0-9]*|'') echo "width '$_w' is not a number" >&2; return 1;; esac
   case "$_h" in *[!0-9]*|'') echo "height '$_h' is not a number" >&2; return 1;; esac
-  # A width that is not a multiple of 4 pads the row pitch and shears.
-  [ $((_w % 4)) -eq 0 ] || { echo "width $_w must be a multiple of 4" >&2; return 1; }
+  # A width that is not a multiple of 4 pads the row pitch, and used to shear. The
+  # proxy now gives the engine's surface an exact pitch under Wine (FINDINGS 142),
+  # which needs only a DWORD-aligned row: any even width, 1366 included.
+  [ $((_w % 2)) -eq 0 ] || { echo "width $_w must be even" >&2; return 1; }
   # The mode compare-chain dispatches on width, so ours must not collide
   # with a stock slot's or it becomes unreachable.
   case "$_w" in 640|800|1024|1280)

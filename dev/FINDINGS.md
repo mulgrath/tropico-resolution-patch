@@ -12675,3 +12675,101 @@ off wherever it does not, which is the no-manual-setup rule.
 
 Reproduce: `dev/probes/artgen_set.c` and `tools/tropico-artset.py --font-master` as
 above, then `TROPICO_DIR=... dev/tools/rig-run.sh TAG 2560x1440 --dll proxy/binkw32.dll`.
+
+## 142. 1366x768 plays natively under Proton: the engine's surface is given an exact pitch
+
+**The report (user, 2026-11-10):** *"it doesn't work with 1366x768 resolution on linux. I
+tried manually edit it into 1360x768 but then it doesn't start anything except of the
+sounds at all."* Steam edition. Reproduced on the owner's new machine (Bazzite, Proton-
+CachyOS 11.0) by giving the game a faked one-monitor screen through gamescope:
+`gamescope -W 1366 -H 768 -w 1366 -h 768 -f -- %command%` as the Steam launch option.
+gamescope's `-w/-h` is the screen the game sees, `-W/-H` the output it is scaled to, so
+any panel can be stood in for without owning one.
+
+### 142.1 What Proton offers a 1366x768 screen -- MEASURED
+
+`dev/probes/modeprobe.c`, in the game's own prefix and screen:
+
+```
+EnumDisplaySettings / EnumDisplayModes, 16bpp, above 1280:  1366x768   -- nothing else
+SetDisplayMode(1366,768,16) OK
+SetDisplayMode(1364|1360|1368|1356|1352|1344|1336, 768, 16)  DDERR_UNSUPPORTED
+```
+
+No virtual desktop on Steam, and Proton synthesises no mode the screen lacks. So the only
+mode wider than slot 3's 1280 is the one §10 said shears. Below it the list is the usual
+scaled set (1280x720, 1152x720, 1024x768, ...).
+
+### 142.2 Two black screens, both ours
+
+Both are the intro's audio over black, the §99/§108 signature, and neither is the shear:
+
+* **No `[Resolution]`.** The picker found 0 candidates and `decide_mode()` failed -- and
+  the patch pass carried on regardless. The world painter was aimed from an uninitialised
+  `mode_t` (`viewport width 1600 -> 2076138895`, `image pixel height 864 -> 184`), and the
+  menu was still redirected to slot 4, which in that case held the stock 1600x1200 -- on a
+  768-high screen. **Fixed:** `m` is zeroed, `have_mode` gates the world painter, and the
+  menu redirect is dropped (unless `[Menu] Slot` is explicit) when this run put no mode in
+  slot 4. No mode now means the stock game. Measured with a 1280x720 screen: `12 applied, 0
+  failed`, world and menu left stock, no Blt/Lock failure after the watch armed.
+* **`[Resolution]` 1360x768.** Under Wine `ini_fit_check()` compared the typed size with the
+  desktop only, on the stated premise that Wine's list and desktop agree. 1360x768 fits a
+  1366x768 desktop, went into slot 4, and was refused by `SetDisplayMode`. **Fixed:** under
+  Wine a size that fits must also be listed; otherwise it is refused with the reason and
+  the picker chooses. Measured: `CONFIGURED MODE IS NOT ONE THIS SCREEN OFFERS ... the
+  picker chose 1366x768 instead`. The GOG launcher is unaffected -- Wine lists its virtual
+  desktop's own size (§7) and the launcher sizes the desktop to the ini.
+
+### 142.3 The pitch rule, re-measured: 8 bytes, so width % 4 was right
+
+§10 inferred `width % 4` from one failing width, which could not tell an 8-byte rule from a
+16-byte one. `modeprobe.c` locks 16bpp system-memory surfaces at every width from 1336 to
+1368 under Proton: padding is exactly `round_up(w*2, 8) - w*2`. 1364 is clean; 1358, 1362
+and 1366 pad by 4. The rule stood; it just was not proven until now.
+
+### 142.4 The fix: make the engine's assumption true, not the engine different
+
+The engine renders each frame into ONE system-memory offscreen surface and addresses it as
+`base + (width*y + x)*2` (§36, §115.4) -- it never reads `lPitch`. DirectDraw 7 has a
+supported way to give a system-memory surface caller-owned memory with a caller-chosen
+pitch: `DDSD_LPSURFACE | DDSD_PITCH`, at `CreateSurface` or through `SetSurfaceDesc`. The
+pitch must be DWORD-aligned, so `w*2` qualifies for any even width.
+
+`dev/probes/pitchprobe.c`, both routes, under Proton: at 1358, 1362 and 1366 the surface
+locks with our pointer and pitch `w*2`; a pattern written the engine's way survives `Blt`
+into an ordinary padded surface with **0 wrong pixels of ~1.05M**.
+
+`pitch_fix()` runs in the existing `hook_CreateSurface`: for a 16bpp system-memory surface
+whose pitch came back padded, it allocates `w*2*h` and attaches it with `SetSurfaceDesc`.
+It acts only where DirectDraw padded, so every width that was already legal makes exactly
+the calls it made before. The memory is never freed (one surface per mode set, ~2 MB):
+the engine keeps writing through the pointer, cursor family included, and tracking
+`Release` was not worth it. The width rule (`width_step()`, `tropico_validate_mode`) is
+relaxed to an even width under Wine; native Windows keeps `% 4` until measured there.
+
+### 142.5 In game
+
+* **1366x768, no `[Resolution]`** (owner, Steam via gamescope): the picker chose 1366x768,
+  art generated (font scale 0.711, 267 assets), `18 applied, 0 failed`, one line
+  `[pitch] 1366x768 16bpp surface ...: padded its rows to 2736 bytes; given its own memory
+  at exactly 2732`. *"The game works and looks good."* First mode below 1080p verified
+  since art generation moved into the proxy.
+* **1360x768 through gamescope on a 1366 output** (owner): also fine. Kept as the
+  workaround for the 1.7 release.
+* **2560x1440 regression:** `main` and this build, same toolchain, same faked screen. The
+  logs differ only in art-generation lines (the first run rebuilt the set); no `[pitch]`
+  line, slot, painter, menu and dial lines identical.
+
+### 142.6 Open
+
+* **HUD movie at 1366: a horizontal line where a few rows seem missing.** Owner-reported,
+  minor. Not seen at 1360x768 on the same output. Not yet told apart: the width (1366 vs
+  1360) or the pitch fix. The discriminating run is 1364 (multiple of 4, fix inert) versus
+  1362 (fix active), with gamescope screenshots (Super+S). A pitch mismatch would slant
+  the whole movie rather than drop rows in one place, so the scaler is the first suspect.
+* **Native Windows** still refuses widths that are not a multiple of 4. Whether Windows'
+  DirectDraw pads the same way and accepts caller memory is one `pitchprobe` run on the
+  dual-boot; if it does, `width_step()` loses its Wine condition.
+* **Toolchain.** The build is reproducible per toolchain, not across them: GCC 16.2.1
+  (Fedora 45 mingw) builds `main` to 218,638 bytes against the shipped 197,134 from Pop!_OS
+  24.04. The README's hash check holds only on the toolchain the release was built with.

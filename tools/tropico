@@ -197,8 +197,9 @@ MONITOR="$(tropico_outputs | awk '$3=="primary"{print $1; exit}')"
 if [ -z "$WANT" ]; then
   fail "Could not read any monitor's resolution. Is xrandr installed, and is DISPLAY set?"
 fi
-# A monitor whose own mode the patch cannot use -- a width that is not a multiple of
-# 4 shears, 1366x768 being the common case -- stops here.
+# A monitor whose own mode the patch cannot use -- an ODD width, which no exact row
+# pitch can serve -- stops here. 1366x768 is fine since FINDINGS 142: the proxy gives
+# the engine's surface an exact pitch, so any even width plays.
 #
 # There used to be a fallback on this branch: `tropico_best_mode` was to pick the
 # largest mode the monitor actually offers. It is DEFINED NOWHERE and never was, and
